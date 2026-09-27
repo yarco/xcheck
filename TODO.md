@@ -23,3 +23,10 @@
 - Web in peers: default `packet` or `live`.
 - Herdr wall: rendered event stream (current) or real vendor TUIs.
 - Codex orchestrator support in v2 (today: `../x-check-old/`).
+
+## Verification cross-check (v2 on itself) — launched 2026-09-27
+
+- BASE: `/tmp/agent-offload/xcheck-v2-verify-20260927`; target: v2 at b19f5a3; ledgers in `evidence/ledger/` (REQUIREMENTS, DECISIONS D1–D26, GAPS), measurements M1–M13
+- Proof: `evidence/manifest-tail.txt` (MANIFEST_TAIL_TOKEN: c0c285107e847f41667f584f)
+- Roster: default minus claude (codex-gpt-6-sol-high, grok-4.7-xhigh, agy-gemini-3.1-pro-high, agy-gemini-3.8-flash-high, agy-claude-sonnet-4-6); web live; capacity per lane
+- Command: `xcheck run --base /tmp/agent-offload/xcheck-v2-verify-20260927 --orch claude` (background job); resume: `xcheck wait --base /tmp/agent-offload/xcheck-v2-verify-20260927`
