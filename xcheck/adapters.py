@@ -138,6 +138,51 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, web: bool) -> Lau
     raise ValueError(f"unknown kind {lane.kind}")
 
 
+def tui(lane: Lane, work: Path, message: str, web: bool) -> Launch:
+    """The harness's interactive app, started with its initial prompt as an
+    argument, so nothing is typed into it. The lane answers by writing
+    ANSWER.md in `work`; the runner publishes it. Used for the Herdr wall."""
+    if lane.kind == "claude":
+        tools = "Read,Write,WebSearch,WebFetch" if web else "Read,Write"
+        argv = [
+            "claude", "--restricted", "--permission-mode", "dontAsk",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            "--tools", tools, "--allowedTools", tools, "--add-dir", str(work),
+            "--model", lane.model, "--effort", lane.effort, message,
+        ]
+        return Launch(argv, None)
+    if lane.kind == "codex":
+        argv = [
+            "codex", "-s", "workspace-write", "-a", "never", "-C", str(work),
+            "-m", lane.model, "-c", f'model_reasoning_effort="{lane.effort}"',
+            "-c", 'history.persistence="none"',
+            # The TUI asks to trust every new directory; trust this exact one
+            # for this process only, with no config-file edit.
+            "-c", f'projects."{work}".trust_level="trusted"',
+            "-c", f'web_search="{"live" if web else "disabled"}"',
+            message,
+        ]
+        return Launch(argv, None)
+    if lane.kind == "grok":
+        # The TUI ignores --tools (user-guide 14); deny rules do apply.
+        argv = [
+            "grok", "-m", lane.model, "--reasoning-effort", lane.effort, "--cwd", str(work),
+            "--deny", "MCPTool(*)", "--deny", "Bash",
+            "--no-subagents", "--no-plan", "--no-auto-update",
+            "--sandbox", "read-only", "--always-approve", message,
+        ]
+        if not web:
+            argv.insert(-1, "--disable-web-search")
+        return Launch(argv, None, env_set={"GROK_MEMORY": "0"})
+    if lane.kind == "agy":
+        argv = [
+            "agy", "--sandbox", "--dangerously-skip-permissions", "--mode", "accept-edits",
+            "--model", lane.model, "-i", message,
+        ]
+        return Launch(argv, None)
+    raise ValueError(f"unknown kind {lane.kind}")
+
+
 # Flags each adapter relies on, for `xcheck doctor` (help-text drift check).
 HELP_COMMANDS = {
     "codex": (["codex", "exec", "--help"], ["--skip-git-repo-check", "--ephemeral",

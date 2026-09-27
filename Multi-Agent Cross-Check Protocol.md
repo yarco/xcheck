@@ -245,19 +245,31 @@ session; its rendered view goes to `lanes/<lane>/view.log`.
 layout` answers, and the tab is at least 176×14. The first lane splits right of
 the orchestrator (`--ratio 0.62`, orchestrator keeps 62 %); the others split
 down that column into equal rows, top-to-bottom in roster order. Each pane is
-titled `xcheck:<lane>` and runs the same lane runner with `pane run`, so it
-shows the harness's live tool calls and text. Completion is the lane's
-`exit.json`, never pane text. After a lane ends its pane lingers 3 s, then the
-supervisor closes it, only if it is still in the caller's tab. The wall shows a
-rendered event stream, not the vendor's interactive TUI.
+titled `xcheck:<lane>` and runs the lane runner with `pane run`.
 
-What that means in practice: each pane runs the same harness (Codex, Claude,
-Grok, Agy) in its non-interactive mode and shows what it does as it happens:
-every file it reads, every command and search, and its text. You cannot type
-into a peer mid-run; you watch it. v1 instead started the interactive app and
-typed the prompt into it, which is where splash screens, trust dialogs,
-surveys, composer readiness, swallowed prompts and quota modals came from (most
-of v1's `herdr-host`). None of those exist here.
+**Views.** `--view tui` (default in Herdr): each pane shows the harness's own
+interactive app, full screen. The runner starts it in a pseudo-terminal it
+owns, with the initial prompt as a command-line argument (`claude "…"`,
+`codex "…"`, `grok "…"`, `agy -i "…"`), so nothing is typed into the app and
+there is no readiness to detect. The app's output reaches the pane unchanged
+and the operator's keystrokes reach the app. The lane answers by writing
+`ANSWER.md` in its workspace; the runner publishes it once its last line is
+`RESULT_COMPLETE` (or `RESULT_INVALID`) and it has not changed for 3 s, then
+ends the app. A lane that stops drawing for `--idle` (a static dialog, a quota
+modal) times out with its last screen in `exit.json`. `--view stream`
+(default headless): the harness's non-interactive mode, rendered from its
+structured event stream; the answer is its final message. Completion is
+always the lane's `exit.json`, never pane text. After a lane ends its pane
+lingers 3 s, then the supervisor closes it, only if it is still in the
+caller's tab and is not the caller.
+
+TUI-mode flags per harness live in `xcheck/adapters.py` (`tui`): Claude adds
+`Write` to its tools; Codex runs `-s workspace-write -a never` and trusts the
+lane's exact directory with `-c projects."<dir>".trust_level="trusted"` (no
+config edit); Grok uses `--deny Bash --deny 'MCPTool(*)'` because its TUI
+ignores `--tools`, with the `read-only` sandbox (writes allowed only in
+`~/.grok` and tmp, where the workspace is); Agy runs `--sandbox
+--dangerously-skip-permissions --mode accept-edits -i`.
 
 If the supervisor dies in Herdr mode the panes keep running and finish on
 their own. `xcheck wait --base B` reattaches, waits, renders status and closes

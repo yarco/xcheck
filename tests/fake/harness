@@ -40,6 +40,24 @@ if mode == "slow":
 if os.environ.get("FAKE_ENV_DUMP"):
     Path(os.environ["FAKE_ENV_DUMP"]).with_suffix(f".{kind}.json").write_text(json.dumps(dict(os.environ)))
 
+# Interactive (TUI) invocations: the app writes ANSWER.md in its cwd, then idles
+# like a real TUI waiting for the next prompt.
+tui = {"claude": "-p" not in argv, "codex": "exec" not in argv,
+       "grok": "--prompt-file" not in argv, "agy": "-i" in argv}[kind]
+if tui:
+    print(f"\x1b[2J\x1b[H\x1b[1mfake {kind} TUI\x1b[0m\r\nworking on the review…\r", flush=True)
+    target = Path(argv[argv.index("-C") + 1]) if kind == "codex" else Path.cwd()
+    if mode == "error":
+        print("You've hit your limit · resets 7pm\r", flush=True)
+    elif mode == "slowwrite":
+        (target / "ANSWER.md").write_text("### 1) VERDICT\npartial draft")
+        time.sleep(2)
+        (target / "ANSWER.md").write_text(f"### 1) VERDICT\nThe claim holds after a rewrite.\n6) PROOF: {token}\nRESULT_COMPLETE\n")
+    elif mode != "hang":
+        (target / "ANSWER.md").write_text(answer or "")
+    time.sleep(60)
+    sys.exit(0)
+
 if mode == "hang":
     time.sleep(60)
     sys.exit(0)

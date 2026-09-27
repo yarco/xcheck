@@ -13,7 +13,9 @@ from pathlib import Path
 
 from .adapters import Lane
 
-ROOT = Path("/tmp/agent-offload")
+# Runs, pool locks and liveness files live here; tests point it elsewhere so
+# they never contend with a real run for a quota pool.
+ROOT = Path(os.environ.get("XCHECK_ROOT", "/tmp/agent-offload"))
 from .validate import Contract
 
 
@@ -68,6 +70,7 @@ class Run:
     started: str
     panes: dict[str, str]        # herdr: lane → pane id (only panes this run created)
     herdr: dict                  # herdr: caller pane/tab/workspace; {} when headless
+    view: str = "stream"         # stream (headless NDJSON) | tui (interactive app, answers in ANSWER.md)
     capacity: bool = True        # each lane probes its pool before spending
     forced: list = None          # lanes launched past a capacity refusal
 
@@ -84,7 +87,8 @@ class Run:
             "contract": vars(self.contract),
             "web": self.web, "idle": self.idle, "cap": self.cap, "mode": self.mode,
             "orch": self.orch, "started": self.started, "panes": self.panes,
-            "herdr": self.herdr, "capacity": self.capacity, "forced": self.forced or [],
+            "herdr": self.herdr, "view": self.view, "capacity": self.capacity,
+            "forced": self.forced or [],
         }, indent=2))
 
     @classmethod
@@ -97,6 +101,6 @@ class Run:
             contract=Contract(**d["contract"]),
             web=d["web"], idle=d["idle"], cap=d["cap"], mode=d["mode"],
             orch=d["orch"], started=d["started"], panes=d.get("panes", {}),
-            herdr=d.get("herdr", {}), capacity=d.get("capacity", True),
+            herdr=d.get("herdr", {}), view=d.get("view", "stream"), capacity=d.get("capacity", True),
             forced=d.get("forced", []),
         )

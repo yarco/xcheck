@@ -213,10 +213,9 @@ class EndToEnd(unittest.TestCase):
     """Headless runs against the fake harness; no quota is spent."""
 
     def setUp(self):
-        root = Path("/tmp/agent-offload")
-        root.mkdir(exist_ok=True)
-        self.base = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=root))
-        self.addCleanup(shutil.rmtree, self.base, True)
+        self.root = Path(tempfile.mkdtemp(prefix="xcheck-root-")).resolve()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.base = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
         self.bin = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.bin)
         for k in adapters.KINDS:
@@ -225,6 +224,7 @@ class EndToEnd(unittest.TestCase):
 
     def xcheck(self, *args, mode="ok", timeout=60, capacity=None):
         env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
+               "XCHECK_ROOT": str(self.root),
                "XCHECK_CAPACITY_HELPER": str(REPO / "tests" / "fake" / "capacity")}
         if capacity:
             env["FAKE_CAPACITY"] = capacity
@@ -348,7 +348,7 @@ class EndToEnd(unittest.TestCase):
                 "ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "HERDR_PANE_ID": "w1:p1",
                 "CODEX_COMPANION_SESSION_ID": "c", "GROK_SANDBOX": "ws"}
         keep = {"GROK_TELEMETRY_ENABLED": "0"}
-        env = {**os.environ, **leak, **keep, "FAKE_ENV_DUMP": str(dump),
+        env = {**os.environ, **leak, **keep, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok"}
         lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
@@ -361,8 +361,7 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(seen.get("GROK_TELEMETRY_ENABLED"), "0")
 
     def second_base(self):
-        other = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir="/tmp/agent-offload"))
-        self.addCleanup(shutil.rmtree, other, True)
+        other = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
         stage(other)
         return other
 
@@ -410,6 +409,33 @@ class EndToEnd(unittest.TestCase):
         self.addCleanup(lambda: subprocess.run(["kill", "-9", str(pids["harness"])], capture_output=True))
         self.detach(other, "codex:gpt-6-sol:high", "ok")
         self.assertEqual(self.lane_exit(other, "codex-gpt-6-sol-high")["status"], "done")
+
+    def run_tui(self, mode, extra=()):
+        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high"
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
+                        "--mode", "headless", "--view", "tui", "--skip-capacity", *extra, mode=mode)
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        return {r["lane"]: r for r in json.loads((self.base / "STATUS.json").read_text())["lanes"]}
+
+    def test_tui_lanes_publish_answer_md_and_are_closed(self):
+        t0 = time.time()
+        rows = self.run_tui("ok")
+        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
+        self.assertLess(time.time() - t0, 30)  # the apps idle for 60 s; the runner closes them
+        for name in rows:
+            self.assertTrue((self.base / f"RESULT-{name}.md").read_text().endswith("RESULT_COMPLETE\n"))
+        message = (self.base / "lanes" / "grok-4.7-xhigh" / "message.txt").read_text()
+        self.assertIn("ANSWER.md", message)
+
+    def test_a_tui_draft_is_not_published_until_complete_and_stable(self):
+        rows = self.run_tui("slowwrite")
+        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
+        self.assertIn("after a rewrite", (self.base / "RESULT-grok-4.7-xhigh.md").read_text())
+
+    def test_a_silent_tui_times_out_with_its_last_screen(self):
+        rows = self.run_tui("error", extra=("--idle", "3"))
+        self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
+        self.assertTrue(any("hit your limit" in l for l in rows["claude-opus-5-5-high"]["stderr_tail"]))
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()

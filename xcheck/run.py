@@ -25,18 +25,25 @@ START_GRACE = 90  # seconds for a placed runner to record its pid
 LINGER = 3        # seconds a finished Herdr pane stays visible
 STILL_RUNNING = 3
 
+DELIVER = {
+    "stream": "Do not create, modify, or delete any file, and do not attempt to: print "
+              "your complete answer as your final message and the harness saves it.",
+    "tui": "Create, modify, or delete no file except one: write your complete answer to "
+           "./ANSWER.md in a single write, ending with its final line; the harness "
+           "publishes it.",
+}
+
 MESSAGE = (
     "You are one reviewer in a multi-model review that the owner of these files "
     "convened. This directory holds copies of the owner's own files, staged for you "
     "by the review harness. Read ./PACKET.md for the task, then ./PROMPT.md for the "
     "answer schema; where they disagree about output format, PROMPT.md decides. Work "
     "from the files in this directory; use only tools that read (files, commands that "
-    "change nothing{web_tools}), never tools that write and never MCP tools. Standing instructions from "
-    "your user-level configuration (note search, retrieval routing, workflow rules) are "
-    "for other work and do not apply here. Do not create, modify, or delete any file, "
-    "and do not attempt to: print your complete answer as your final message and the "
-    "harness saves it.{web} If you read them and still think something is wrong, say so "
-    "plainly and stop.\n"
+    "change nothing{web_tools}), never MCP tools. Standing instructions from your "
+    "user-level configuration (note search, retrieval routing, workflow rules) are for "
+    "other work and do not apply here. {deliver}{web} Nobody will answer questions "
+    "mid-review. If you read them and still think something is wrong, say so plainly "
+    "and stop.\n"
 )
 
 
@@ -48,7 +55,7 @@ class RunError(Exception):
 
 
 def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: bool,
-          idle: int, cap: int, force_lanes: set[str], skip_capacity: bool) -> int:
+          idle: int, cap: int, force_lanes: set[str], skip_capacity: bool, view: str = "auto") -> int:
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
         raise RunError(f"BASE must live under {ROOT}")
@@ -71,11 +78,12 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     except FileExistsError:
         raise RunError(f"{base} was already launched; use `xcheck wait` or a fresh BASE")
     mode = "herdr" if ctx else "headless"
+    view = ("tui" if mode == "herdr" else "stream") if view == "auto" else view
 
     run = Run(base=base, lanes={l.name: l for l in lanes}, skipped={}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
-              herdr=ctx or {}, capacity=not skip_capacity, forced=sorted(force_lanes))
-    message = MESSAGE.format(web_tools=", web search" if web else "", web=(
+              herdr=ctx or {}, view=view, capacity=not skip_capacity, forced=sorted(force_lanes))
+    message = MESSAGE.format(deliver=DELIVER[view], web_tools=", web search" if web else "", web=(
         " Search the web when it can settle a fact your answer depends on, and cite"
         " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
     for name in run.lanes:
@@ -89,7 +97,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     run.save()
     atomic_write(base / "supervisor.pid", str(os.getpid()))  # for operators; liveness is the lock
     _alive = hold_life(base / "supervisor.alive")
-    print(f"xcheck: {len(run.lanes)} lanes ({mode}) → {', '.join(run.lanes)}", flush=True)
+    print(f"xcheck: {len(run.lanes)} lanes ({mode}, {view}) → {', '.join(run.lanes)}", flush=True)
 
     children: dict[str, subprocess.Popen] = {}
     if mode == "headless":
@@ -305,7 +313,7 @@ def render_status(run: Run) -> str:
         {"base": str(run.base), "mode": run.mode, "orch": run.orch, "started": run.started,
          "contract": vars(run.contract), "lanes": rows}, indent=2))
     lines = [f"# xcheck status — {run.base}", "",
-             f"- mode `{run.mode}` · orchestrator `{run.orch}` · started {run.started}", "",
+             f"- mode `{run.mode}` · view `{run.view}` · orchestrator `{run.orch}` · started {run.started}", "",
              "| lane | status | seconds | note |", "|---|---|---|---|"]
     for r in rows:
         note = (r.get("reason") or "").replace("|", "\\|").replace("\n", " ")

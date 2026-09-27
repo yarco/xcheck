@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import adapters, capacity, pools, validate
+from . import adapters, capacity, pools, tui, validate
 from .files import ROOT, Run, atomic_write, hold_life, now
 
 TAIL_LINES = 40
@@ -87,6 +87,9 @@ def run_lane(base: Path, name: str) -> int:
         print(f"xcheck lane {name}: capacity {note}", flush=True)
         if not ok:
             return _finish(run, name, started, "skipped", note, None, reader, err_path)
+    if run.view == "tui":
+        return _run_tui(run, name, lane, d, work, message, started, reader, held)
+
     status, reason, code = None, "", None
     stdin = open(spec.stdin, "rb") if spec.stdin else subprocess.DEVNULL
     with open(stream_path, "ab") as stream, open(err_path, "ab") as err:
@@ -155,6 +158,36 @@ def run_lane(base: Path, name: str) -> int:
     return _finish(run, name, started, status, reason, code, reader, err_path)
 
 
+def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, started: float,
+             reader: adapters.Reader, held) -> int:
+    """The harness's own interactive app, in a pty this runner owns (Herdr wall)."""
+    spec = adapters.tui(lane, work, message.read_text(encoding="utf-8").strip(), run.web)
+    answer, screen = work / "ANSWER.md", d / "screen.log"
+
+    def spawned(pid: int) -> None:
+        atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": pid}))
+
+    try:
+        status, reason, code, text = tui.run(spec.argv, lane_env(spec), work, answer, screen,
+                                             run.idle, run.cap, spawned)
+    except _Stop as stop:
+        status, reason, code = "interrupted", f"runner received {stop}", None
+        text = answer.read_text(encoding="utf-8", errors="replace") if answer.exists() else ""
+    finally:
+        held.release()
+    reader.text = text
+    tail = tui.screen_tail(screen)
+    if status is None or (status == "timeout" and text.strip() and validate.last_line(text)
+                          in (validate.COMPLETE, validate.INVALID)):
+        if text.strip():
+            status, problems = validate.check(text, run.contract)
+            reason = "; ".join(problems) or validate.COMPLETE
+        else:
+            status = "failed"
+            reason = "the app ended without writing ANSWER.md; last screen: " + " / ".join(tail[-4:])
+    return _finish(run, name, started, status, reason, code, reader, screen, tail=tail)
+
+
 def _consume(reader: adapters.Reader, raw: bytes) -> None:
     line = raw.decode("utf-8", errors="replace").strip()
     if not line:
@@ -201,12 +234,14 @@ def _kill(proc: subprocess.Popen) -> None:
             continue
 
 
-def _finish(run: Run, name: str, started: float, status: str, reason: str, code, reader, err_path) -> int:
+def _finish(run: Run, name: str, started: float, status: str, reason: str, code, reader, err_path,
+            tail: list[str] | None = None) -> int:
     text = reader.text
     if text.strip():
         atomic_write(run.base / f"RESULT-{name}.md", text if text.endswith("\n") else text + "\n")
-    tail = err_path.read_text(encoding="utf-8", errors="replace").splitlines()[-TAIL_LINES:] \
-        if err_path.exists() else []
+    if tail is None:
+        tail = err_path.read_text(encoding="utf-8", errors="replace").splitlines()[-TAIL_LINES:] \
+            if err_path.exists() else []
     record = {
         "lane": name, "status": status, "reason": reason, "exit_code": code,
         "error": reader.error, "started": now(started), "ended": now(),
