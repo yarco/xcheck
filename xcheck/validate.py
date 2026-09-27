@@ -77,7 +77,7 @@ def _heading_re(keyword: str) -> re.Pattern:
 
 def _proof(lines: list[str]) -> str | None:
     for i, line in enumerate(lines):
-        m = re.match(r"^\s*(?:[-+]\s+)?(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+)?PROOF(?:[*_]+)?\s*(?::\s*(.*))?$", line, re.I)
+        m = re.match(r"^\s*(?:[-+*]\s+)?(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+)?PROOF(?:[*_]+)?\s*(?::\s*(.*))?$", line, re.I)
         if not m:
             continue
         value = (m.group(1) or "").strip()
@@ -90,7 +90,7 @@ def _proof(lines: list[str]) -> str | None:
 def _substantive(lines: list[str], keyword: str, token: str) -> bool:
     """Some review text beyond the schema scaffolding (heading keyword, PROOF,
     token, marker). Text on the heading line itself counts."""
-    structural = re.compile(r"^(?:[-+]\s+)?(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+)?PROOF\b|^(?:RESULT_COMPLETE|RESULT_INVALID)$", re.I)
+    structural = re.compile(r"^(?:[-+*]\s+)?(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+)?PROOF\b|^(?:RESULT_COMPLETE|RESULT_INVALID)$", re.I)
     body = " ".join(l for l in (x.strip() for x in lines) if l and not structural.match(l))
     body = body.replace(token, " ")
     body = re.sub(re.escape(keyword), " ", body, flags=re.I)
