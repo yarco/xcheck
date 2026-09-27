@@ -8,7 +8,7 @@ under ~/.local, which Codex's workspace-write sandbox cannot modify, made
 read-only and content-addressed. Every other harness uses the same `xcheck`
 on PATH, so there is one space-free command everywhere.
 
-  ~/.local/share/xcheck/<digest>/   bin/xcheck, bin/agent-capacity, xcheck/*.py (0555)
+  ~/.local/share/xcheck/<digest>/   bin/xcheck, xcheck/*.py (read-only)
   ~/.local/share/xcheck/current     → <digest>
   ~/.local/bin/xcheck               → ~/.local/share/xcheck/current/bin/xcheck
   ~/.codex/rules/xcheck.rules       allow that command without a sandbox
@@ -27,7 +27,7 @@ SHARE = Path.home() / ".local" / "share" / "xcheck"
 LINK = Path.home() / ".local" / "bin" / "xcheck"
 RULES = Path.home() / ".codex" / "rules" / "xcheck.rules"
 SOURCE_RECORD = SHARE / "source"
-EXECUTABLES = ("bin/xcheck", "bin/agent-capacity")
+EXECUTABLES = ("bin/xcheck",)
 
 
 def runtime_files(root: Path = SOURCE) -> list[str]:
@@ -94,7 +94,7 @@ def install() -> Path:
         "# The target is a read-only copy under ~/.local that Codex's sandbox cannot\n"
         "# write; never point this rule at the vault source.\n"
         + "".join(f'prefix_rule(pattern=["{LINK}", "{cmd}"], decision="allow")\n'
-                  for cmd in ("run", "wait", "status", "doctor"))
+                  for cmd in ("run", "wait", "status", "doctor", "capacity"))
     )
     return dest
 

@@ -34,7 +34,7 @@ xcheck run --base /tmp/agent-offload/<slug> --orch claude  # default roster minu
    | Orchestrator | Form |
    |---|---|
    | Claude Code | `xcheck run …` as a background shell job; its completion notice is the one return |
-   | Codex | absolute `~/.local/bin/xcheck run … --detach`, then absolute `~/.local/bin/xcheck wait --base B --timeout S` under the call's timeout. The allow rule written by `install` matches only that absolute path followed by `run`, `wait`, `status` or `doctor`: no `cd … &&`, pipe, redirect, `NAME=value` prefix, or trailing punctuation. It runs the command outside Codex's sandbox with no approval; its target is under `~/.local`, which that sandbox cannot write. Never point it at the vault source |
+   | Codex | absolute `~/.local/bin/xcheck run … --detach`, then absolute `~/.local/bin/xcheck wait --base B --timeout S` under the call's timeout. The allow rule written by `install` matches only that absolute path followed by `run`, `wait`, `status`, `doctor` or `capacity`: no `cd … &&`, pipe, redirect, `NAME=value` prefix, or trailing punctuation. It runs the command outside Codex's sandbox with no approval; its target is under `~/.local`, which that sandbox cannot write. Never point it at the vault source |
    | Grok | Herdr mode only (its sandbox covers its whole process tree, so `run` refuses headless). Background `xcheck run`, then one `get_command_or_subagent_output` with `timeout_ms` up to 3 600 000 |
    | opencode | `--detach`, then `wait --timeout S` with the shell call's `timeout` above S. Its shell tool has no background parameter and defaults to 120 s; the detached supervisor is in its own session and survives the call |
    | pi | `--detach` + `wait --timeout <call cap>`; never pi's own `delegate`/`subagent` tools as peers (they start pi) |
@@ -144,10 +144,11 @@ Completion is always the lane's `exit.json`, never pane text.
 
 ## Capacity
 
-`bin/agent-capacity` reads each pool's subscription meter without spending a prompt: Codex app-server rate limits, Claude OAuth usage, Grok billing (credits view), Agy's local quota summary per family. Each lane probes its own pool after admission and immediately before spending, so the reading is not stale and, in Herdr, runs outside any orchestrator sandbox. A lane spends only on `eligible`: the reserve is 10%, and for an Agy family `5 + 5n`% for the run's `n` lanes in it (capped at 90). `reserve-low`, `auth-required` and `capacity-unknown` end the lane `skipped`. The reserve protects the operator's interactive quota, which a runtime quota error arrives too late to protect.
+Each pool has one free meter that runs no inference, read by `xcheck/capacity.py`: Codex `app-server` `account/rateLimits/read` (5 h and weekly windows), Claude's OAuth usage endpoint with the keychain token (five-hour, seven-day, and the lane's opus/sonnet window when reported), Grok's billing credits view (the worse of the account and Grok Build meters; the monthly view reports no allowance on this account), and Agy's `agy -p /usage` (zero turns; the lane family's 5 h and weekly buckets). `xcheck capacity [--lanes …]` prints the readings. Each lane reads its own pool after admission and immediately before spending, so the reading is not stale and, in Herdr, runs outside any orchestrator sandbox. A lane spends only on `eligible`: the tightest window must have more than the reserve left, 10%, or `5 + 5n`% for the run's `n` lanes in one Agy family (capped at 90). The reserve protects the operator's interactive quota, which a runtime quota error arrives too late to protect. A meter that cannot be read is `capacity-unknown` and a rejected login is `auth-required`; with `reserve-low` they end the lane `skipped`. There is no fallback meter.
 
-- Agy readings come from an Antigravity `language_server`; the launchd agent `a launchd sidecar agent` keeps one running while the desktop app is closed.
-- Claude `security` exit 36 is a locked login keychain: run `keychain-unlock-gui` with the operator at the screen, or pass a fresh `/usage` reading through `AGENT_CAPACITY_CLAUDE_MANUAL_REMAINING` + `AGENT_CAPACITY_CLAUDE_MANUAL_CAPTURED_AT` (at most 5 min old).
+- Agy's `/usage` is served by its persistent headless `language_server`; the launchd agent `a launchd sidecar agent` keeps one running.
+- Claude `security` exit 36 is a locked login keychain (a remote session): run `keychain-unlock-gui` with the operator at the screen, or pass a fresh reading from Claude Code's `/usage` as `XCHECK_CLAUDE_REMAINING=<percent left>` and `XCHECK_CLAUDE_REMAINING_AT=<ISO time>` (at most 5 min old) in the environment the runner inherits, i.e. headless placement. Exit 44 means no login.
+- A rejected Grok token may only be stale: running `grok` once refreshes it.
 - A reading is a snapshot. A healthy Agy family can still hit a per-model cap ("Individual quota reached"); that lane fails with the harness's own error and is not retried.
 
 ## Locking and liveness
@@ -191,7 +192,7 @@ Runner and supervisor liveness is an exclusive lock on their own `alive` file, r
 | I3 | No manual approval, trust click or typed prompt is ever part of a run | permission flags, exact-path trust, prompt as argv |
 | I4 | Every lane ends with one `exit.json`, bounded by idle, cap, and the runner's kernel alarm | lane runner |
 | I5 | No silent shrinkage: every selected lane has a status row, and every non-`done` row is told to the operator | `STATUS.md` + orchestrator duty |
-| I6 | Capacity is read under pool admission right before spend; nothing retries automatically | lane runner, `agent-capacity` |
+| I6 | Capacity is read under pool admission right before spend; nothing retries automatically | lane runner, `xcheck/capacity.py` |
 | I7 | Only a stream's final message or a stable `ANSWER.md` is an answer | lane runner, `validate.py` |
 | I8 | One launch per BASE; reattachment never relaunches | `.launched`, `wait` |
 | I9 | Kernel locks, never PIDs or the process table, prove a live holder | `alive` and pool `flock`s |
@@ -226,6 +227,7 @@ Legacy (archived read-only in `../x-check-old/`, never a launcher) solved proble
 | Perplexity lane | not a default peer; its failure shapes stay documented in Legacy |
 | Runtime under `~/.agents` with per-start hash verification | `~/.local` is outside Codex's writable roots, so the read-only snapshot needs no re-verification |
 | Snapshot pruning | a queued runner may still exec an older snapshot |
+| Fallback quota meters (Agy language-server port scan, CSRF probing, desktop-token scraping; Grok monthly view), an outer retry layer, secret redaction of notes | each pool's one meter works; an unreadable meter fails closed; notes never carry payloads or tokens |
 
 Proposals already rejected, with the reason:
 
@@ -256,6 +258,6 @@ Fixes go into the reviewed project with a test; protocol lessons go into this no
 
 ## Repository
 
-`python3 -m unittest discover -s tests` (about two minutes; run it in the background) and `git diff --check`. Runtime is Python 3.11+ stdlib plus the harness CLIs. Hypothesis (`requirements-test.txt`) is the one test dependency, imported unguarded so a missing install fails by name. `tests/test_xcheck.py` runs end to end against `tests/fake/harness`, which speaks each CLI's stream and app shape, plus captured streams in `tests/fixtures/`; `tests/test_laws.py` holds property laws for the answer grammar, the Grok reader and trust updates. Tests set `XCHECK_ROOT`, `CODEX_CONFIG`, `AGY_SETTINGS` and `XCHECK_CAPACITY_HELPER` to disposable paths; never point them at the real `/tmp/agent-offload` (they would queue behind live runs) or the real configs. Dropbox resets new files to mode 600; restore `755` on `bin/xcheck`, `bin/agent-capacity` and `tests/fake/*`.
+`python3 -m unittest discover -s tests` (about two minutes; run it in the background) and `git diff --check`. Runtime is Python 3.11+ stdlib plus the harness CLIs. Hypothesis (`requirements-test.txt`) is the one test dependency, imported unguarded so a missing install fails by name. `tests/test_xcheck.py` runs end to end against `tests/fake/harness`, which speaks each CLI's stream and app shape, plus captured streams and meter payloads in `tests/fixtures/`; `tests/test_laws.py` holds property laws for the answer grammar, the Grok reader and trust updates. Tests set `XCHECK_ROOT`, `CODEX_CONFIG` and `AGY_SETTINGS` to disposable paths, and the fake `codex`/`agy` also answer the capacity meters (`FAKE_CAPACITY`); never point them at the real `/tmp/agent-offload` (they would queue behind live runs) or the real configs. Dropbox resets new files to mode 600; restore `755` on `bin/xcheck` and `tests/fake/harness`.
 
 After changing `bin/` or `xcheck/`, run `bin/xcheck install`, then `xcheck doctor`. History is `git log`; durable requirements, invariants and limits live here, not in TODO or ledger files.

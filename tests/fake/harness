@@ -20,6 +20,29 @@ def emit(obj):
     print(json.dumps(obj), flush=True)
 
 
+# Quota meters (xcheck/capacity.py), FAKE_CAPACITY=eligible|reserve-low.
+used = {"eligible": 40, "reserve-low": 95}[os.environ.get("FAKE_CAPACITY", "eligible")]
+if kind == "codex" and argv[:1] == ["app-server"]:
+    for line in sys.stdin:  # stays open until answered, like the real server
+        msg = json.loads(line)
+        if msg.get("id") == 1:
+            emit({"id": 1, "result": {}})
+        elif msg.get("id") == 2:
+            emit({"id": 2, "result": {"rateLimits": {
+                "primary": {"usedPercent": used, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 10, "windowDurationMins": 10080}}}})
+    sys.exit(0)
+if kind == "agy" and argv == ["--version"]:
+    print("1.2.12")
+    sys.exit(0)
+if kind == "agy" and argv[:2] == ["-p", "/usage"]:
+    bucket = lambda i, left: {"id": i, "remaining_fraction": left}
+    emit({"status": "SUCCESS", "num_turns": 0, "command": {"name": "usage", "data": {"groups": [
+        {"buckets": [bucket("gemini-weekly", (100 - used) / 100), bucket("gemini-5h", 1)]},
+        {"buckets": [bucket("3p-weekly", 0.5), bucket("3p-5h", 1)]}]}}})
+    sys.exit(0)
+
+
 if kind == "claude":
     work = Path(argv[argv.index("--add-dir") + 1])
 elif kind == "grok":

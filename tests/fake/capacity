@@ -1,5 +1,0 @@
-#!/usr/bin/env python3
-"""Fake bin/agent-capacity: FAKE_CAPACITY=eligible|reserve-low."""
-import json, os
-status = os.environ.get("FAKE_CAPACITY", "eligible")
-print(json.dumps({"results": [{"status": status, "note": f"fake {status}"}]}))

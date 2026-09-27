@@ -149,9 +149,10 @@ def _run_lane(base: Path, name: str) -> int:
     # orchestrator sandbox when the runner lives in a Herdr pane.
     if run.capacity and name not in run.forced:
         same_pool = sum(1 for l in run.lanes.values() if l.pool == lane.pool)
-        ok, note = capacity.check_lane(lane, same_pool)
+        reading = capacity.read(lane, same_pool)
+        note = f"{reading.status}: {reading.note}"
         print(f"xcheck lane {name}: capacity {note}", flush=True)
-        if not ok:
+        if not reading.ok:
             return _finish(run, name, started, "skipped", note, None, reader, err_path)
     if view == "tui":
         return _run_tui(run, name, lane, d, work, message, log, started, reader, held, idle)

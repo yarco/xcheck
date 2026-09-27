@@ -17,7 +17,7 @@ import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -208,7 +208,7 @@ class RunnerBound(unittest.TestCase):
                 with patch.object(lane, "ROOT", root), \
                      patch.object(lane, "workspace", return_value=root / "work"), \
                      patch.object(lane, "bound", return_value=1), \
-                     patch.object(lane.capacity, "check_lane", side_effect=lambda *_: time.sleep(10)):
+                     patch.object(lane.capacity, "read", side_effect=lambda *_: time.sleep(10)):
                     lane.run_lane(base, peer.name)
                 record = json.loads((run.lane_dir(peer.name) / "exit.json").read_text())
                 self.assertEqual(record["status"], "timeout")
@@ -359,14 +359,66 @@ class Liveness(unittest.TestCase):
                 self.assertTrue(is_alive(path))
 
 
-class CapacityProbe(unittest.TestCase):
-    def test_helper_runs_with_isolated_python(self):
-        from xcheck import capacity
-        with patch.object(capacity.subprocess, "run") as call:
-            call.return_value.stdout = '{"results": [{"status": "eligible"}]}'
-            self.assertEqual(capacity._probe(["codex"])["status"], "eligible")
-        self.assertEqual(call.call_args.args[0][:3],
-                         [sys.executable, "-I", str(capacity.HELPER)])
+class Capacity(unittest.TestCase):
+    """Meter parsers against captured live payloads, and the fail-closed rule."""
+
+    def fixture(self, name):
+        return json.loads((REPO / "tests" / "fixtures" / "capacity" / name).read_text())
+
+    def test_captured_meters_parse_to_percent_left(self):
+        from xcheck import capacity as c
+        self.assertEqual(c.codex_windows(self.fixture("codex-rate-limits.json")),
+                         {"primary 300m": 0.0, "secondary 10080m": 60.0})
+        self.assertEqual(c.claude_windows(self.fixture("claude-usage.json"), "opus"),
+                         {"five_hour": 67.0, "seven_day": 61.0})  # no opus window reported
+        self.assertEqual(c.grok_windows(self.fixture("grok-credits.json")), {"weekly credits": 80.0})
+        report = self.fixture("agy-usage.json")
+        self.assertEqual(report["num_turns"], 0)  # /usage is free
+        gemini = c.agy_windows(report["command"]["data"], "gemini-3.8-flash-high")
+        third = c.agy_windows(report["command"]["data"], "claude-sonnet-4-6")
+        self.assertEqual(set(gemini), {"gemini-5h", "gemini-weekly"})
+        self.assertEqual(set(third), {"3p-5h", "3p-weekly"})
+
+    def test_tightest_window_must_exceed_the_reserve(self):
+        from xcheck.capacity import judge
+        self.assertEqual(judge({"a": 80.0, "b": 10.5}, 10).status, "eligible")
+        self.assertEqual(judge({"a": 80.0, "b": 10.0}, 10).status, "reserve-low")
+        self.assertEqual(judge({}, 10).status, "capacity-unknown")
+        self.assertEqual(judge({"a": 140.0}, 10).status, "capacity-unknown")
+
+    def test_agy_reserve_grows_with_lanes_sharing_a_family(self):
+        from xcheck.capacity import reserve_for
+        self.assertEqual(reserve_for(Lane("agy", "gemini-3.8-flash-high"), 2), 15)
+        self.assertEqual(reserve_for(Lane("agy", "gemini-3.8-flash-high"), 30), 90)
+        self.assertEqual(reserve_for(Lane("grok", "grok-4.7", "low"), 3), 10)
+
+    def test_unreadable_meters_fail_closed_and_logins_are_named(self):
+        from xcheck import capacity as c
+        lane = Lane("claude", "claude-opus-5-5", "high")
+        for code, status in ((44, "auth-required"), (36, "capacity-unknown")):
+            with patch.dict(os.environ, {"XCHECK_CLAUDE_REMAINING": "", "XCHECK_CLAUDE_REMAINING_AT": ""}), \
+                 patch.object(c.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], code, "", "")
+                self.assertEqual(c.read(lane).status, status)
+        with patch.dict(c.METERS, {"grok": Mock(side_effect=RuntimeError("boom"))}):
+            self.assertEqual(c.read(Lane("grok", "grok-4.7", "low")).status, "capacity-unknown")
+
+    def test_disabled_five_hour_bucket_is_ignored_but_weekly_is_required(self):
+        from xcheck.capacity import agy_windows
+        data = {"groups": [{"buckets": [{"id": "3p-weekly", "remaining_fraction": 0.0},
+                                        {"id": "3p-5h", "remaining_fraction": 1, "disabled": True}]}]}
+        self.assertEqual(agy_windows(data, "claude-sonnet-4-6"), {"3p-weekly": 0.0})
+        with self.assertRaises(KeyError):
+            agy_windows({"groups": []}, "claude-sonnet-4-6")
+
+    def test_manual_claude_reading_must_be_fresh(self):
+        from datetime import datetime, timedelta, timezone
+        from xcheck import capacity as c
+        lane = Lane("claude", "claude-opus-5-5", "high")
+        for age, status in ((10, "eligible"), (900, "capacity-unknown")):
+            at = (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat()
+            with patch.dict(os.environ, {"XCHECK_CLAUDE_REMAINING": "40", "XCHECK_CLAUDE_REMAINING_AT": at}):
+                self.assertEqual(c.read(lane).status, status)
 
 
 class Installation(unittest.TestCase):
@@ -383,7 +435,7 @@ class Installation(unittest.TestCase):
                     lines = [line for line in rules.read_text().splitlines() if line.startswith("prefix_rule")]
                     self.assertEqual(lines, [
                         f'prefix_rule(pattern=["{link}", "{cmd}"], decision="allow")'
-                        for cmd in ("run", "wait", "status", "doctor")
+                        for cmd in ("run", "wait", "status", "doctor", "capacity")
                     ])
                     self.assertEqual(rules.read_text().count("Written by `xcheck install`"), 1)
                 finally:
@@ -612,8 +664,7 @@ class EndToEnd(unittest.TestCase):
         env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
                "XCHECK_ROOT": str(self.root),
                "CODEX_CONFIG": str(self.root / "codex-config.toml"),
-               "AGY_SETTINGS": str(self.root / "agy-settings.json"),
-               "XCHECK_CAPACITY_HELPER": str(REPO / "tests" / "fake" / "capacity")}
+               "AGY_SETTINGS": str(self.root / "agy-settings.json")}
         if capacity:
             env["FAKE_CAPACITY"] = capacity
         env.pop("HERDR_ENV", None)
@@ -696,14 +747,18 @@ class EndToEnd(unittest.TestCase):
         rows = self.run_lanes("echo402")
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
 
-    def test_capacity_refusal_skips_the_lane(self):
+    def test_capacity_is_read_from_each_lanes_meter_before_spending(self):
+        # The fake codex/agy answer the real meters (app-server, /usage).
         lanes = "codex:gpt-6-sol:high,agy:gemini-3.8-flash-high"
-        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
-                        "--mode", "headless", capacity="reserve-low")
-        self.assertEqual(p.returncode, 0, p.stderr)
-        rows = json.loads((self.base / "STATUS.json").read_text())["lanes"]
-        self.assertEqual({r["status"] for r in rows}, {"skipped"})
-        self.assertIn("reserve-low", rows[0]["reason"])
+        for reading, expected in (("reserve-low", "skipped"), ("eligible", "done")):
+            base = self.second_base()
+            p = self.xcheck("run", "--base", str(base), "--orch", "other", "--lanes", lanes,
+                            "--mode", "headless", capacity=reading)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            rows = json.loads((base / "STATUS.json").read_text())["lanes"]
+            self.assertEqual({r["status"] for r in rows}, {expected}, rows)
+            if expected == "skipped":
+                self.assertTrue(all(r["reason"].startswith("reserve-low:") for r in rows), rows)
 
     def test_grok_orchestrator_is_refused_headless(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "grok", "--mode", "headless",

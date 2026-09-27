@@ -1,44 +1,264 @@
-"""Capacity preflight: one free probe per quota pool via bin/agent-capacity.
+"""May this lane spend from its quota pool now?
 
-A lane launches only when its pool reads `eligible` above the reserve. Agy
-lanes that share a family spend one pool, so the reserve grows with the number
-of lanes admitted from it: remaining > 5 + 5n (capped at 90).
+Each pool has one free meter that runs no inference:
+
+  codex   `codex app-server` JSON-RPC `account/rateLimits/read`  (5 h and weekly windows)
+  claude  Anthropic OAuth usage endpoint, token from the login keychain
+  grok    Grok CLI billing, credits view (the TUI's "weekly limit left")
+  agy     `agy -p /usage --output-format json` (a client-side command: zero turns)
+
+A lane spends only when every window it draws on has more than the reserve
+left: 10 %, or 5 + 5n % for the n lanes of one run sharing an Agy family
+(capped at 90). A meter that cannot be read is `capacity-unknown`, a login the
+provider rejects is `auth-required`; both skip the lane. There is no fallback
+meter: a reading is trusted or the lane does not spend.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
+import select
+import signal
 import subprocess
-import sys
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 from .adapters import Lane
 
-import os
+RESERVE = 10.0
+TIMEOUT = 20.0     # per network call or local command
+AGY_TIMEOUT = 90.0  # `agy -p /usage` may have to start Agy's language server first
+CLAUDE_LOGIN = "env -u ANTHROPIC_API_KEY claude auth login --claudeai"
+# A locked keychain (security exit 36, e.g. over SSH) hides the Claude token.
+# The operator can pass a fresh reading from Claude Code's /usage instead.
+CLAUDE_MANUAL = ("XCHECK_CLAUDE_REMAINING", "XCHECK_CLAUDE_REMAINING_AT")
+CLAUDE_MANUAL_AGE = 300
+# `-p /usage` is a client-side command only from this release on; an older CLI
+# would send it to a model as a prompt.
+AGY_USAGE_SINCE = (1, 1, 11)
 
-HELPER = Path(os.environ.get("XCHECK_CAPACITY_HELPER")  # tests substitute a fake reading
-              or Path(__file__).resolve().parent.parent / "bin" / "agent-capacity")
+
+@dataclass(frozen=True)
+class Reading:
+    status: str  # eligible | reserve-low | auth-required | capacity-unknown
+    note: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "eligible"
 
 
-def _probe(args: list[str]) -> dict:
+class LoginRequired(Exception):
+    pass
+
+
+def reserve_for(lane: Lane, same_pool: int) -> float:
+    return min(90.0, 5.0 + 5.0 * same_pool) if lane.kind == "agy" else RESERVE
+
+
+def read(lane: Lane, same_pool: int = 1) -> Reading:
+    """The lane's pool reading against its reserve. Never raises."""
+    reserve = reserve_for(lane, same_pool)
     try:
-        p = subprocess.run([sys.executable, "-I", str(HELPER), "--json", *args],
-                           capture_output=True, text=True, timeout=180)
-        rows = json.loads(p.stdout)["results"]
-        return rows[0] if rows else {"status": "capacity-unknown", "note": "no reading"}
-    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, IndexError) as e:
-        return {"status": "capacity-unknown", "note": f"capacity helper failed: {e}"}
+        windows = METERS[lane.kind](lane)
+    except LoginRequired as e:
+        return Reading("auth-required", str(e))
+    except Exception as e:  # any unreadable meter fails closed
+        return Reading("capacity-unknown", f"{lane.kind} meter unreadable: {type(e).__name__}: {e}")
+    return judge(windows, reserve)
 
 
-def check_lane(lane: Lane, same_pool: int) -> tuple[bool, str]:
-    """(launch?, note) for one lane; `same_pool` lanes of this run share its pool."""
-    if lane.kind == "agy":
-        reserve = min(90, 5 + 5 * same_pool)
-        args = ["--reserve-percent", str(reserve), "--agy-model", lane.model, "agy"]
-    elif lane.kind == "claude":
-        bucket = next((b for b in ("opus", "sonnet") if b in lane.model), None)
-        args = (["--claude-model", bucket] if bucket else []) + ["claude"]
-    else:
-        args = [lane.kind]
-    r = _probe(args)
-    return r.get("status") == "eligible", f"{r.get('status')}: {r.get('note', '')}".strip()
+def judge(windows: dict[str, float], reserve: float) -> Reading:
+    """Eligible only when the tightest window has more than `reserve` % left."""
+    if not windows:
+        return Reading("capacity-unknown", "meter reported no quota window")
+    name, left = min(windows.items(), key=lambda item: item[1])
+    if not 0 <= left <= 100:
+        return Reading("capacity-unknown", f"{name} reports {left}% left")
+    status = "eligible" if left > reserve else "reserve-low"
+    return Reading(status, f"{name} {left:.0f}% left; reserve {reserve:g}%")
+
+
+# ------------------------------------------------------------------ codex
+
+
+def _codex(lane: Lane) -> dict[str, float]:
+    return codex_windows(_rpc(["codex", "app-server", "--stdio"], [
+        {"method": "initialize", "id": 1,
+         "params": {"clientInfo": {"name": "xcheck", "title": "xcheck", "version": "2"}}},
+        {"method": "initialized", "params": {}},
+        {"method": "account/rateLimits/read", "id": 2},
+    ], want=2))
+
+
+def codex_windows(result: dict) -> dict[str, float]:
+    limits = result["rateLimits"]
+    return {f"{k} {limits[k]['windowDurationMins']}m": 100.0 - float(limits[k]["usedPercent"])
+            for k in ("primary", "secondary") if limits.get(k)}
+
+
+def _rpc(argv: list[str], messages: list[dict], want: int) -> dict:
+    """Send JSON-RPC lines and return the result for id `want`. stdin stays
+    open until the reply: the app server exits on EOF without answering."""
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        p.stdin.write(b"".join(json.dumps(m).encode() + b"\n" for m in messages))
+        p.stdin.flush()
+        deadline, buf = time.time() + TIMEOUT, b""
+        while (left := deadline - time.time()) > 0:
+            if not select.select([p.stdout], [], [], left)[0]:
+                break
+            chunk = os.read(p.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            *lines, buf = (buf + chunk).split(b"\n")
+            for line in lines:
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == want:
+                    if "error" in msg:
+                        text = str((msg["error"] or {}).get("message", ""))
+                        if re.search(r"auth|log ?in|unauthori[sz]ed|sign in", text, re.I):
+                            raise LoginRequired("Codex login required: run codex login")
+                        raise ValueError(f"app-server error: {text[:120]}")
+                    return msg["result"]
+        raise TimeoutError("no rate-limit reply from codex app-server")
+    finally:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            p.kill()
+        p.wait()
+
+
+# ------------------------------------------------------------------ claude
+
+
+def _claude(lane: Lane) -> dict[str, float]:
+    manual = _claude_manual()
+    if manual is not None:
+        return manual
+    p = subprocess.run(["security", "find-generic-password", "-w", "-s", "Claude Code-credentials"],
+                       capture_output=True, text=True, timeout=TIMEOUT)
+    if p.returncode == 44:  # errSecItemNotFound
+        raise LoginRequired(f"no Claude login in the keychain: run {CLAUDE_LOGIN}")
+    if p.returncode != 0:
+        raise OSError(f"keychain unreadable (security exit {p.returncode}; 36 = locked: run "
+                      f"keychain-unlock-gui, or set {CLAUDE_MANUAL[0]} and {CLAUDE_MANUAL[1]})")
+    token = json.loads(p.stdout)["claudeAiOauth"]["accessToken"]
+    for attempt in range(3):  # 429 is a throttle shared by every reader of this endpoint
+        try:
+            payload = _get("https://api.anthropic.com/api/oauth/usage",
+                           {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
+                           f"Claude login expired: run {CLAUDE_LOGIN}")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == 2:
+                raise
+            time.sleep(2)
+    bucket = next((b for b in ("opus", "sonnet") if b in lane.model), None)
+    return claude_windows(payload, bucket)
+
+
+def claude_windows(payload: dict, bucket: str | None) -> dict[str, float]:
+    names = ["five_hour", "seven_day"] + ([f"seven_day_{bucket}"] if bucket else [])
+    return {n: 100.0 - float(payload[n]["utilization"]) for n in names if isinstance(payload.get(n), dict)}
+
+
+def _claude_manual() -> dict[str, float] | None:
+    remaining, at = (os.environ.get(k, "").strip() for k in CLAUDE_MANUAL)
+    if not remaining and not at:
+        return None
+    from datetime import datetime, timezone
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(at.replace("Z", "+00:00"))).total_seconds()
+    if not -60 <= age <= CLAUDE_MANUAL_AGE:
+        raise ValueError(f"manual Claude reading is {age:.0f}s old (limit {CLAUDE_MANUAL_AGE}s)")
+    return {"manual /usage": float(remaining)}
+
+
+# ------------------------------------------------------------------ grok
+
+
+def _grok(lane: Lane) -> dict[str, float]:
+    try:
+        records = json.loads((Path.home() / ".grok" / "auth.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise LoginRequired("no Grok login: run grok login") from None
+    logins = [r for r in records.values() if isinstance(r, dict) and r.get("key")]
+    if not logins:
+        raise LoginRequired("no Grok login: run grok login")
+    key = max(logins, key=lambda r: str(r.get("create_time", "")))["key"]
+    # A rejected token may only be stale: running `grok` once refreshes it.
+    return grok_windows(_get("https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+                             {"Authorization": f"Bearer {key}", "X-XAI-Token-Auth": "xai-grok-cli"},
+                             "Grok token rejected: run grok once to refresh it, or grok login"))
+
+
+def grok_windows(payload: dict) -> dict[str, float]:
+    """The account meter and the Grok Build product meter; either can bind."""
+    config = payload["config"]
+    used = [float(p["usagePercent"]) for p in config.get("productUsage") or []
+            if isinstance(p, dict) and p.get("product") == "GrokBuild"]
+    if config.get("creditUsagePercent") is not None:
+        used.append(float(config["creditUsagePercent"]))
+    period = str((config.get("currentPeriod") or {}).get("type", "")).removeprefix("USAGE_PERIOD_TYPE_").lower()
+    return {f"{period or 'period'} credits": 100.0 - max(used)} if used else {}
+
+
+# ------------------------------------------------------------------ agy
+
+
+def _agy(lane: Lane) -> dict[str, float]:
+    version = subprocess.run(["agy", "--version"], capture_output=True, text=True, timeout=TIMEOUT).stdout
+    parts = tuple(int(x) for x in re.findall(r"\d+", version)[:3])
+    if len(parts) != 3 or parts < AGY_USAGE_SINCE:
+        raise ValueError(f"agy {version.strip() or '?'} predates the zero-turn /usage command")
+    p = subprocess.run(["agy", "-p", "/usage", "--output-format", "json", "--print-timeout", "90s"],
+                       capture_output=True, timeout=AGY_TIMEOUT)
+    if re.search(rb"select login method|not logged into antigravity", p.stdout + p.stderr, re.I):
+        raise LoginRequired("Agy login required: run agy login")
+    report = json.loads(p.stdout)
+    if report.get("status") != "SUCCESS" or (report.get("command") or {}).get("name") != "usage":
+        raise ValueError(f"agy /usage returned status {report.get('status')!r}")
+    return agy_windows(report["command"]["data"], lane.model)
+
+
+def agy_windows(data: dict, model: str) -> dict[str, float]:
+    """The lane's family (Gemini or third-party) has a 5 h and a weekly bucket.
+    A disabled 5 h bucket (its fraction is meaningless while the weekly one is
+    exhausted) is left out; a missing weekly bucket is an error."""
+    family = "gemini" if model.startswith("gemini-") else "3p"
+    buckets = {b["id"]: b for g in data["groups"] for b in g.get("buckets") or []}
+    windows = {}
+    for name in (f"{family}-5h", f"{family}-weekly"):
+        b = buckets.get(name)
+        if b is None and name.endswith("weekly"):
+            raise KeyError(name)
+        if b and not b.get("disabled"):
+            windows[name] = 100.0 * float(b["remaining_fraction"])
+    return windows
+
+
+# ------------------------------------------------------------------ shared
+
+
+def _get(url: str, headers: dict, rejected: str) -> dict:
+    req = urllib.request.Request(url, headers={**headers, "User-Agent": "xcheck-capacity/2"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise LoginRequired(rejected) from None
+        raise
+
+
+METERS = {"codex": _codex, "claude": _claude, "grok": _grok, "agy": _agy}
