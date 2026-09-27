@@ -9,9 +9,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -137,6 +139,40 @@ class SignalGroup(unittest.TestCase):
         signal_group(pid, signal.SIGTERM)  # must not raise
         os.waitpid(pid, 0)
         self.assertFalse(signal_group(pid, signal.SIGTERM))
+
+
+class Liveness(unittest.TestCase):
+    def test_concurrent_probes_do_not_make_an_unlocked_file_appear_alive(self):
+        from xcheck.files import hold_life, is_alive
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "alive"
+            path.touch()
+            gate = threading.Barrier(3)
+            answers = []
+
+            def probe():
+                gate.wait()
+                answers.append(is_alive(path))
+
+            threads = [threading.Thread(target=probe) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            gate.wait()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(answers, [False, False])
+            with hold_life(path):
+                self.assertTrue(is_alive(path))
+
+
+class CapacityProbe(unittest.TestCase):
+    def test_helper_runs_with_isolated_python(self):
+        from xcheck import capacity
+        with patch.object(capacity.subprocess, "run") as call:
+            call.return_value.stdout = '{"results": [{"status": "eligible"}]}'
+            self.assertEqual(capacity._probe(["codex"])["status"], "eligible")
+        self.assertEqual(call.call_args.args[0][:3],
+                         [sys.executable, "-I", str(capacity.HELPER)])
 
 
 class TrustFiles(unittest.TestCase):

@@ -96,7 +96,7 @@ def is_alive(path: Path) -> bool | None:
         return None
     with open(path, "a+") as fh:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             return True
         return False

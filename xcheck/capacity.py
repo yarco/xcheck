@@ -22,7 +22,7 @@ HELPER = Path(os.environ.get("XCHECK_CAPACITY_HELPER")  # tests substitute a fak
 
 def _probe(args: list[str]) -> dict:
     try:
-        p = subprocess.run([sys.executable, str(HELPER), "--json", *args],
+        p = subprocess.run([sys.executable, "-I", str(HELPER), "--json", *args],
                            capture_output=True, text=True, timeout=180)
         rows = json.loads(p.stdout)["results"]
         return rows[0] if rows else {"status": "capacity-unknown", "note": "no reading"}
