@@ -1,7 +1,8 @@
 """Herdr placement: one visible pane per lane, running the ordinary lane runner.
 
-No agent TUIs are driven. A pane is a terminal showing `xcheck lane` render the
-harness stream; completion is the lane's exit.json, never pane text. The host
+In the default TUI view a pane shows the harness's interactive app, hosted by
+`xcheck lane`; stream view renders events instead. Completion is the lane's
+exit.json, never pane text. The host
 closes only pane IDs it created, and only while they are still in the caller's
 tab.
 """
