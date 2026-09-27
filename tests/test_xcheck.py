@@ -100,6 +100,15 @@ class CodexLane(unittest.TestCase):
             self.assertNotIn("--search", argv)
 
 
+class ReviewsAreNotPersisted(unittest.TestCase):
+    def test_codex_and_claude_lanes_keep_no_session(self):
+        # Grok and Agy have no such switch; their session stores keep a copy.
+        codex = adapters.launch(Lane("codex", "gpt-6-sol", "high"), Path("/w"), Path("/m"), Path("/f"), False)
+        claude = adapters.launch(Lane("claude", "claude-opus-5-5", "high"), Path("/w"), Path("/m"), Path("/f"), False)
+        self.assertIn("--ephemeral", codex.argv)
+        self.assertIn("--no-session-persistence", claude.argv)
+
+
 class GrokReader(unittest.TestCase):
     def test_narration_from_an_earlier_message_is_not_glued_to_the_answer(self):
         r = adapters.Reader("grok")
@@ -150,6 +159,11 @@ class Validation(unittest.TestCase):
     def test_a_bare_schema_is_not_a_review(self):
         _, p = self.ok(f"1) VERDICT\n6) PROOF: {TOKEN}\nRESULT_COMPLETE")
         self.assertIn("no review text besides the heading, PROOF and marker", p)
+
+    def test_a_decorated_marker_is_not_the_marker(self):
+        for m in ("`RESULT_COMPLETE`", "**RESULT_COMPLETE**", "6) RESULT_COMPLETE", "RESULT_COMPLETE."):
+            _, p = self.ok(f"1) VERDICT: the parser is correct.\n6) PROOF: {TOKEN}\n{m}")
+            self.assertIn("last line is not RESULT_COMPLETE", p, m)
 
     def test_failures(self):
         self.assertEqual(self.ok("1) VERDICT\nI cannot.\nRESULT_INVALID")[1], ["peer declared RESULT_INVALID"])
@@ -258,6 +272,13 @@ class EndToEnd(unittest.TestCase):
                         "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("already launched", p.stderr)
+
+    def test_a_refused_first_invocation_does_not_burn_the_base(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",
+                        "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
+        self.assertEqual(p.returncode, 2)
+        self.assertFalse((self.base / ".launched").exists())
+        self.assertEqual({r["status"] for r in self.run_lanes().values()}, {"done"})
 
     def test_orchestrator_kind_is_never_a_peer(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",

@@ -127,6 +127,7 @@ def run_lane(base: Path, name: str) -> int:
             status, reason = "interrupted", f"runner received {stop}"
             _kill(proc)
         code = proc.wait()
+        _reap_group(proc.pid)  # MCP servers, language servers, other leftovers of the lane
     if spec.stdin:
         stdin.close()
     reader.finish(final)
@@ -166,6 +167,13 @@ def _first_stderr_line(path: Path) -> str:
     except OSError:
         pass
     return ""
+
+
+def _reap_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _kill(proc: subprocess.Popen) -> None:

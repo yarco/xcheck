@@ -80,6 +80,8 @@ def _split(target: str, direction: str, ratio: float, cwd: str) -> str:
 
 def close(ctx: dict, pane: str) -> bool:
     """Close a pane this run created, only if it is still in the caller's tab."""
+    if pane == ctx["pane"]:
+        return False  # never the orchestrator's own pane
     try:
         info = _herdr("pane", "get", pane)["pane"]
     except (HerdrError, KeyError):

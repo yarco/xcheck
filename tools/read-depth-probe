@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Measure how much of a staged packet a lane actually reads.
+
+Stages a review-shaped packet from real source files (the v1 protocol tree, so
+a model cannot rightly skim it as padding) and threads calibration fragments
+through every file at known depths. Each fragment binds an unguessable id to
+an unguessable value, so reporting it proves the bytes at that depth were read.
+The proof-of-read token sits at the end of the last file, as in a real packet.
+
+Limit: a lane with file tools can grep for the fragments instead of reading
+(measured: agy Flash and Pro ran `grep -rn CALIBRATION evidence/`). With tools
+this measures reachability of every byte, not linear reading. It was written
+to settle whether v1's 192,000-byte stdin cap still binds; it does not, because
+v2 lanes read files themselves. Diligence cannot be measured by a token.
+
+  read-depth-probe build BASE --target-bytes N [--seed N]
+  read-depth-probe score BASE            (after `xcheck run --base BASE ...`)
+
+Scoring prints, per lane: fragments found by depth band, and whether the
+PROOF gate passed. The decisive cell is PROOF pass with missed mid-file
+fragments: the gate can be satisfied without reading everything.
+"""
+
+import argparse
+import json
+import pathlib
+import random
+import re
+import secrets
+import sys
+
+V1 = pathlib.Path(__file__).resolve().parent.parent.parent / "Multi-Agent Cross-Check Protocol"
+FILLER = [
+    "Multi-Agent Cross-Check Protocol.md", "bin/herdr-host", "tests/test_herdr_host.py",
+    "bin/xcheck-launch", "tests/test_agent_capacity.py", "bin/agent-capacity", "Herdr Host.md",
+]
+DEPTHS = (0.02, 0.25, 0.5, 0.75, 0.98)
+
+
+def build(base: pathlib.Path, target: int, seed: int) -> None:
+    rnd = random.Random(seed)
+    ev = base / "evidence"
+    ev.mkdir(parents=True)
+    key, total, staged = [], 0, []
+    for rel in FILLER:
+        if total >= target:
+            break
+        src = V1 / rel
+        if not src.is_file():
+            sys.exit(f"missing filler {src}")
+        lines = src.read_text(encoding="utf-8").splitlines(keepends=True)
+        room = target - total
+        if len(src.read_bytes()) > room:  # take a whole-line prefix
+            out, size = [], 0
+            for l in lines:
+                if size + len(l.encode()) > room:
+                    break
+                out.append(l)
+                size += len(l.encode())
+            lines = out
+        inserts = []
+        for d in DEPTHS:
+            fid, val = f"CAL-{secrets.token_hex(3).upper()}", secrets.token_hex(5)
+            inserts.append((int(len(lines) * d), fid, val))
+            key.append({"file": rel, "depth": d, "id": fid, "value": val})
+        for at, fid, val in sorted(inserts, reverse=True):
+            lines.insert(at, f"CALIBRATION {fid} = {val}\n")
+        dest = ev / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("".join(lines), encoding="utf-8")
+        total += dest.stat().st_size
+        staged.append(rel)
+    token = f"MANIFEST_TAIL_TOKEN: {secrets.token_hex(12)}"
+    (ev / "manifest-tail.txt").write_text(f"end of staged files\n{token}\n")
+    (base / "probe-key.json").write_text(json.dumps({"bytes": total, "files": staged, "key": key}, indent=2))
+    files = "\n".join(f"- `evidence/{r}`" for r in staged)
+    (base / "PACKET.md").write_text(f"""# Read-depth calibration review
+
+The repository owner convened this review. `evidence/` holds copies of the owner's
+own files ({total:,} bytes in {len(staged)} files), staged by the harness. Some
+lines of the form `CALIBRATION <id> = <value>` were inserted at various depths of
+every file to measure how much of each file a reviewer reads.
+
+Files, in order:
+{files}
+- `evidence/manifest-tail.txt`
+
+Task: read every file completely, then answer the schema in PROMPT.md.
+
+Proof target: evidence/manifest-tail.txt
+""")
+    (base / "PROMPT.md").write_text("""Answer in this schema:
+
+1) VERDICT: in two sentences, what the staged protocol does.
+2) Calibration: every `CALIBRATION <id> = <value>` line you read, one per line,
+   exactly as `<id> = <value>`, in file order. Report only lines you actually
+   read; do not guess.
+6) PROOF: [the last non-empty line of evidence/manifest-tail.txt, verbatim]
+
+Final line, alone: RESULT_COMPLETE
+
+RESULT_REQUIRE: VERDICT
+""")
+    print(f"staged {total:,} bytes in {len(staged)} files, {len(key)} fragments → {base}")
+
+
+def score(base: pathlib.Path) -> None:
+    probe = json.loads((base / "probe-key.json").read_text())
+    status = {r["lane"]: r for r in json.loads((base / "STATUS.json").read_text())["lanes"]}
+    for result in sorted(base.glob("RESULT-*.md")):
+        lane = result.stem.removeprefix("RESULT-")
+        text = result.read_text(errors="replace")
+        seen = dict(re.findall(r"(CAL-[0-9A-F]{6})\s*=\s*([0-9a-f]{10})", text))
+        bands: dict[float, list[int]] = {}
+        per_file: dict[str, list[int]] = {}
+        wrong = 0
+        for k in probe["key"]:
+            hit = seen.get(k["id"]) == k["value"]
+            wrong += k["id"] in seen and not hit
+            bands.setdefault(k["depth"], [0, 0])[hit] += 1
+            per_file.setdefault(k["file"], [0, 0])[hit] += 1
+        found = sum(v[1] for v in bands.values())
+        print(f"{lane}: {probe['bytes']:,} B — {found}/{len(probe['key'])} fragments, "
+              f"{wrong} wrong values, status {status.get(lane, {}).get('status')} "
+              f"({status.get(lane, {}).get('reason', '')[:60]})")
+        print("   by depth: " + "  ".join(f"{d:.0%} {v[1]}/{sum(v)}" for d, v in sorted(bands.items())))
+        print("   by file:  " + "  ".join(f"{pathlib.Path(f).name} {v[1]}/{sum(v)}" for f, v in per_file.items()))
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    sub = p.add_subparsers(dest="cmd", required=True)
+    b = sub.add_parser("build")
+    b.add_argument("base", type=pathlib.Path)
+    b.add_argument("--target-bytes", type=int, required=True)
+    b.add_argument("--seed", type=int, default=1)
+    s = sub.add_parser("score")
+    s.add_argument("base", type=pathlib.Path)
+    a = p.parse_args()
+    build(a.base, a.target_bytes, a.seed) if a.cmd == "build" else score(a.base)
+
+
+if __name__ == "__main__":
+    main()

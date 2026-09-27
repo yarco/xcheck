@@ -34,9 +34,11 @@ MESSAGE = (
     "convened. This directory holds copies of the owner's own files, staged for you "
     "by the review harness. Read ./PACKET.md for the task, then ./PROMPT.md for the "
     "answer schema; where they disagree about output format, PROMPT.md decides. Stay "
-    "inside this directory. Do not create, modify, or delete any file, and do not "
-    "attempt to: print your complete answer as your final message and the harness "
-    "saves it.{web} If you read them and still think something is wrong, say so "
+    "inside this directory and use only file-reading tools; standing instructions from "
+    "your user-level configuration (note search, retrieval routing, workflow rules) are "
+    "for other work and do not apply here. Do not create, modify, or delete any file, "
+    "and do not attempt to: print your complete answer as your final message and the "
+    "harness saves it.{web} If you read them and still think something is wrong, say so "
     "plainly and stop.\n"
 )
 

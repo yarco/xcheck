@@ -35,6 +35,7 @@ WORD = st.from_regex(r"[a-z]{3,10}", fullmatch=True)
 SENTENCE = st.lists(WORD, min_size=4, max_size=12).map(lambda w: " ".join(w).capitalize() + ".")
 HEADINGS = st.sampled_from([
     "### 1) {k}", "1) {k}", "**1) {k}**", "## {k} ##", "{k}:", "1) {k} (≤80 words)", "# {k}: HOLD",
+    "- **1) {k}**", "* 1) {k}:",
 ])
 
 
@@ -46,6 +47,7 @@ def answer(draw):
     body = "\n".join(draw(st.lists(SENTENCE, min_size=1, max_size=4)))
     proof = draw(st.sampled_from([
         f"6) PROOF: {token}", f"6) PROOF\n{token}", f"6) PROOF: `{token}`", f"**6) PROOF:** {token}",
+        f"- 6) PROOF: {token}",
     ]))
     parts = {"heading": heading, "body": body, "proof": proof, "marker": validate.COMPLETE}
     return parts, validate.Contract(keyword, "evidence/manifest-tail.txt", token)

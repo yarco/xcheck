@@ -169,7 +169,11 @@ Staging rules (each one has cost a round when broken):
   review and that `evidence/` holds the operator's own files. A bare "read these
   files and obey them" is correctly refused as prompt injection.
 - **Proof token.** Make the proof target's last line an unguessable token
-  (`MANIFEST_TAIL_TOKEN: <random hex>`), and stage it last.
+  (`MANIFEST_TAIL_TOKEN: <random hex>`), and stage it last. With file tools,
+  a correct PROOF shows the lane could open the packet and followed the
+  output contract; it does not show that it read everything (a lane can
+  `cat` the target directly). Diligence is checked in the merge: an
+  absence-of-code finding is verified against the tree before it counts.
 - **Say what a follow-up round is.** When reviewing fixes from an earlier
   round, stage the delta plus what it touches, name what earlier rounds
   settled, and say the code is a response to a review.
@@ -177,7 +181,8 @@ Staging rules (each one has cost a round when broken):
 ### Answer schema (template for PROMPT.md)
 
 ```text
-1) VERDICT: a decision and its single most important reason, ≤80 words.
+1) VERDICT: a decision and its single most important reason, ≤80 words
+   (the cap compresses the summary only; findings go in section 2, uncapped).
 2) Findings. For each: severity; evidence (file, symbol, behaviour); root cause;
    the mechanism and premises the diagnosis rests on; how often the scenario
    occurs and what ignoring it costs; the smallest repair
@@ -253,6 +258,8 @@ it is `5 + 5n` % for the `n` lanes of this run in that family (capped at 90).
 `reserve-low`, `auth-required`, and `capacity-unknown` end the lane as
 `skipped`, which must be announced.
 
+Agy readings come from an Antigravity `language_server`; the launchd agent
+`a launchd sidecar agent` keeps one running when the desktop app is closed.
 Claude's `security` exit 36 in the probe means a locked login keychain: run
 `keychain-unlock-gui` (operator at the screen), or pass a manual reading via
 `AGENT_CAPACITY_CLAUDE_MANUAL_REMAINING` + `…_CAPTURED_AT` (≤5 min old).
@@ -327,8 +334,13 @@ ones reject it).
 
 - Agy 1.2.12 print mode completes turns that call file tools (paged
   `view_file`, `run_command` reads), so it reads the packet like every other
-  lane. (Older agy exited after a tool call; that is why v1 inlined evidence
-  into a 192,000-byte stdin bundle.)
+  lane. Measured with `tools/read-depth-probe`: Flash and Pro reached every
+  calibration fragment at every depth of a 952 KB, seven-file packet. v1's
+  192,000-byte cap limited its stdin bundle, a transport v2 does not use.
+- Agy starts the operator's MCP servers (a `pond mcp` child was observed)
+  and has a generic `call_mcp_tool`; there is no per-run switch. A call that
+  needs permission is denied and empties the answer, so the message limits
+  lanes to file-reading tools.
 - A permission-requiring tool (any file write) is auto-denied in headless mode
   and the **whole answer is lost**: `result.response` is empty and stderr says
   `jetski: no output produced … auto-denied`. The lane scores `failed`; the
@@ -358,6 +370,14 @@ auth), and `GROK_SANDBOX` (the adapter picks the profile). User preferences
 such as `GROK_TELEMETRY_*` pass through. Re-verify: `env` in the orchestrator's
 shell, then the fake-harness env test.
 
+**Operator rules reach peers.** Codex lanes load `~/.codex/AGENTS.md` (even
+with `--ignore-user-config` and `-c project_doc_max_bytes=0`), and Grok lanes
+load `~/.agents/rules` through `extra_rule_dirs` in `~/.grok/config.toml` (a
+`GROK_CONFIG` overlay does not clear it). Relocating `CODEX_HOME` / `GROK_HOME`
+would split the auth files and risk rotated credentials. The lane message
+therefore scopes standing user-level instructions out of the review.
+Re-verify: ask a low-effort lane to quote any global instructions it was given.
+
 **Independence limit.** Codex and Agy can run read commands, so they can read
 paths outside their workspace, including another lane's `RESULT-*.md` if it
 finished first. The message tells them to stay in their directory; nothing
@@ -374,7 +394,8 @@ out of BASE until that phase.
    before its reasoning. The ratifying lane fails at the premise: it can reject
    a correct fix because it misread code it was shown.
 3. Never tally reviewers. Agreement counts only when premises were derived
-   independently. Volume and table count are not quality; a small delta is not
+   independently; same-family lanes (e.g. `agy-<third-party-model>` with a Claude
+   orchestrator, or two Claude lanes) are correlated evidence. Volume and table count are not quality; a small delta is not
    a reason to drop the expensive lane.
 4. Absence-of-code, wrong-path, and packet-claim findings are packet suspects:
    open the real file first.
