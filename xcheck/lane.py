@@ -20,7 +20,7 @@ from pathlib import Path
 import shutil
 
 from . import adapters, capacity, pools, trust, tui, validate
-from .files import ROOT, Run, atomic_write, hold_life, now, signal_group, workspace
+from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, now, signal_group, workspace
 
 TAIL_LINES = 40
 
@@ -32,14 +32,14 @@ TAIL_LINES = 40
 # a key in the environment would bill it instead. User preferences such as
 # GROK_TELEMETRY_* stay.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX")
-SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-               "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
                "GROK_SANDBOX"}  # the operator's default profile; the adapter picks the lane's
 
 
 def lane_env(spec: adapters.Launch) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_NAMES}
+           if not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_NAMES
+           and not k.endswith("_API_KEY")}  # no lane uses API keys; any would bill
     env.update(spec.env_set)
     return env
 
@@ -56,8 +56,13 @@ def run_lane(base: Path, name: str) -> int:
     """Run one lane; whatever happens, end with exit.json."""
     try:
         return _run_lane(base, name)
-    except _Stop:
-        raise
+    except _Stop as stop:  # a signal outside the guarded spans still ends with a record
+        run = Run.load(base)
+        if not (run.lane_dir(name) / "exit.json").exists():
+            atomic_write(run.lane_dir(name) / "exit.json", json.dumps({
+                "lane": name, "status": "interrupted", "reason": f"runner received {stop}",
+                "exit_code": None, "error": None, "ended": now(), "stderr_tail": []}, indent=2))
+        return 130
     except Exception as e:  # a runner bug must not look like a silent death
         import traceback
         run = Run.load(base)
@@ -65,9 +70,9 @@ def run_lane(base: Path, name: str) -> int:
         (d / "runner-error.log").write_text(traceback.format_exc())
         if not (d / "exit.json").exists():
             status, reason, text = "failed", f"lane runner error: {e!r} (runner-error.log)", ""
-            answer = workspace(name) / "ANSWER.md"
-            if run.view == "tui" and answer.exists():  # never lose a finished answer to a runner bug
-                text = answer.read_text(encoding="utf-8", errors="replace")
+            salvaged = fresh_answer(d, workspace(name))
+            if salvaged:  # never lose a finished answer to a runner bug
+                text = salvaged
                 status, problems = validate.check(text, run.contract)
                 reason = "; ".join(problems) or validate.COMPLETE
                 reason += f"; salvaged after lane runner error {e!r}"
@@ -84,9 +89,8 @@ def _run_lane(base: Path, name: str) -> int:
     d = run.lane_dir(name)
     work, message = workspace(name), d / "message.txt"
     final, stream_path, err_path = d / "final.md", d / "stream.jsonl", d / "stderr.log"
-    spec = adapters.launch(lane, work, message, final, run.web)
-
-    env = lane_env(spec)
+    log = d / "harness.log"  # the harness's own debug log: where root causes are found
+    view = "tui" if lane.kind in adapters.APP_ONLY else run.view
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, _raise_stop)
 
@@ -107,6 +111,7 @@ def _run_lane(base: Path, name: str) -> int:
                        f"pool {lane.pool} stayed busy for {run.cap}s", None, reader, err_path)
     started = time.time()  # idle and cap clocks start when spending can
     _stage(run, work)  # only now: the pool lock makes this workspace ours
+    (d / "staged").touch()
 
     # Capacity is read here, immediately before spending and outside any
     # orchestrator sandbox when the runner lives in a Herdr pane.
@@ -116,15 +121,19 @@ def _run_lane(base: Path, name: str) -> int:
         print(f"xcheck lane {name}: capacity {note}", flush=True)
         if not ok:
             return _finish(run, name, started, "skipped", note, None, reader, err_path)
-    if run.view == "tui":
-        return _run_tui(run, name, lane, d, work, message, started, reader, held)
+    if view == "tui":
+        return _run_tui(run, name, lane, d, work, message, log, started, reader, held)
 
+    spec = adapters.launch(lane, work, message, final, log, run.web)
+    env = lane_env(spec)
     status, reason, code = None, "", None
     stdin = open(spec.stdin, "rb") if spec.stdin else subprocess.DEVNULL
     with open(stream_path, "ab") as stream, open(err_path, "ab") as err:
         try:
+            # The harness inherits the pool lock: the pool stays held while it can
+            # spend, even if this runner is killed.
             proc = subprocess.Popen(spec.argv, cwd=work, env=env, stdin=stdin, stdout=subprocess.PIPE,
-                                    stderr=err, start_new_session=True)
+                                    stderr=err, start_new_session=True, pass_fds=(held.fileno(),))
         except OSError as e:
             return _finish(run, name, started, "failed", f"could not start {spec.argv[0]}: {e}",
                            None, reader, err_path)
@@ -133,7 +142,6 @@ def _run_lane(base: Path, name: str) -> int:
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
         last = time.time()
-        err_size = 0
         pending = b""
         try:
             while True:
@@ -151,9 +159,6 @@ def _run_lane(base: Path, name: str) -> int:
                     *lines, pending = pending.split(b"\n")
                     for raw in lines:
                         _consume(reader, raw)
-                size = err_path.stat().st_size
-                if size != err_size:
-                    err_size, last = size, time.time()
                 if not sel.get_map() and proc.poll() is not None:
                     break
                 t = time.time()
@@ -198,11 +203,12 @@ def _stage(run: Run, work: Path) -> None:
         shutil.copytree(run.base / "evidence", work / "evidence")
 
 
-def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, started: float,
-             reader: adapters.Reader, held) -> int:
+def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log: Path,
+             started: float, reader: adapters.Reader, held) -> int:
     """The harness's own interactive app, in a pty this runner owns (Herdr wall)."""
     trust.ensure(lane.kind, work)  # no "trust this folder?" screen, ever
-    spec = adapters.tui(lane, work, message.read_text(encoding="utf-8").strip(), run.web)
+    spec = adapters.tui(lane, work, message.read_text(encoding="utf-8").strip(), log, run.web)
+    os.set_inheritable(held.fileno(), True)  # the app holds the pool while it can spend
     answer, screen = work / "ANSWER.md", d / "screen.log"
 
     def spawned(pid: int) -> None:
@@ -218,14 +224,13 @@ def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, star
         held.release()
     reader.text = text
     tail = tui.screen_tail(screen)
-    if status is None or (status == "timeout" and text.strip() and validate.last_line(text)
-                          in (validate.COMPLETE, validate.INVALID)):
-        if text.strip():
-            status, problems = validate.check(text, run.contract)
-            reason = "; ".join(problems) or validate.COMPLETE
-        else:
-            status = "failed"
-            reason = "the app ended without writing ANSWER.md; last screen: " + " / ".join(tail[-4:])
+    if text.strip() and status != "interrupted":  # an answer exists: judge the answer
+        stopped = f"; then {reason}" if status else ""
+        status, problems = validate.check(text, run.contract)
+        reason = ("; ".join(problems) or validate.COMPLETE) + stopped
+    elif status is None:
+        status = "failed"
+        reason = "the app ended without writing ANSWER.md; last screen: " + " / ".join(tail[-4:])
     return _finish(run, name, started, status, reason, code, reader, screen, tail=tail)
 
 
@@ -256,7 +261,7 @@ def _first_stderr_line(path: Path) -> str:
 
 
 def _reap_group(pgid: int) -> None:
-    signal_group(pgid, signal.SIGTERM)
+    end_group(pgid)
 
 
 def _kill(proc: subprocess.Popen) -> None:

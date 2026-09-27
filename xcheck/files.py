@@ -6,6 +6,7 @@ import datetime as dt
 import fcntl
 import json
 import os
+import signal
 import tempfile
 import time
 from dataclasses import dataclass
@@ -34,6 +35,18 @@ def atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def fresh_answer(lane_dir: Path, work: Path) -> str | None:
+    """ANSWER.md written by this run's lane, or None. The workspace is reused
+    across runs, so only an answer newer than this run's staging counts."""
+    staged, answer = lane_dir / "staged", work / "ANSWER.md"
+    try:
+        if answer.stat().st_mtime >= staged.stat().st_mtime:
+            return answer.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    return None
+
+
 def signal_group(pgid: int, sig: int) -> bool:
     """Signal a lane's process group; False if nothing was left to signal.
 
@@ -52,6 +65,19 @@ def signal_group(pgid: int, sig: int) -> bool:
             return True
         except (ProcessLookupError, PermissionError):
             return False
+
+
+def end_group(pgid: int) -> bool:
+    """End every process in a lane's group: TERM, up to 3 s grace, then KILL.
+    False if the group was already empty."""
+    if not signal_group(pgid, signal.SIGTERM):
+        return False
+    for _ in range(30):
+        time.sleep(0.1)
+        if not signal_group(pgid, 0):
+            return True
+    signal_group(pgid, signal.SIGKILL)
+    return True
 
 
 def hold_life(path: Path):
@@ -86,8 +112,7 @@ class Run:
     """BASE/run.json: everything a lane runner or a later `wait` needs."""
 
     base: Path
-    lanes: dict[str, Lane]       # selected and launched lanes, by name
-    skipped: dict[str, str]      # selected but not launched: name → reason
+    lanes: dict[str, Lane]       # selected lanes, by name
     contract: Contract
     web: bool
     idle: int
@@ -100,6 +125,7 @@ class Run:
     view: str = "stream"         # stream (headless NDJSON) | tui (interactive app, answers in ANSWER.md)
     capacity: bool = True        # each lane probes its pool before spending
     forced: list = None          # lanes launched past a capacity refusal
+    epoch: float = 0.0           # launch time, for the supervisor's watchdog
 
     def lane(self, name: str) -> Lane:
         return self.lanes[name]
@@ -110,12 +136,11 @@ class Run:
     def save(self) -> None:
         atomic_write(self.base / "run.json", json.dumps({
             "lanes": {n: l.to_json() for n, l in self.lanes.items()},
-            "skipped": self.skipped,
             "contract": vars(self.contract),
             "web": self.web, "idle": self.idle, "cap": self.cap, "mode": self.mode,
             "orch": self.orch, "started": self.started, "panes": self.panes,
             "herdr": self.herdr, "view": self.view, "capacity": self.capacity,
-            "forced": self.forced or [],
+            "forced": self.forced or [], "epoch": self.epoch,
         }, indent=2))
 
     @classmethod
@@ -124,10 +149,9 @@ class Run:
         return cls(
             base=base,
             lanes={n: Lane.from_json(v) for n, v in d["lanes"].items()},
-            skipped=d["skipped"],
             contract=Contract(**d["contract"]),
             web=d["web"], idle=d["idle"], cap=d["cap"], mode=d["mode"],
             orch=d["orch"], started=d["started"], panes=d.get("panes", {}),
             herdr=d.get("herdr", {}), view=d.get("view", "stream"), capacity=d.get("capacity", True),
-            forced=d.get("forced", []),
+            forced=d.get("forced", []), epoch=d.get("epoch", 0.0),
         )

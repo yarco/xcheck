@@ -32,6 +32,9 @@ class Held:
     def __init__(self, fh):
         self._fh = fh
 
+    def fileno(self) -> int:
+        return self._fh.fileno()
+
     def release(self) -> None:
         self._fh.close()
 

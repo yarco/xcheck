@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -18,15 +20,17 @@ import time
 from pathlib import Path
 
 from . import adapters, herdr, validate
-from .files import ROOT, Run, atomic_write, hold_life, is_alive, now, signal_group, workspace
+from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, is_alive, now, workspace
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 START_GRACE = 90  # seconds for a placed runner to record its pid
+TUI_IDLE = 180    # default --idle for apps (they animate while working)
+STREAM_IDLE = 900 # default --idle for headless streams
 LINGER = 3        # seconds a finished Herdr pane stays visible
 STILL_RUNNING = 3
 
 DELIVER = {
-    "stream": "Do not create, modify, or delete any file, and do not attempt to: print "
-              "your complete answer as your final message and the harness saves it.",
+    "stream": "Do not create, modify, or delete any file. Print your complete answer as "
+              "your final message; the harness saves it.",
     "tui": "Create, modify, or delete no file except one: write your complete answer to "
            "./ANSWER.md in a single write, ending with its final line; the harness "
            "publishes it.",
@@ -54,7 +58,8 @@ class RunError(Exception):
 
 
 def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: bool,
-          idle: int, cap: int, force_lanes: set[str], skip_capacity: bool, view: str = "auto") -> int:
+          idle: int | None, cap: int, force_lanes: set[str], skip_capacity: bool,
+          view: str = "auto") -> int:
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
         raise RunError(f"BASE must live under {ROOT}")
@@ -78,18 +83,25 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         raise RunError(f"{base} was already launched; use `xcheck wait` or a fresh BASE")
     mode = "herdr" if ctx else "headless"
     view = ("tui" if mode == "herdr" else "stream") if view == "auto" else view
+    # An app draws a spinner or timer while it works, so a still screen means it
+    # stopped: a short idle window is safe there. A stream can be quiet longer.
+    idle = idle or (TUI_IDLE if view == "tui" else STREAM_IDLE)
 
-    run = Run(base=base, lanes={l.name: l for l in lanes}, skipped={}, contract=contract,
+    run = Run(base=base, lanes={l.name: l for l in lanes}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
-              herdr=ctx or {}, view=view, capacity=not skip_capacity, forced=sorted(force_lanes))
-    message = MESSAGE.format(deliver=DELIVER[view], web_tools=", web search" if web else "", web=(
-        " Search the web when it can settle a fact your answer depends on, and cite"
-        " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
-    for name in run.lanes:
-        d = run.lane_dir(name)
-        d.mkdir(parents=True)
-        (d / "message.txt").write_text(message, encoding="utf-8")
-    run.save()
+              herdr=ctx or {}, view=view, capacity=not skip_capacity, forced=sorted(force_lanes),
+              epoch=time.time())
+    try:
+        for name in run.lanes:
+            d = run.lane_dir(name)
+            d.mkdir(parents=True)
+            lane_view = "tui" if run.lanes[name].kind in adapters.APP_ONLY else view
+            (d / "message.txt").write_text(_message(lane_view, web), encoding="utf-8")
+        run.save()
+    except OSError:
+        shutil.rmtree(base / "lanes", ignore_errors=True)
+        (base / ".launched").rmdir()  # nothing started: the BASE stays usable
+        raise
     atomic_write(base / "supervisor.pid", str(os.getpid()))  # for operators; liveness is the lock
     _alive = hold_life(base / "supervisor.alive")
     print(f"xcheck: {len(run.lanes)} lanes ({mode}, {view}) → {', '.join(run.lanes)}", flush=True)
@@ -97,20 +109,28 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     children: dict[str, subprocess.Popen] = {}
     if mode == "headless":
         for name in run.lanes:
-            view = open(run.lane_dir(name) / "view.log", "ab")
-            children[name] = subprocess.Popen(_runner_argv(base, name), stdout=view,
-                                              stderr=subprocess.STDOUT, start_new_session=True)
+            with open(run.lane_dir(name) / "view.log", "ab") as out:
+                children[name] = subprocess.Popen(_runner_argv(base, name), stdout=out,
+                                                  stderr=subprocess.STDOUT, start_new_session=True)
     else:
+        def created(lane: str, pane: str) -> None:  # durable as soon as it exists
+            run.panes[lane] = pane
+            run.save()
         try:
-            run.panes = herdr.place(ctx, list(run.lanes), str(base),
-                                    lambda n: herdr.shell_command(_runner_argv(base, n)))
+            herdr.place(ctx, list(run.lanes), str(base),
+                        lambda n: herdr.shell_command(_runner_argv(base, n)), created)
         except herdr.HerdrError as e:
             print(f"herdr placement failed: {e}", flush=True)
-        run.save()
         for name in run.lanes:
             if name not in run.panes:
                 _write_exit(run, name, "failed", "Herdr placement failed before this lane started")
     return _wait(run, children)
+
+
+def _message(view: str, web: bool) -> str:
+    return MESSAGE.format(deliver=DELIVER[view], web_tools=", web search" if web else "", web=(
+        " Search the web when it can settle a fact your answer depends on, and cite"
+        " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
 
 
 def detach(argv: list[str], base: Path) -> int:
@@ -145,27 +165,25 @@ def wait(base: Path, timeout: int | None) -> int:
     base = base.resolve()
     run = Run.load(base)
     until = time.time() + timeout if timeout else None
-    if (base / ".done").exists():
-        print((base / "STATUS.md").read_text(), flush=True)
-        return 0
-    if is_alive(base / "supervisor.alive"):
-        while not (base / ".done").exists():
-            if until and time.time() >= until:
-                return _still_running(run)
-            if not is_alive(base / "supervisor.alive"):
-                break
-            time.sleep(2)
+    while True:
         if (base / ".done").exists():
             print((base / "STATUS.md").read_text(), flush=True)
             return 0
-    # The supervisor is gone without finishing: reattach and finish its job.
-    return _wait(run, {}, until)
+        if not is_alive(base / "supervisor.alive"):
+            try:  # the supervisor is gone without finishing: become it
+                _alive = hold_life(base / "supervisor.alive")
+            except BlockingIOError:
+                pass  # another wait took over first; watch it instead
+            else:
+                return _wait(run, {}, until)
+        if until and time.time() >= until:
+            return _still_running(run)
+        time.sleep(2)
 
 
 def _still_running(run: Run) -> int:
-    ended = sum(_exit_path(run, n).exists() for n in run.lanes)
-    print(f"xcheck: still running — {ended}/{len(run.lanes)} lanes ended. "
-          f"Call `xcheck wait --base {run.base}` again.", flush=True)
+    print(render_status(run) + f"xcheck: still running; call `xcheck wait --base {run.base}` "
+          f"again. Report any failed or skipped row above now.", flush=True)
     return STILL_RUNNING
 
 
@@ -178,8 +196,8 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
 
-    t0 = time.time()
     closed: set[str] = set()
+    stopping: dict[str, float] = {}
     pending = set(run.lanes)
     while pending:
         if interrupted:
@@ -201,12 +219,18 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
             if alive is False:
                 _settle_dead_runner(run, name)
                 pending.discard(name)
-            elif alive is None and time.time() - t0 > START_GRACE:
+            elif alive is None and time.time() - run.epoch > START_GRACE:
                 _write_exit(run, name, "failed", "lane runner never started")
                 pending.discard(name)
-            elif time.time() - t0 > 2 * run.cap + 180:  # pool wait + spend
-                _write_exit(run, name, "failed", "lane runner outlived its cap; left running")
-                pending.discard(name)
+            elif alive and time.time() - run.epoch > 2 * run.cap + 180:  # pool wait + spend
+                # A runner enforces its own cap; one still alive here is stuck.
+                # Ask it to stop (it ends its app and writes exit.json), then force.
+                runner = _runner_pid(run, name)
+                if name not in stopping:
+                    stopping[name] = time.time()
+                    _signal(runner, signal.SIGTERM)
+                elif time.time() - stopping[name] > 60:
+                    _signal(runner, signal.SIGKILL)
         _close_finished(run, closed)
         if pending:
             time.sleep(1)
@@ -223,6 +247,13 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
 
 def _exit_path(run: Run, name: str) -> Path:
     return run.lane_dir(name) / "exit.json"
+
+
+def _runner_pid(run: Run, name: str) -> int | None:
+    try:
+        return json.loads((run.lane_dir(name) / "pids.json").read_text()).get("runner")
+    except (OSError, ValueError):
+        return None
 
 
 def _runner_alive(run: Run, name: str, children) -> bool | None:
@@ -253,13 +284,13 @@ def _settle_dead_runner(run: Run, name: str) -> None:
         harness = None
     note = "lane runner died without writing exit.json"
     cmd = _pid_cmd(harness)  # identity: every adapter argv names the lane dir or workspace
-    if harness and (str(d) in cmd or str(workspace(name)) in cmd):
-        if signal_group(harness, signal.SIGTERM):
+    if harness and any(re.search(re.escape(str(p)) + r"(?=[/\s'\"]|$)", cmd) for p in (d, workspace(name))):
+        if end_group(harness):
             note += "; its harness was still running and was stopped"
     result = run.base / f"RESULT-{name}.md"
-    answer = workspace(name) / "ANSWER.md"
-    if not result.exists() and run.view == "tui" and answer.exists():
-        result.write_text(answer.read_text(encoding="utf-8", errors="replace"))  # salvage
+    salvaged = fresh_answer(d, workspace(name))
+    if not result.exists() and salvaged:
+        atomic_write(result, salvaged)  # the lane finished; its runner did not
     if result.exists():
         status, problems = validate.check(result.read_text(errors="replace"), run.contract)
         _write_exit(run, name, status, f"{note}; published answer: {'; '.join(problems) or 'valid'}")
@@ -267,11 +298,12 @@ def _settle_dead_runner(run: Run, name: str) -> None:
         _write_exit(run, name, "failed", note)
 
 
-def _signal(pid: int, sig: int) -> None:
-    try:
-        os.kill(pid, sig)
-    except ProcessLookupError:
-        pass
+def _signal(pid, sig: int) -> None:
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 def _write_exit(run: Run, name: str, status: str, reason: str) -> None:
@@ -290,8 +322,8 @@ def _close_finished(run: Run, closed: set[str], linger: bool = True) -> None:
             continue
         if linger and time.time() - path.stat().st_mtime < LINGER:
             continue
-        herdr.close(run.herdr, pane)
-        closed.add(name)
+        if herdr.close(run.herdr, pane):
+            closed.add(name)
 
 
 # ------------------------------------------------------------------ status

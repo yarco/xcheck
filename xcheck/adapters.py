@@ -67,6 +67,9 @@ def parse_lane(spec: str) -> Lane:
         raise ValueError(f"lane spec must be kind:model[:effort], kind in {KINDS}: {spec!r}")
     kind, model = parts[0], parts[1]
     effort = parts[2] if len(parts) == 3 else ""
+    for part in (model, effort):
+        if part and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part):
+            raise ValueError(f"model and effort must be plain identifiers: {part!r}")
     if kind == "agy" and effort:
         raise ValueError(f"agy selectors carry their own effort; drop ':{effort}'")
     if kind != "agy" and not effort:
@@ -81,8 +84,9 @@ class Launch:
     env_set: dict[str, str] = field(default_factory=dict)
 
 
-def launch(lane: Lane, work: Path, message: Path, final: Path, web: bool) -> Launch:
-    """The exact command for one lane. `work` is the lane's read-only workspace."""
+def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: bool) -> Launch:
+    """Headless command for one lane (stream view). `work` is its workspace,
+    `log` its forensic log. Agy has no headless form: see `tui`."""
     if lane.kind == "codex":
         argv = [
             "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
@@ -101,99 +105,101 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, web: bool) -> Lau
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--tools", tools, "--allowedTools", tools, "--add-dir", str(work),
             "--no-session-persistence", "--model", lane.model, "--effort", lane.effort,
+            "--debug-file", str(log),
             # Partial messages keep the stream moving during a long silent
             # think, so the idle clock measures real inactivity.
             "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         ]
-        return Launch(argv, message)
+        return Launch(argv, message, env_set=CLAUDE_ENV)
     if lane.kind == "grok":
         tools = "read_file,web_search,web_fetch" if web else "read_file"
         argv = [
             "grok", "--prompt-file", str(message), "-m", lane.model,
             "--reasoning-effort", lane.effort, "--cwd", str(work),
-            "--tools", tools, "--deny", "MCPTool(*)",
-            "--no-subagents", "--no-plan", "--no-auto-update",
-            # read-only: reads everywhere, kernel-denied writes outside ~/.grok
-            # and tmp. `strict` cannot read /opt/homebrew, so operator hooks that
-            # exec a binary fail with 126 (grok ignores it); `off` has no write
-            # protection. Verified on grok 1.0.41 with the operator's hooks.
-            "--sandbox", "read-only", "--always-approve",
+            "--tools", tools, "--deny", "MCPTool(*)", "--no-subagents", "--no-plan",
+            "--sandbox", "read-only", "--always-approve", "--debug-file", str(log),
             "--output-format", "streaming-json",
         ]
         if not web:
             argv.append("--disable-web-search")
-        # --no-memory is accepted but hidden from `grok --help`; GROK_MEMORY=0
-        # is the documented switch (user-guide 14-headless-mode).
-        return Launch(argv, None, env_set={"GROK_MEMORY": "0"})
-    if lane.kind == "agy":
-        # Prompt on stdin (no -p). --mode plan keeps it read-only; do not add
-        # --disable-slash-commands, which disables plan mode. Agy has no tool
-        # allowlist, so packet-mode web-off is prompt-enforced only.
-        argv = [
-            "agy", "--sandbox", "--mode", "plan", "--model", lane.model,
-            "--output-format", "stream-json", "--print-timeout", "0s",
-            "--log-file", str(final.with_name("agy-cli.log")),
-        ]
-        return Launch(argv, message)
-    raise ValueError(f"unknown kind {lane.kind}")
+        return Launch(argv, None, env_set=GROK_ENV)
+    raise ValueError(f"{lane.kind} has no headless form; it runs as its app (tui)")
 
 
-def tui(lane: Lane, work: Path, message: str, web: bool) -> Launch:
+# Grok: `read-only` reads everywhere and kernel-denies writes outside ~/.grok and
+# tmp; `strict` cannot read /opt/homebrew, so operator hooks that exec a binary
+# fail with 126 (ignored by grok); `off` has no write guard. Memory and the
+# updater are off through their documented variables (neither `--no-memory` nor
+# `--no-auto-update` is in `grok --help`).
+GROK_ENV = {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"}
+CLAUDE_ENV = {"DISABLE_AUTOUPDATER": "1"}
+
+# Kinds whose headless (print) mode cannot be trusted with tools: Agy ends the
+# whole turn, answer included, the moment print mode soft-denies a tool
+# confirmation (a sandbox-blocked command, a write). Its app with
+# --dangerously-skip-permissions never asks, so Agy always runs as its app.
+APP_ONLY = {"agy"}
+
+
+def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
     """The harness's interactive app, started with its initial prompt as an
     argument, so nothing is typed into it. The lane answers by writing
-    ANSWER.md in `work`; the runner publishes it. Used for the Herdr wall."""
+    ANSWER.md in `work`; the runner publishes it."""
     if lane.kind == "claude":
         tools = "Read,Write,WebSearch,WebFetch" if web else "Read,Write"
         argv = [
             "claude", "--restricted", "--permission-mode", "dontAsk",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--tools", tools, "--allowedTools", tools, "--add-dir", str(work),
-            "--model", lane.model, "--effort", lane.effort, message,
+            "--model", lane.model, "--effort", lane.effort, "--debug-file", str(log), message,
         ]
-        return Launch(argv, None)
+        return Launch(argv, None, env_set=CLAUDE_ENV)
     if lane.kind == "codex":
         argv = [
             "codex", "-s", "workspace-write", "-a", "never", "-C", str(work),
             "-m", lane.model, "-c", f'model_reasoning_effort="{lane.effort}"',
-            "-c", 'history.persistence="none"',
-            "-c", f'web_search="{"live" if web else "disabled"}"',
+            "-c", 'history.persistence="none"', "-c", "check_for_update_on_startup=false",
+            # The app's web switch is --search; the config key stays for "off".
+            *(["--search"] if web else ["-c", 'web_search="disabled"']),
             message,
         ]
         return Launch(argv, None)
     if lane.kind == "grok":
-        # The TUI ignores --tools (user-guide 14); deny rules do apply.
+        # The app ignores --tools (user-guide 14); deny rules do apply.
         argv = [
             "grok", "-m", lane.model, "--reasoning-effort", lane.effort, "--cwd", str(work),
-            "--deny", "MCPTool(*)", "--deny", "Bash",
-            "--no-subagents", "--no-plan", "--no-auto-update",
-            "--sandbox", "read-only", "--always-approve", message,
+            "--deny", "MCPTool(*)", "--deny", "Bash", "--no-subagents", "--no-plan",
+            "--sandbox", "read-only", "--always-approve", "--debug-file", str(log),
+            *([] if web else ["--disable-web-search"]), message,
         ]
-        if not web:
-            argv.insert(-1, "--disable-web-search")
-        return Launch(argv, None, env_set={"GROK_MEMORY": "0"})
+        return Launch(argv, None, env_set=GROK_ENV)
     if lane.kind == "agy":
         argv = [
             "agy", "--sandbox", "--dangerously-skip-permissions", "--mode", "accept-edits",
-            "--model", lane.model, "-i", message,
+            "--model", lane.model, "--log-file", str(log), "-i", message,
         ]
         return Launch(argv, None)
     raise ValueError(f"unknown kind {lane.kind}")
 
 
 # Flags each adapter relies on, for `xcheck doctor` (help-text drift check).
+# Hidden-but-accepted flags are never used, so every entry must be listed.
 HELP_COMMANDS = {
-    "codex": (["codex", "exec", "--help"], ["--skip-git-repo-check", "--ephemeral",
-              "--ignore-user-config", "--sandbox", "--cd", "--model", "--config", "--json",
-              "--output-last-message"]),
+    "codex exec": (["codex", "exec", "--help"], ["--skip-git-repo-check", "--ephemeral",
+                   "--ignore-user-config", "--sandbox", "--cd", "--model", "--config", "--json",
+                   "--output-last-message"]),
+    "codex": (["codex", "--help"], ["--sandbox", "--ask-for-approval", "--cd", "--model",
+              "--config", "--search"]),
     "claude": (["claude", "--help"], ["--print", "--restricted", "--permission-mode",
                "--strict-mcp-config", "--mcp-config", "--tools", "--allowedTools", "--add-dir",
                "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
-               "--permission-prompts", "--include-partial-messages"]),
+               "--permission-prompts", "--include-partial-messages", "--debug-file"]),
     "grok": (["grok", "--help"], ["--prompt-file", "--model", "--reasoning-effort", "--cwd",
-             "--tools", "--deny", "--no-subagents", "--no-plan", "--no-auto-update", "--sandbox",
-             "--always-approve", "--output-format", "streaming-json", "--disable-web-search"]),
-    "agy": (["agy", "--help"], ["--sandbox", "--mode", "--model", "--output-format",
-            "stream-json", "--print-timeout", "--log-file"]),
+             "--tools", "--deny", "--no-subagents", "--no-plan", "--sandbox",
+             "--always-approve", "--output-format", "streaming-json", "--disable-web-search",
+             "--debug-file"]),
+    "agy": (["agy", "--help"], ["--sandbox", "--dangerously-skip-permissions", "--mode",
+            "--model", "--log-file", "--prompt-interactive"]),
 }
 
 
@@ -281,22 +287,6 @@ class Reader:
             return f"! {self.error}"
         if t == "end":
             return f"· end {o.get('stopReason')}"
-        return None
-
-    # -- agy: step updates; the `result` event carries status and response.
-    def _agy(self, o: dict) -> str | None:
-        if o.get("event") == "result":
-            r = o.get("result") or {}
-            self.text = r.get("response") or ""
-            if r.get("status") != "SUCCESS":
-                self.error = r.get("error") or r.get("status")
-            return None
-        s = o.get("step_update") or {}
-        if s.get("step_type") == "tool" and s.get("state") == "ACTIVE":
-            info = s.get("tool_info") or {}
-            return f"> {s.get('tool_name')} {_clip(json.dumps(info.get('parameters')), 100)}"
-        if s.get("text_delta") and s.get("state") == "DONE":
-            return None
         return None
 
 

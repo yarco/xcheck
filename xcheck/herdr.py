@@ -46,27 +46,29 @@ def caller() -> dict | None:
     return {"pane": pane, "tab": layout.get("tab_id"), "workspace": layout.get("workspace_id")}
 
 
-def place(ctx: dict, lanes: list[str], cwd: str, command_for) -> dict[str, str]:
+def place(ctx: dict, lanes: list[str], cwd: str, command_for, created) -> None:
     """Split a right-hand column with one equal row per lane; start each runner.
 
-    Returns lane → pane id for every pane created, even if a later step fails,
-    so the caller can record and later close them.
+    `created(lane, pane)` is called the moment each pane exists, so a failure
+    later in placement never loses a pane that may already be running.
     """
-    panes: dict[str, str] = {}
     n = len(lanes)
     if not n:
-        return panes
+        return
     first = _split(ctx["pane"], "right", WALL_RATIO, cwd)
-    panes[lanes[0]] = first
+    created(lanes[0], first)
+    _start(first, lanes[0], command_for)
     # Each `split down` of the first pane inserts the new pane directly below
     # it, so create rows for the remaining lanes in reverse to read top-down.
     for k, lane in enumerate(reversed(lanes[1:]), start=1):
-        panes[lane] = _split(first, "down", round((n - k) / (n - k + 1), 3), cwd)
-    for lane in lanes:
-        p = panes[lane]
-        _herdr("pane", "rename", p, f"xcheck:{lane}")
-        _herdr("pane", "run", p, command_for(lane))
-    return panes
+        pane = _split(first, "down", round((n - k) / (n - k + 1), 3), cwd)
+        created(lane, pane)
+        _start(pane, lane, command_for)
+
+
+def _start(pane: str, lane: str, command_for) -> None:
+    _herdr("pane", "rename", pane, f"xcheck:{lane}")
+    _herdr("pane", "run", pane, command_for(lane))
 
 
 def _split(target: str, direction: str, ratio: float, cwd: str) -> str:
@@ -85,7 +87,7 @@ def close(ctx: dict, pane: str) -> bool:
     try:
         info = _herdr("pane", "get", pane)["pane"]
     except (HerdrError, KeyError):
-        return False  # already gone, or unreadable: never guess
+        return True  # already gone (or unreadable): nothing this run can close
     if info.get("tab_id") != ctx["tab"] or info.get("workspace_id") != ctx["workspace"]:
         return False
     try:
