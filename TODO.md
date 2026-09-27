@@ -11,3 +11,9 @@
 - Command: `WEB_MODE=live /Users/yarco/.agents/xcheck/bin/herdr-host --base /tmp/agent-offload/xcheck-v2-design-20260927 --deadline 2400 --orch "claude"`
 - Resume: `WEB_MODE=live /Users/yarco/.agents/xcheck/bin/herdr-host --base /tmp/agent-offload/xcheck-v2-design-20260927 --deadline 2400 --orch "claude" --wait-only`
 - Orchestrator plan (peers open it only after their own design): `/tmp/agent-offload/xcheck-v2-design-20260927/evidence/plan/PLAN-claude-opus-5-5.md`
+
+## v2 initial implementation — 2026-09-27
+
+- Done: adapters (4 harnesses, flags verified by `xcheck doctor` + real smoke), lane runner, headless + Herdr placement, validation, capacity (v1 helper minus runtime hook), status, `wait`, tests (25, fake harness + real stream fixtures).
+- Real headless smoke: codex/claude/grok/agy all `done` on a 3-line packet.
+- Pending: Herdr-mode live smoke (after the v1 design run frees the tab); fold in the design cross-check's findings; swap folders (`Multi-Agent Cross-Check Protocol/` → `x-check-old/`, this repo → `Multi-Agent Cross-Check Protocol/`); update vault AGENTS.md pointer.

@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""X-Check: fan a staged review packet out to peer agent CLIs and collect answers.
+
+  xcheck run    --base B [--lanes kind:model[:effort],...] [--orch KIND] [--mode auto|headless|herdr]
+  xcheck wait   --base B      reattach to a run whose supervisor died
+  xcheck status --base B      render STATUS from files, no waiting
+  xcheck doctor               check adapter flags and model pins against installed CLIs
+  xcheck lane   --base B --lane NAME   (internal: run one lane)
+
+See X-Check.md for the protocol.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from xcheck import adapters, lane, run, validate  # noqa: E402
+from xcheck.files import Run  # noqa: E402
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="xcheck", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("run", help="launch a staged BASE and wait for every lane")
+    r.add_argument("--base", required=True, type=Path)
+    r.add_argument("--orch", required=True, choices=[*adapters.KINDS, "other"],
+                   help="the orchestrating harness; its kind is never a peer")
+    r.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster minus --orch")
+    r.add_argument("--mode", default="auto", choices=["auto", "headless", "herdr"])
+    r.add_argument("--web", default="packet", choices=["packet", "live"])
+    r.add_argument("--idle", type=int, default=600, help="seconds without output before a lane is killed")
+    r.add_argument("--cap", type=int, default=2700, help="hard wall-clock seconds per lane")
+    r.add_argument("--force-lane", action="append", default=[], metavar="NAME",
+                   help="launch this lane even if capacity says no (record why in chat)")
+    r.add_argument("--skip-capacity", action="store_true", help="no capacity probe (tests, smoke runs)")
+    r.add_argument("--force", action="store_true", help="ignore live lanes from another run")
+
+    for name in ("wait", "status"):
+        s = sub.add_parser(name)
+        s.add_argument("--base", required=True, type=Path)
+    sub.add_parser("doctor")
+    ln = sub.add_parser("lane")
+    ln.add_argument("--base", required=True, type=Path)
+    ln.add_argument("--lane", required=True)
+
+    a = p.parse_args()
+    try:
+        if a.cmd == "run":
+            if a.lanes:
+                lanes = [adapters.parse_lane(s.strip()) for s in a.lanes.split(",") if s.strip()]
+            else:
+                lanes = [l for l in adapters.DEFAULT_ROSTER if l.kind != a.orch]
+            return run.start(a.base, lanes, a.mode, a.orch, a.web == "live", a.idle, a.cap,
+                             set(a.force_lane), a.skip_capacity, a.force)
+        if a.cmd == "wait":
+            return run.wait(a.base)
+        if a.cmd == "status":
+            print(run.render_status(Run.load(a.base.resolve())))
+            return 0
+        if a.cmd == "doctor":
+            return run.doctor()
+        if a.cmd == "lane":
+            return lane.run_lane(a.base.resolve(), a.lane)
+    except (run.RunError, validate.PacketError, ValueError) as e:
+        print(f"xcheck: {e}", file=sys.stderr)
+        return 2
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

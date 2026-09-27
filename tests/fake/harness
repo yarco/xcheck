@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Fake codex/claude/grok/agy: speaks each CLI's real stream shape.
+
+The kind is argv[0]'s basename. FAKE_MODE selects the behaviour:
+ok | invalid | declined | error | hang | silent-exit.
+"""
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+kind = Path(sys.argv[0]).name
+mode = os.environ.get("FAKE_MODE", "ok")
+argv = sys.argv[1:]
+
+
+def emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+if kind == "claude":
+    work = Path(argv[argv.index("--add-dir") + 1])
+elif kind == "grok":
+    work = Path(argv[argv.index("--cwd") + 1])
+else:
+    work = Path.cwd()
+token = [l for l in (work / "evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
+answer = {
+    "ok": f"### 1) VERDICT\nfine.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n",
+    "invalid": "### 1) VERDICT\nfine but no proof and no marker\n",
+    "declined": "I cannot do this review.\nRESULT_INVALID\n",
+}.get(mode)
+
+if mode == "hang":
+    time.sleep(60)
+    sys.exit(0)
+if mode == "silent-exit":
+    sys.exit(0)
+
+if kind == "codex":
+    out = Path(argv[argv.index("-o") + 1])
+    emit({"type": "thread.started", "thread_id": "t"})
+    if mode == "error":
+        emit({"type": "error", "message": "status 402: usage limit reached"})
+        emit({"type": "turn.failed", "error": {"message": "usage limit reached"}})
+        sys.exit(1)
+    emit({"type": "item.completed", "item": {"type": "agent_message", "text": answer}})
+    out.write_text(answer)
+    emit({"type": "turn.completed"})
+elif kind == "claude":
+    emit({"type": "system", "subtype": "init"})
+    if mode == "error":
+        emit({"type": "result", "subtype": "success", "is_error": True,
+              "result": "You've hit your limit · resets 7pm"})
+        sys.exit(1)
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": answer}]}})
+    emit({"type": "result", "subtype": "success", "is_error": False, "result": answer})
+elif kind == "grok":
+    if mode == "error":
+        emit({"type": "error", "message": "HTTP 402 Grok Build usage balance exhausted"})
+        sys.exit(1)
+    emit({"type": "text", "data": "Let me read the files."})
+    emit({"type": "tool_call", "toolName": "read_file", "rawInput": {"target_file": "PACKET.md"}})
+    for i in range(0, len(answer), 7):
+        emit({"type": "text", "data": answer[i:i + 7]})
+    emit({"type": "end", "stopReason": "end_turn"})
+elif kind == "agy":
+    sys.stdin.read()
+    emit({"event": "init", "init": {}})
+    if mode == "error":
+        emit({"event": "result", "result": {"status": "ERROR", "response": "",
+                                             "error": "Individual quota reached"}})
+        sys.exit(1)
+    emit({"event": "result", "result": {"status": "SUCCESS", "response": answer}})

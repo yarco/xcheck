@@ -1,0 +1,1361 @@
+#!/usr/bin/env python3
+"""Read subscription capacity for local AI harnesses without inference calls."""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import datetime as dt
+import http.client
+import json
+import math
+import os
+import pathlib
+import pwd
+import pty
+import re
+import select
+import shlex
+import shutil
+import signal
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from typing import Any, Callable
+
+
+SCHEMA_VERSION = 1
+STATUSES = {"eligible", "reserve-low", "auth-required", "capacity-unknown"}
+HARNESSES = ("codex", "claude", "grok", "agy", "perplexity")
+GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
+GROK_CREDITS_URL = f"{GROK_BILLING_URL}?format=credits"
+GROK_CLI_PRODUCT = "GrokBuild"
+GROK_PERIOD_LABELS = {
+    "USAGE_PERIOD_TYPE_DAILY": "daily",
+    "USAGE_PERIOD_TYPE_WEEKLY": "weekly",
+    "USAGE_PERIOD_TYPE_MONTHLY": "monthly",
+}
+AGY_QUOTA_SUMMARY_PATH = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+AGY_SOURCE = "agy-local-quota-summary"
+AGY_USAGE_REPORT_SOURCE = "agy-cli-usage-report"
+# Definitive blocking prompt and explicit-logout evidence, mirroring CodexBar's
+# AntigravityCLIAuthenticationPrompt. The CLI briefly prints "not signed in"
+# while auto-refreshing an existing login, so a transient mention is not proof.
+AGY_AUTH_MARKERS = (b"select login method", b"not logged into antigravity")
+# `agy -p /usage` is a client-side slash command only from this release on;
+# earlier CLIs turn an unsupported slash command into a real model prompt,
+# which a capacity probe must never send.
+AGY_USAGE_MIN_VERSION = (1, 1, 11)
+MAX_PROBE_TIMEOUT = 60.0
+CLAUDE_LOGIN = "env -u ANTHROPIC_API_KEY claude auth login --claudeai"
+CLAUDE_MANUAL_REMAINING_ENV = "AGENT_CAPACITY_CLAUDE_MANUAL_REMAINING"
+CLAUDE_MANUAL_CAPTURED_ENV = "AGENT_CAPACITY_CLAUDE_MANUAL_CAPTURED_AT"
+CLAUDE_MANUAL_MAX_AGE_SECONDS = 300
+SECRET_PATTERNS = (
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"(?i)\b(access|refresh|id)[_-]?token\b\s*[:=]\s*\S+"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{8,})?\b"),
+    re.compile(r"(?i)\b(sk|xai|ghp|gho|ghu|ghs|ghr|github_pat|pat)[-_][A-Za-z0-9_-]{8,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"),
+    re.compile(r"(?i)\b\w*(secret|api[_-]?key|password|passwd|token)\w*\b\s*[:=]\s*\S+"),
+)
+
+
+class AuthProbeError(RuntimeError):
+    """A provider explicitly reported missing or invalid subscription authentication."""
+
+
+def now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def safe_note(value: object, maximum: int = 240) -> str:
+    text = " ".join(str(value).split())
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text[:maximum]
+
+
+def result(
+    harness: str,
+    status: str,
+    *,
+    remaining_percent: float | None = None,
+    remaining_count: int | None = None,
+    limiting_window: str | None = None,
+    resets_at: str | None = None,
+    source: str,
+    note: str,
+) -> dict[str, Any]:
+    if status not in STATUSES:
+        raise ValueError(f"invalid status: {status}")
+    return {
+        "harness": harness,
+        "status": status,
+        "remaining_percent": remaining_percent,
+        "remaining_count": remaining_count,
+        "limiting_window": limiting_window,
+        "resets_at": (safe_note(resets_at) if isinstance(resets_at, str) else resets_at),
+        "source": source,
+        "fresh_at": now_iso(),
+        "note": safe_note(note),
+    }
+
+
+def unknown(harness: str, source: str, note: str) -> dict[str, Any]:
+    return result(harness, "capacity-unknown", source=source, note=note)
+
+
+def auth_required(harness: str, source: str, note: str) -> dict[str, Any]:
+    return result(harness, "auth-required", source=source, note=note)
+
+
+def number(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ValueError(f"{field} must be a finite number")
+    return float(value)
+
+
+def integer(value: object, field: str) -> int:
+    parsed = number(value, field)
+    if parsed < 0 or not parsed.is_integer():
+        raise ValueError(f"{field} must be a non-negative integer")
+    return int(parsed)
+
+
+def normalize_reset(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return dt.datetime.fromtimestamp(float(value), dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, str) and value:
+        return value[:-6] + "Z" if value.endswith("+00:00") else value
+    raise ValueError("reset timestamp has an unsupported type")
+
+
+def optional_reset(value: object) -> str | None:
+    # Grok billingPeriodEnd is cosmetic. A wrapped, bool, or overflowing
+    # timestamp must not turn a healthy billing payload into capacity-unknown.
+    try:
+        return normalize_reset(value)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def percentage_result(
+    harness: str,
+    windows: list[tuple[str, float, str | None]],
+    reserve: float,
+    source: str,
+) -> dict[str, Any]:
+    if not windows:
+        raise ValueError("no applicable quota windows")
+    for name, remaining, _reset in windows:
+        if not 0 <= remaining <= 100:
+            raise ValueError(f"{name} remaining percentage is outside 0..100")
+    limiting_window, remaining, resets_at = min(windows, key=lambda item: item[1])
+    status = "eligible" if remaining > reserve else "reserve-low"
+    return result(
+        harness,
+        status,
+        remaining_percent=round(remaining, 4),
+        limiting_window=limiting_window,
+        resets_at=resets_at,
+        source=source,
+        note=f"{limiting_window}: {remaining:.2f}% remaining; reserve {reserve:g}%",
+    )
+
+
+def http_json(url: str, headers: dict[str, str], timeout: float) -> tuple[int, object | None]:
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                return response.status, None
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, None
+
+
+def terminate_group(process: subprocess.Popen[Any], grace: float = 0.5) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        process.terminate()
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            process.kill()
+        process.wait()
+
+
+def rpc_error_is_auth(error: object) -> bool:
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    message = str(error.get("message", "")).lower()
+    return code in (401, 403) or any(
+        marker in message
+        for marker in ("auth", "unauthorized", "not logged", "login", "sign in", "forbidden")
+    )
+
+
+def read_json_rpc_line(line_queue, request_id, deadline):
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("JSON-RPC response timed out")
+        try:
+            line = line_queue.get(timeout=remaining)
+        except Exception:  # queue.Empty
+            raise TimeoutError("JSON-RPC response timed out")
+        if line is None:
+            raise TimeoutError("JSON-RPC stream closed before response")
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("id") == request_id:
+            if "error" in payload:
+                error = payload.get("error")
+                if rpc_error_is_auth(error):
+                    raise AuthProbeError("Codex subscription login is required")
+                raise RuntimeError("JSON-RPC request failed")
+            response = payload.get("result")
+            if not isinstance(response, dict):
+                raise ValueError("JSON-RPC result is not an object")
+            return response
+
+
+def parse_codex(payload: object, reserve: float) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Codex response is not an object")
+    limits = payload.get("rateLimits")
+    if not isinstance(limits, dict):
+        raise ValueError("Codex rateLimits is missing")
+    windows: list[tuple[str, float, str | None]] = []
+    for name in ("primary", "secondary"):
+        item = limits.get(name)
+        if item is None:
+            continue
+        if not isinstance(item, dict):
+            raise ValueError(f"Codex {name} window is not an object")
+        used = number(item.get("usedPercent"), f"{name}.usedPercent")
+        duration = integer(item.get("windowDurationMins"), f"{name}.windowDurationMins")
+        windows.append((f"{name}:{duration}m", 100.0 - used, normalize_reset(item.get("resetsAt"))))
+    return percentage_result("codex", windows, reserve, "codex-app-server-rate-limits")
+
+
+def probe_codex(args: argparse.Namespace) -> dict[str, Any]:
+    executable = shutil.which("codex")
+    if not executable:
+        return unknown("codex", "codex-app-server-rate-limits", "codex CLI is not installed")
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            [executable, "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        assert process.stdin is not None
+        import queue as _queue
+        import threading as _threading
+        line_queue: "_queue.Queue[str | None]" = _queue.Queue()
+
+        def _reader() -> None:
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:  # buffered iteration is safe in its own thread
+                    line_queue.put(line)
+            except Exception:
+                pass
+            line_queue.put(None)  # EOF sentinel
+
+        _threading.Thread(target=_reader, daemon=True).start()
+        deadline = time.monotonic() + args.timeout
+        initialize = {
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "clientInfo": {
+                    "name": "agent_capacity",
+                    "title": "Agent Capacity",
+                    "version": "1.0.0",
+                }
+            },
+        }
+        process.stdin.write(json.dumps(initialize, separators=(",", ":")) + "\n")
+        process.stdin.flush()
+        read_json_rpc_line(line_queue, 1, deadline)
+        process.stdin.write('{"method":"initialized","params":{}}\n')
+        process.stdin.write('{"method":"account/rateLimits/read","id":2}\n')
+        process.stdin.flush()
+        return parse_codex(read_json_rpc_line(line_queue, 2, deadline), args.reserve_percent)
+    except AuthProbeError:
+        return auth_required(
+            "codex",
+            "codex-app-server-rate-limits",
+            "Codex subscription login required; run: codex login",
+        )
+    except (OSError, TimeoutError, ValueError, RuntimeError, json.JSONDecodeError):
+        return unknown("codex", "codex-app-server-rate-limits", "Codex rate-limit probe failed")
+    finally:
+        if process is not None:
+            terminate_group(process)
+
+
+def parse_claude(payload: object, reserve: float, claude_model: str | None = None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Claude response is not an object")
+    required = ("five_hour", "seven_day")
+    windows: list[tuple[str, float, str | None]] = []
+    for name in required:
+        if not isinstance(payload.get(name), dict):
+            raise ValueError(f"Claude {name} window is missing")
+    model_window_map = {
+        "sonnet": "seven_day_sonnet",
+        "opus": "seven_day_opus",
+    }
+    if claude_model is None:
+        # Conservative default: min across every present window.
+        names = ("five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps")
+    else:
+        names = ["five_hour", "seven_day"]
+        model_window = model_window_map.get(claude_model)
+        if model_window is not None:
+            names.append(model_window)
+        names = tuple(names)
+    for name in names:
+        item = payload.get(name)
+        if item is None:
+            continue
+        if not isinstance(item, dict):
+            raise ValueError(f"Claude {name} window is not an object")
+        used = number(item.get("utilization"), f"{name}.utilization")
+        windows.append((name, 100.0 - used, normalize_reset(item.get("resets_at"))))
+    return percentage_result("claude", windows, reserve, "claude-oauth-usage")
+
+
+def parse_utc_timestamp(value: str) -> dt.datetime:
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def claude_manual_capacity(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Use a fresh, non-secret `/usage` reading when Keychain CLI is blocked."""
+    # An exported-but-empty variable is how a shell unsets an override, so it
+    # means "no manual reading", not "an override that is half filled in".
+    remaining_raw = (os.environ.get(CLAUDE_MANUAL_REMAINING_ENV) or "").strip()
+    captured_raw = (os.environ.get(CLAUDE_MANUAL_CAPTURED_ENV) or "").strip()
+    if not remaining_raw and not captured_raw:
+        return None
+    if not remaining_raw or not captured_raw:
+        return unknown(
+            "claude",
+            "claude-manual-usage",
+            "manual Claude capacity requires both remaining percent and capture timestamp",
+        )
+    try:
+        remaining = number(float(remaining_raw), CLAUDE_MANUAL_REMAINING_ENV)
+        captured = parse_utc_timestamp(captured_raw)
+    except (TypeError, ValueError, OverflowError):
+        return unknown(
+            "claude", "claude-manual-usage", "manual Claude capacity values are invalid"
+        )
+    now = dt.datetime.now(dt.timezone.utc)
+    age = (now - captured).total_seconds()
+    if age < -60 or age > CLAUDE_MANUAL_MAX_AGE_SECONDS:
+        return unknown(
+            "claude",
+            "claude-manual-usage",
+            "manual Claude /usage reading is stale or from the future",
+        )
+    try:
+        return percentage_result(
+            "claude",
+            [("manual-/usage", remaining, None)],
+            args.reserve_percent,
+            "claude-manual-usage",
+        )
+    except ValueError:
+        return unknown(
+            "claude",
+            "claude-manual-usage",
+            "manual Claude remaining percent must be within 0..100",
+        )
+
+
+def claude_login_status(args: argparse.Namespace, keychain_note: str) -> dict[str, Any]:
+    """Distinguish blocked Keychain CLI access from a logged-out Claude CLI."""
+    claude = shutil.which("claude")
+    if not claude:
+        return unknown(
+            "claude", "claude-auth-status", f"{keychain_note}; Claude CLI is unavailable"
+        )
+    try:
+        completed = subprocess.run(
+            [claude, "auth", "status"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout,
+            env={key: value for key, value in os.environ.items() if key != "ANTHROPIC_API_KEY"},
+        )
+        payload = json.loads(completed.stdout)
+        logged_in = payload.get("loggedIn") is True if isinstance(payload, dict) else False
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return unknown(
+            "claude", "claude-auth-status", f"{keychain_note}; Claude auth status unavailable"
+        )
+    if completed.returncode == 0 and logged_in:
+        return unknown(
+            "claude",
+            "claude-auth-status",
+            f"Claude login is valid but {keychain_note}; use fresh /usage fallback variables",
+        )
+    return auth_required(
+        "claude", "claude-auth-status", f"subscription login required: {CLAUDE_LOGIN}"
+    )
+
+
+def probe_claude(args: argparse.Namespace) -> dict[str, Any]:
+    manual = claude_manual_capacity(args)
+    if manual is not None:
+        return manual
+    security = shutil.which("security")
+    if not security:
+        return unknown("claude", "claude-oauth-usage", "macOS Keychain client is unavailable")
+    try:
+        completed = subprocess.run(
+            [security, "find-generic-password", "-w", "-s", "Claude Code-credentials"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout,
+            env={key: value for key, value in os.environ.items() if key != "ANTHROPIC_API_KEY"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return unknown("claude", "claude-oauth-usage", "Claude credential lookup failed")
+    if completed.returncode != 0:
+        return claude_login_status(
+            args, f"Keychain CLI cannot read OAuth usage (security exit {completed.returncode})"
+        )
+    try:
+        credentials = json.loads(completed.stdout)
+        oauth = credentials["claudeAiOauth"]
+        token = oauth["accessToken"]
+        if not isinstance(token, str) or not token:
+            raise ValueError("missing access token")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return auth_required("claude", "claude-oauth-usage", f"subscription login required: {CLAUDE_LOGIN}")
+    # HTTP 429 is a shared throttle window, not a stable reading: every
+    # consumer of this endpoint (CodexBar, statuslines, sibling probes) spends
+    # from the same bucket, so a single attempt lands inside a burst often
+    # enough to matter. Retry with spacing inside the probe before the outer
+    # run_with_retry layer takes its one extra attempt.
+    status: int | None = None
+    payload: object | None = None
+    try:
+        for attempt in range(4):
+            status, payload = http_json(
+                "https://api.anthropic.com/api/oauth/usage",
+                {
+                    "Authorization": f"Bearer {token}",
+                    "anthropic-beta": "oauth-2025-04-20",
+                    "User-Agent": "agent-capacity/1.0",
+                },
+                args.timeout,
+            )
+            if status != 429 or attempt == 3:
+                break
+            time.sleep(2.0)
+        if status in (401, 403):
+            return auth_required("claude", "claude-oauth-usage", f"subscription login expired: {CLAUDE_LOGIN}")
+        if status != 200:
+            detail = f"Claude usage endpoint returned HTTP {status}"
+            if status == 429:
+                detail += " after 4 spaced attempts"
+            return unknown("claude", "claude-oauth-usage", detail)
+        return parse_claude(payload, args.reserve_percent, getattr(args, "claude_model", None))
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+        return unknown("claude", "claude-oauth-usage", "Claude usage probe failed")
+
+
+def parse_expiry(value: object) -> dt.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed
+    except ValueError:
+        return None
+
+
+def grok_usage_percent(config: dict[str, Any]) -> float | None:
+    """Percent of the current usage period this account has already spent.
+
+    `productUsage` carries a product-specific reading and
+    `creditUsagePercent` carries the account reading. Either can be the binding
+    constraint, so use the highest spent percentage (the lowest remaining
+    reading) across both when both are valid.
+
+    This is deliberately conservative. The installed Grok Build 1.0.5 binary
+    contains and deserializes `creditUsagePercent` but contains no
+    `productUsage` field name; the TUI therefore cannot be deriving its weekly
+    footer from the product row. Ignoring a worse account reading would disagree
+    with the client surface that exposed the original bug. The zero-monthly
+    guard remains separate: when the credits view returns no usable number, a
+    zero monthly allowance alone still launches.
+    """
+    readings: list[float] = []
+    products = config.get("productUsage")
+    if isinstance(products, list):
+        for item in products:
+            if isinstance(item, dict) and item.get("product") == GROK_CLI_PRODUCT:
+                try:
+                    readings.append(
+                        number(item.get("usagePercent"), "productUsage.usagePercent")
+                    )
+                except ValueError:
+                    pass
+    try:
+        readings.append(number(config.get("creditUsagePercent"), "creditUsagePercent"))
+    except ValueError:
+        pass
+    return max(readings) if readings else None
+
+
+def parse_grok_credits(payload: object) -> list[tuple[str, float, str | None]]:
+    """Windows from `/v1/billing?format=credits`, the account's real meter.
+
+    The default `/v1/billing` view has no weekly field at all — it reports a
+    monthly *dollar* allowance, and this account's is 0. The credits view is
+    what the Grok TUI footer renders as `Weekly limit left: N%`: it names the
+    period in `currentPeriod.type` (`USAGE_PERIOD_TYPE_WEEKLY` here) and the
+    spent percent alongside it. The monthly reading can say
+    `no-monthly-included` — launch and let a 402 gate it — while this view
+    reads WEEKLY at 100% used and the peer is already dead. Missing or
+    malformed fields yield no window rather than an error: a cosmetic defect
+    here must not omit Grok.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("config"), dict):
+        return []
+    config = payload["config"]
+    used = grok_usage_percent(config)
+    if used is None:
+        return []
+    period = config.get("currentPeriod")
+    period = period if isinstance(period, dict) else {}
+    label = GROK_PERIOD_LABELS.get(period.get("type"), "usage-period")
+    remaining = max(0.0, min(100.0, 100.0 - used))
+    resets = optional_reset(period.get("end") or config.get("billingPeriodEnd"))
+    return [(f"{label}-usage", remaining, resets)]
+
+
+def parse_grok(
+    payload: object, reserve: float, credits: object | None = None
+) -> dict[str, Any]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("config"), dict):
+        raise ValueError("Grok billing config is missing")
+    config = payload["config"]
+    monthly = config.get("monthlyLimit")
+    used_value = config.get("used")
+    if not isinstance(monthly, dict) or not isinstance(used_value, dict):
+        raise ValueError("Grok included billing counters are missing")
+    limit = number(monthly.get("val"), "monthlyLimit.val")
+    used = number(used_value.get("val"), "used.val")
+    if used < 0 or limit < 0:
+        raise ValueError("Grok billing counters are invalid")
+    windows = parse_grok_credits(credits)
+    # monthlyLimit.val == 0 is this account's real state (no included monthly
+    # allowance) and coexists with a healthy Grok peer.
+    # Do not divide by zero and do not treat it as a probe failure.
+    if limit > 0:
+        remaining = max(0.0, min(100.0, (limit - used) / limit * 100.0))
+        windows.append(
+            ("monthly-included", remaining, optional_reset(config.get("billingPeriodEnd")))
+        )
+    if windows:
+        return percentage_result("grok", windows, reserve, "grok-cli-billing")
+    return result(
+        "grok",
+        "eligible",
+        remaining_percent=None,
+        limiting_window="no-monthly-included",
+        resets_at=optional_reset(config.get("billingPeriodEnd")),
+        source="grok-cli-billing",
+        note="no monthly included allowance reported; launch-time HTTP 402 is the real gate",
+    )
+
+
+def select_grok_oauth(records: object) -> dict[str, Any]:
+    if not isinstance(records, dict):
+        raise ValueError("Grok auth root is not an object")
+    candidates = [
+        value for value in records.values()
+        if isinstance(value, dict) and isinstance(value.get("key"), str) and value.get("key")
+    ]
+    if not candidates:
+        raise ValueError("no Grok OAuth record")
+    return max(candidates, key=lambda value: str(value.get("create_time", "")))
+
+
+def probe_grok(args: argparse.Namespace) -> dict[str, Any]:
+    path = pathlib.Path.home() / ".grok" / "auth.json"
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+        oauth = select_grok_oauth(records)
+        token = oauth["key"]
+        if not isinstance(token, str) or not token:
+            raise ValueError("missing token")
+        expiry = parse_expiry(oauth.get("expires_at"))
+        if expiry and expiry <= dt.datetime.now(dt.timezone.utc):
+            return auth_required("grok", "grok-cli-billing", "Grok subscription login expired; run: grok login")
+    except FileNotFoundError:
+        return auth_required("grok", "grok-cli-billing", "Grok subscription login required; run: grok login")
+    except (OSError, KeyError, TypeError, ValueError, AttributeError, json.JSONDecodeError):
+        return unknown("grok", "grok-cli-billing", "Grok credential file could not be read safely")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-XAI-Token-Auth": "xai-grok-cli",
+        "User-Agent": "agent-capacity/1.0",
+    }
+    try:
+        status, payload = http_json(GROK_BILLING_URL, headers, args.timeout)
+        if status in (401, 403):
+            return auth_required("grok", "grok-cli-billing", "Grok subscription login expired; run: grok login")
+        if status != 200:
+            return unknown("grok", "grok-cli-billing", f"Grok billing endpoint returned HTTP {status}")
+        # Second view, best effort. It carries the weekly window; the default
+        # view does not carry it at all. Auth was already settled by the call
+        # above, so a failure here means one less window, not a dead probe.
+        try:
+            credits_status, credits = http_json(GROK_CREDITS_URL, headers, args.timeout)
+        except (OSError, TimeoutError, urllib.error.URLError, ValueError):
+            credits_status, credits = 0, None
+        return parse_grok(
+            payload,
+            args.reserve_percent,
+            credits if credits_status == 200 else None,
+        )
+    except (OSError, TimeoutError, urllib.error.URLError):
+        return unknown("grok", "grok-cli-billing", "Grok billing endpoint unreachable")
+    except ValueError as exc:
+        return unknown("grok", "grok-cli-billing", f"Grok billing payload unusable: {exc}")
+
+
+def agy_listening_ports(pid: int, timeout: float) -> list[int]:
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return []
+    try:
+        completed = subprocess.run(
+            [lsof, "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if completed.returncode != 0:
+        return []
+    ports: set[int] = set()
+    for line in completed.stdout.splitlines():
+        match = re.search(r":(\d+)\s+\(LISTEN\)", line)
+        if match:
+            ports.add(int(match.group(1)))
+    return sorted(ports)
+
+
+def agy_http_summary(
+    scheme: str, port: int, timeout: float, csrf_token: str | None = None
+) -> dict[str, Any] | None:
+    url = f"{scheme}://127.0.0.1:{port}{AGY_QUOTA_SUMMARY_PATH}"
+    headers = {
+        "Content-Type": "application/json",
+        "Connect-Protocol-Version": "1",
+    }
+    if csrf_token:
+        headers["X-Codeium-Csrf-Token"] = csrf_token
+    request = urllib.request.Request(
+        url,
+        data=json.dumps({"forceRefresh": True}, separators=(",", ":")).encode("utf-8"),
+        method="POST",
+        headers=headers,
+    )
+    context = None
+    if scheme == "https":
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            if response.status != 200:
+                return None
+            payload = json.loads(response.read())
+            return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError, json.JSONDecodeError, http.client.HTTPException, urllib.error.URLError):
+        return None
+
+
+def fetch_agy_quota_summary(ports: list[int], timeout: float) -> dict[str, Any] | None:
+    for port in ports:
+        for scheme in ("https", "http"):
+            payload = agy_http_summary(scheme, port, timeout)
+            if payload is not None:
+                return payload
+    return None
+
+
+def ide_agy_servers() -> list[tuple[int, str]]:
+    """IDE language_server processes exposing --csrf_token in argv.
+
+    The IDE's standalone language_server serves the same account quota summary
+    as the CLI's embedded one, but unlike the headless CLI probe target it
+    publishes its CSRF token on its command line. Only Antigravity app or IDE
+    processes qualify: other IDEs (Codeium, Windsurf) run same-named
+    language_server binaries whose summaries belong to different accounts.
+    Returns (pid, token) pairs. Never raises; empty when ps is unavailable or
+    nothing matches.
+    """
+    ps = shutil.which("ps")
+    if not ps:
+        return []
+    try:
+        completed = subprocess.run(
+            [ps, "-U", str(os.getuid()), "-o", "pid=", "-o", "args="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if completed.returncode != 0:
+        return []
+    servers: list[tuple[int, str]] = []
+    for line in completed.stdout.splitlines():
+        match = re.match(r"\s*(\d+)\s+(.*)", line)
+        if not match:
+            continue
+        try:
+            argv = shlex.split(match.group(2))
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        executable = pathlib.PurePath(os.path.normpath(argv[0]))
+        # Account identity belongs to the executable, never to a workspace,
+        # app-data flag, or another later argument containing "Antigravity".
+        if not re.fullmatch(
+            r"language_server(?:[._-][A-Za-z0-9]+)*",
+            executable.name,
+            re.IGNORECASE,
+        ):
+            continue
+        real_home = pathlib.PurePath(pwd.getpwuid(os.getuid()).pw_dir)
+        trusted_bundles = (
+            pathlib.PurePath("/Applications/Antigravity.app"),
+            real_home / "Applications" / "Antigravity.app",
+        )
+        if not any(
+            executable == bundle or bundle in executable.parents
+            for bundle in trusted_bundles
+        ):
+            continue
+        csrf_token = None
+        for index, argument in enumerate(argv[1:], 1):
+            if argument == "--csrf_token" and index + 1 < len(argv):
+                csrf_token = argv[index + 1]
+                break
+            if argument.startswith("--csrf_token="):
+                csrf_token = argument.partition("=")[2]
+                break
+        if not csrf_token or csrf_token.startswith("--"):
+            continue
+        servers.append((int(match.group(1)), csrf_token))
+    return servers
+
+
+def ide_agy_quota_summary(model: str, reserve: float, timeout: float) -> dict[str, Any] | None:
+    """Quota summary via a desktop language_server, for CSRF-blocked CLI probes.
+
+    Same RetrieveUserQuotaSummary endpoint and account summary; only the
+    transport differs (X-Codeium-Csrf-Token from --csrf_token argv, as exposed
+    by the Antigravity app or IDE language_server). Returns the parsed
+    capacity row with desktop provenance in its note, or None. Servers whose
+    summary endpoint does not answer are skipped. The token is sent as a
+    header only and never recorded. Never raises.
+    """
+    per_call = min(2.0, timeout) if timeout > 0 else 2.0
+    for pid, csrf_token in ide_agy_servers()[:2]:
+        for port in agy_listening_ports(pid, min(1.0, per_call))[:2]:
+            for scheme in ("https", "http"):
+                try:
+                    payload = agy_http_summary(
+                        scheme, port, per_call, csrf_token=csrf_token
+                    )
+                except (OSError, ValueError, urllib.error.URLError):
+                    payload = None
+                if payload is None:
+                    continue
+                try:
+                    parsed = parse_agy_summary(payload, model, reserve)
+                except ValueError:
+                    break
+                parsed["note"] = safe_note(f"{parsed['note']}; via desktop language_server")
+                return parsed
+    return None
+
+
+def agy_csrf_blocked(ports: list[int], timeout: float) -> bool:
+    """Best-effort check for the Agy language-server CSRF gate.
+
+    Recent CLI releases answer RetrieveUserQuotaSummary with HTTP 401
+    {"code":"unauthenticated","message":"missing CSRF token"} unless the
+    caller sends the server's X-Codeium-Csrf-Token, which a headless `agy`
+    probe cannot obtain (the IDE's language_server exposes it via
+    --csrf_token in argv; the CLI does not). A positive result keeps the
+    capacity-unknown status but names the API change instead of reporting a
+    generic connectivity failure. Never raises.
+    """
+    probe_timeout = min(1.0, timeout) if timeout > 0 else 1.0
+    for port in ports[:2]:
+        for scheme in ("https", "http"):
+            url = f"{scheme}://127.0.0.1:{port}{AGY_QUOTA_SUMMARY_PATH}"
+            request = urllib.request.Request(
+                url,
+                data=json.dumps({"forceRefresh": True}, separators=(",", ":")).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Connect-Protocol-Version": "1",
+                },
+            )
+            context = None
+            if scheme == "https":
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            try:
+                with urllib.request.urlopen(request, timeout=probe_timeout, context=context):
+                    pass
+            except urllib.error.HTTPError as error:
+                try:
+                    body = error.read().decode("utf-8", "replace").lower()
+                except (OSError, ValueError, http.client.HTTPException):
+                    continue
+                if error.code == 401 and "csrf" in body:
+                    return True
+            except (OSError, ValueError, http.client.HTTPException, urllib.error.URLError):
+                continue
+    return False
+
+
+def parse_agy_summary(
+    payload: object, model: str, reserve: float, source: str = AGY_SOURCE
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Agy quota summary response is not an object")
+    # The language-server endpoint nests groups under "response"; the CLI
+    # /usage report delivers the same groups at the top level of command.data.
+    body = payload.get("response")
+    if not isinstance(body, dict):
+        body = payload
+    groups = body.get("groups")
+    if not isinstance(groups, list) or not groups:
+        raise ValueError("Agy quota summary has no quota groups")
+    family = "gemini" if model.startswith("gemini-") else "3p"
+    buckets: dict[str, dict[str, Any]] = {}
+    disabled_buckets: set[str] = set()
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for bucket in group.get("buckets") or []:
+            if not isinstance(bucket, dict):
+                continue
+            # bucketId/remainingFraction/resetTime are the Connect-JSON names;
+            # id/remaining_fraction/reset_time are the CLI report's names.
+            bucket_id = bucket.get("bucketId") or bucket.get("id")
+            if not isinstance(bucket_id, str) or not bucket_id:
+                continue
+            if bucket.get("disabled"):
+                disabled_buckets.add(bucket_id)
+                continue
+            buckets[bucket_id] = bucket
+    windows: list[tuple[str, float, str | None]] = []
+    for name in (f"{family}-5h", f"{family}-weekly"):
+        item = buckets.get(name)
+        if not isinstance(item, dict):
+            if name in disabled_buckets:
+                # The CLI marks the 5h bucket disabled with a bogus fraction
+                # of 1 when the weekly limit is exhausted.
+                continue
+            raise ValueError(f"Agy {name} quota is missing")
+        fraction_raw = item.get("remainingFraction")
+        if fraction_raw is None:
+            fraction_raw = item.get("remaining_fraction")
+        fraction = number(fraction_raw, f"{name}.remainingFraction")
+        reset_raw = item.get("resetTime")
+        if reset_raw is None:
+            reset_raw = item.get("reset_time")
+        windows.append((name, fraction * 100.0, normalize_reset(reset_raw)))
+    if not windows:
+        raise ValueError(f"Agy {family} quota is missing")
+    parsed = percentage_result("agy", windows, reserve, source)
+    parsed["note"] = safe_note(f"{model}; {parsed['note']}")
+    return parsed
+
+
+def agy_cli_usage_report(executable: str, timeout: float) -> dict[str, Any] | None:
+    """Quota via the CLI's structured /usage report, mirroring CodexBar #3607.
+
+    Current agy releases gate RetrieveUserQuotaSummary behind a CSRF token a
+    headless probe cannot obtain; `agy -p /usage --output-format json` returns
+    the same quota buckets as a client-side slash command with zero turns.
+    Returns the report's command.data payload, or None when the report is
+    unavailable (missing CLI, older than AGY_USAGE_MIN_VERSION, non-SUCCESS
+    status, or unparseable output). Raises AuthProbeError on login evidence.
+    """
+    try:
+        version = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=min(3.0, timeout),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version.stdout.strip())
+    if version.returncode != 0 or match is None:
+        return None
+    if tuple(int(part) for part in match.groups()) < AGY_USAGE_MIN_VERSION:
+        return None
+    try:
+        report = subprocess.run(
+            [
+                executable,
+                "-p",
+                "/usage",
+                "--output-format",
+                "json",
+                "--print-timeout",
+                "90s",
+            ],
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    output = (report.stdout + b"\n" + report.stderr).lower()
+    if any(marker in output for marker in AGY_AUTH_MARKERS):
+        raise AuthProbeError("Agy login required")
+    if report.returncode != 0:
+        return None
+    try:
+        payload = json.loads(report.stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "SUCCESS":
+        return None
+    command = payload.get("command")
+    if not isinstance(command, dict) or command.get("name") != "usage":
+        return None
+    data = command.get("data")
+    return data if isinstance(data, dict) else None
+
+
+def probe_agy(args: argparse.Namespace) -> dict[str, Any]:
+    executable = shutil.which("agy")
+    if not executable:
+        return unknown("agy", AGY_SOURCE, "agy CLI is not installed")
+    try:
+        report = agy_cli_usage_report(executable, args.timeout)
+    except AuthProbeError:
+        return auth_required("agy", AGY_SOURCE, "Agy login required; run: agy login")
+    if report is not None:
+        try:
+            return parse_agy_summary(
+                report, args.agy_model, args.reserve_percent, AGY_USAGE_REPORT_SOURCE
+            )
+        except ValueError:
+            pass  # schema drift; the legacy language-server probe below may still work
+    process: subprocess.Popen[bytes] | None = None
+    master_fd = -1
+    slave_fd = -1
+    try:
+        master_fd, slave_fd = pty.openpty()
+        process = subprocess.Popen(
+            [executable],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            start_new_session=True,
+        )
+        os.close(slave_fd)
+        slave_fd = -1
+        os.set_blocking(master_fd, False)
+        deadline = time.monotonic() + args.timeout
+        output = b""
+        saw_port = False
+        seen_ports: list[int] = []
+        while time.monotonic() < deadline:
+            ports = agy_listening_ports(process.pid, max(0.5, deadline - time.monotonic()))
+            if ports:
+                saw_port = True
+                seen_ports = ports
+                payload = fetch_agy_quota_summary(
+                    ports, min(2.0, max(0.5, deadline - time.monotonic()))
+                )
+                if payload is not None:
+                    return parse_agy_summary(payload, args.agy_model, args.reserve_percent)
+            ready, _, _ = select.select([master_fd], [], [], 0.5)
+            if ready:
+                try:
+                    output += os.read(master_fd, 65536)
+                except (BlockingIOError, OSError):
+                    pass
+            if any(marker in output.lower() for marker in AGY_AUTH_MARKERS):
+                return auth_required("agy", AGY_SOURCE, "Agy login required; run: agy login")
+        if not saw_port:
+            return unknown("agy", AGY_SOURCE, "Agy language server did not expose a listening port")
+        if agy_csrf_blocked(seen_ports, args.timeout):
+            ide = ide_agy_quota_summary(args.agy_model, args.reserve_percent, args.timeout)
+            if ide is not None:
+                return ide
+            return unknown(
+                "agy",
+                AGY_SOURCE,
+                "Agy language server requires a CSRF token (HTTP 401 missing CSRF token) "
+                "the headless CLI probe cannot obtain, and no desktop language_server "
+                "answered; cross-check via CodexBar app source or Agy /quota, "
+                "and omit unless overridden",
+            )
+        return unknown("agy", AGY_SOURCE, "Agy quota summary never became available")
+    except (OSError, TimeoutError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+        return unknown("agy", AGY_SOURCE, "Agy quota probe failed")
+    finally:
+        if process is not None:
+            terminate_group(process)
+        if master_fd >= 0:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+        if slave_fd >= 0:
+            try:
+                os.close(slave_fd)
+            except OSError:
+                pass
+
+
+def shebang_command(first_line: str) -> list[str] | None:
+    if not first_line.startswith("#!"):
+        return None
+    try:
+        parts = shlex.split(first_line[2:].strip())
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    if os.path.basename(parts[0]) == "env":
+        rest = parts[1:]
+        if rest[:1] == ["-S"]:
+            rest = rest[1:]
+        while rest and rest[0].startswith("-"):
+            rest = rest[1:]
+        if not rest:
+            return None
+        resolved = shutil.which(rest[0])
+        return [resolved, *rest[1:]] if resolved else None
+    if not os.path.isabs(parts[0]) or not os.access(parts[0], os.X_OK):
+        return None
+    return parts
+
+
+def pwm_python() -> list[str] | None:
+    executable = shutil.which("pwm")
+    if not executable:
+        return None
+    try:
+        first_line = pathlib.Path(executable).read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeError, IndexError):
+        return None
+    return shebang_command(first_line)
+
+
+def parse_perplexity(payload: object, args: argparse.Namespace) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Perplexity quota response is not an object")
+    field = "remaining_pro" if args.pplx_kind == "pro" else "remaining_research"
+    remaining = integer(payload.get(field), field)
+    required = args.pplx_planned_cost + 1
+    limiting = "pro-search" if args.pplx_kind == "pro" else "deep-research"
+    source_limits = payload.get("source_limits")
+    if not isinstance(source_limits, list):
+        raise ValueError("Perplexity source limits are missing")
+    # `none` is pwm's sentinel for "no source focus", not a connector ID, so it
+    # has no counter to validate. Treating it as one failed the whole preflight.
+    if args.pplx_source and args.pplx_source != "none":
+        matching = [
+            item for item in source_limits
+            if isinstance(item, dict) and item.get("source_id") == args.pplx_source
+        ]
+        if not matching:
+            raise ValueError(f"Perplexity source counter is missing: {args.pplx_source}")
+        source_remaining = matching[0].get("remaining")
+        monthly = matching[0].get("monthly_limit")
+        if monthly is not None:
+            source_count = integer(source_remaining, f"source:{args.pplx_source}")
+            if source_count < 1:
+                return result(
+                    "perplexity",
+                    "reserve-low",
+                    remaining_count=source_count,
+                    limiting_window=f"source:{args.pplx_source}",
+                    source="pwm-structured-usage",
+                    note=f"source {args.pplx_source} has no remaining actions",
+                )
+    status = "eligible" if remaining >= required else "reserve-low"
+    return result(
+        "perplexity",
+        status,
+        remaining_count=remaining,
+        limiting_window=limiting,
+        source="pwm-structured-usage",
+        note=f"{remaining} remaining; planned cost {args.pplx_planned_cost}; preserve 1",
+    )
+
+
+def probe_perplexity(args: argparse.Namespace) -> dict[str, Any]:
+    interpreter = pwm_python()
+    if not interpreter:
+        return unknown("perplexity", "pwm-structured-usage", "pwm installation is unavailable")
+    # An expired cookie still gets HTTP 200 from the rate-limit endpoint —
+    # every counter just reads zero — so a limit payload alone cannot prove
+    # auth. get_user_info is the doctor's check: 200 means the session is
+    # live, anything else means the zeros are an artifact and the lane needs
+    # `pwm login`, not a wait for quota.
+    code = (
+        "import json;"
+        "from dataclasses import asdict;"
+        "from perplexity_web_mcp.cli.auth import get_user_info, load_token;"
+        "from perplexity_web_mcp.rate_limits import fetch_rate_limits;"
+        "t=load_token();"
+        "u=bool(get_user_info(t)) if t else False;"
+        "x=fetch_rate_limits(t) if u else None;"
+        "print(json.dumps({'auth':u,'limits':asdict(x) if x else None},separators=(',',':')))"
+    )
+    try:
+        completed = subprocess.run(
+            [*interpreter, "-c", code],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return unknown("perplexity", "pwm-structured-usage", "Perplexity quota subprocess failed")
+    if completed.returncode != 0:
+        return unknown("perplexity", "pwm-structured-usage", "Perplexity quota subprocess returned an error")
+    try:
+        payload = json.loads(completed.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("unexpected quota payload shape")
+        if payload.get("auth") is not True:
+            return auth_required("perplexity", "pwm-structured-usage", "Perplexity login required; run: pwm login")
+        limits = payload.get("limits")
+        if limits is None:
+            return unknown(
+                "perplexity",
+                "pwm-structured-usage",
+                "Perplexity rate-limit fetch failed despite valid login",
+            )
+        return parse_perplexity(limits, args)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return unknown("perplexity", "pwm-structured-usage", "Perplexity quota schema did not validate")
+
+
+def run_with_retry(
+    harness: str,
+    function: Callable[[argparse.Namespace], dict[str, Any]],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    attempts = 0
+    final: dict[str, Any] | None = None
+    while attempts <= args.retries:
+        attempts += 1
+        try:
+            final = function(args)
+            required_keys = {
+                "harness",
+                "status",
+                "remaining_percent",
+                "remaining_count",
+                "limiting_window",
+                "resets_at",
+                "source",
+                "fresh_at",
+                "note",
+            }
+            if (
+                not isinstance(final, dict)
+                or final.get("status") not in STATUSES
+                or not required_keys.issubset(final)
+            ):
+                final = unknown(harness, f"{harness}-probe", "probe returned an invalid result object")
+        except Exception:
+            final = unknown(harness, f"{harness}-probe", "probe raised an unexpected exception")
+        if final["status"] != "capacity-unknown":
+            break
+        if attempts <= args.retries:
+            time.sleep(0.25)
+    assert final is not None
+    final["attempts"] = attempts
+    final["harness"] = harness
+    return final
+
+
+def parser() -> argparse.ArgumentParser:
+    item = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Check subscription capacity without sending inference prompts."
+    )
+    item.add_argument("harnesses", nargs="*", choices=HARNESSES, default=list(HARNESSES))
+    output = item.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="Emit normalized JSON")
+    output.add_argument("--tsv", action="store_true", help="Emit one tab-separated row per harness")
+    item.add_argument("--reserve-percent", type=float, default=10.0)
+    item.add_argument("--timeout", type=float, default=8.0)
+    item.add_argument("--retries", type=int, default=1)
+    item.add_argument("--agy-model", default="gemini-3.8-flash-high")
+    item.add_argument(
+        "--claude-model",
+        default=None,
+        choices=("sonnet", "opus"),
+        help="When set, only that model-specific Claude window is considered (plus general windows).",
+    )
+    item.add_argument("--pplx-kind", choices=("pro", "research"), default="pro")
+    item.add_argument("--pplx-source", default="web")
+    item.add_argument("--pplx-planned-cost", type=int, default=1)
+    return item
+
+
+def render_human(results: list[dict[str, Any]]) -> None:
+    print(f"{'Harness':<12} {'Status':<18} {'Remaining':<14} Limiting window")
+    print(f"{'-' * 12} {'-' * 18} {'-' * 14} {'-' * 24}")
+    for item in results:
+        if item["remaining_percent"] is not None:
+            remaining = f"{item['remaining_percent']:.2f}%"
+        elif item["remaining_count"] is not None:
+            remaining = str(item["remaining_count"])
+        else:
+            remaining = "—"
+        print(
+            f"{item['harness']:<12} {item['status']:<18} "
+            f"{remaining:<14} {item['limiting_window'] or '—'}"
+        )
+        print(f"  {item['note']}")
+
+
+def render_tsv(results: list[dict[str, Any]]) -> None:
+    for item in results:
+        remaining = (
+            f"{item['remaining_percent']:.4f}%"
+            if item["remaining_percent"] is not None
+            else str(item["remaining_count"])
+            if item["remaining_count"] is not None
+            else ""
+        )
+        fields = (
+            item["harness"],
+            item["status"],
+            item["note"],
+            remaining,
+            item["limiting_window"] or "",
+            item["resets_at"] or "",
+            item["source"],
+        )
+        print("\t".join(str(field).replace("\t", " ").replace("\n", " ") for field in fields))
+
+
+def collect_results(
+    selected: list[str],
+    adapters: dict[str, Callable[[argparse.Namespace], dict[str, Any]]],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as pool:
+        futures = {
+            harness: pool.submit(run_with_retry, harness, adapters[harness], args)
+            for harness in selected
+        }
+        return [futures[harness].result() for harness in selected]
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if not 0 <= args.reserve_percent < 100:
+        raise ValueError("--reserve-percent must be in [0, 100)")
+    if not 0 < args.timeout <= MAX_PROBE_TIMEOUT:
+        raise ValueError(f"--timeout must be in (0, {MAX_PROBE_TIMEOUT:g}]")
+    if args.retries not in (0, 1):
+        raise ValueError("--retries must be 0 or 1")
+    if args.pplx_planned_cost < 1:
+        raise ValueError("--pplx-planned-cost must be positive")
+
+
+def main() -> int:
+    args = parser().parse_args()
+    validate_args(args)
+    selected = list(dict.fromkeys(args.harnesses or HARNESSES))
+    adapters: dict[str, Callable[[argparse.Namespace], dict[str, Any]]] = {
+        "codex": probe_codex,
+        "claude": probe_claude,
+        "grok": probe_grok,
+        "agy": probe_agy,
+        "perplexity": probe_perplexity,
+    }
+    results = collect_results(selected, adapters, args)
+    envelope = {
+        "schema_version": SCHEMA_VERSION,
+        "reserve_percent": args.reserve_percent,
+        "generated_at": now_iso(),
+        "results": results,
+    }
+    if args.json:
+        print(json.dumps(envelope, indent=2, sort_keys=True))
+    elif args.tsv:
+        render_tsv(results)
+    else:
+        render_human(results)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        print(f"agent-capacity: error: {safe_note(error)}", file=sys.stderr)
+        raise SystemExit(2) from None
