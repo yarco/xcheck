@@ -1,0 +1,4 @@
+# Test-only dependency (tests/test_laws.py). bin/ and xcheck/ are stdlib-only.
+# Imported unguarded, so a checkout without it fails by name:
+#     python3 -m pip install -r requirements-test.txt
+hypothesis>=6.100

@@ -7,7 +7,6 @@ of lanes admitted from it: remaining > 5 + 5n (capped at 90).
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import subprocess
 import sys
@@ -15,7 +14,10 @@ from pathlib import Path
 
 from .adapters import Lane
 
-HELPER = Path(__file__).resolve().parent.parent / "bin" / "agent-capacity"
+import os
+
+HELPER = Path(os.environ.get("XCHECK_CAPACITY_HELPER")  # tests substitute a fake reading
+              or Path(__file__).resolve().parent.parent / "bin" / "agent-capacity")
 
 
 def _probe(args: list[str]) -> dict:
@@ -28,29 +30,15 @@ def _probe(args: list[str]) -> dict:
         return {"status": "capacity-unknown", "note": f"capacity helper failed: {e}"}
 
 
-def check(lanes: list[Lane]) -> dict[str, tuple[bool, str]]:
-    """lane name → (launch?, note)."""
-    pools: dict[str, list[Lane]] = {}
-    for lane in lanes:
-        pools.setdefault(lane.pool, []).append(lane)
-    calls: dict[str, list[str]] = {}
-    for pool, members in pools.items():
-        first = members[0]
-        if first.kind == "agy":
-            reserve = min(90, 5 + 5 * len(members))
-            calls[pool] = ["--reserve-percent", str(reserve), "--agy-model", first.model, "agy"]
-        elif first.kind == "claude":
-            bucket = next((b for b in ("opus", "sonnet") if b in first.model), None)
-            calls[pool] = (["--claude-model", bucket] if bucket else []) + ["claude"]
-        else:
-            calls[pool] = [first.kind]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(calls) or 1) as ex:
-        readings = dict(zip(calls, ex.map(_probe, calls.values())))
-    out = {}
-    for pool, members in pools.items():
-        r = readings[pool]
-        ok = r.get("status") == "eligible"
-        note = f"{r.get('status')}: {r.get('note', '')}".strip()
-        for lane in members:
-            out[lane.name] = (ok, note)
-    return out
+def check_lane(lane: Lane, same_pool: int) -> tuple[bool, str]:
+    """(launch?, note) for one lane; `same_pool` lanes of this run share its pool."""
+    if lane.kind == "agy":
+        reserve = min(90, 5 + 5 * same_pool)
+        args = ["--reserve-percent", str(reserve), "--agy-model", lane.model, "agy"]
+    elif lane.kind == "claude":
+        bucket = next((b for b in ("opus", "sonnet") if b in lane.model), None)
+        args = (["--claude-model", bucket] if bucket else []) + ["claude"]
+    else:
+        args = [lane.kind]
+    r = _probe(args)
+    return r.get("status") == "eligible", f"{r.get('status')}: {r.get('note', '')}".strip()

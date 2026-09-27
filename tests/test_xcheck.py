@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -90,12 +92,38 @@ class Readers(unittest.TestCase):
         self.assertIn("invalid model selection", read_fixture("agy", "agy-error.jsonl").error)
 
 
+class CodexLane(unittest.TestCase):
+    def test_web_is_an_explicit_config_value_and_exec_has_no_search_flag(self):
+        for web, value in ((False, 'web_search="disabled"'), (True, 'web_search="live"')):
+            argv = adapters.launch(Lane("codex", "gpt-6-sol", "high"), Path("/w"), Path("/m"), Path("/f"), web).argv
+            self.assertIn(value, argv)
+            self.assertNotIn("--search", argv)
+
+
+class GrokReader(unittest.TestCase):
+    def test_narration_from_an_earlier_message_is_not_glued_to_the_answer(self):
+        r = adapters.Reader("grok")
+        for o in ({"type": "text", "data": "Now I will write the review."}, {"type": "usage"},
+                  {"type": "text", "data": "### 1) VERDICT\nok"}, {"type": "usage"},
+                  {"type": "end", "stopReason": "end_turn"}):
+            r.feed(o)
+        r.finish(Path("/nonexistent"))
+        self.assertEqual(r.text, "### 1) VERDICT\nok")
+
+    def test_narration_before_a_tool_call_is_not_an_answer(self):
+        r = adapters.Reader("grok")
+        for o in ({"type": "text", "data": "Reading files."}, {"type": "usage"},
+                  {"type": "tool_call", "toolName": "read_file"}, {"type": "end"}):
+            r.feed(o)
+        r.finish(Path("/nonexistent"))
+        self.assertEqual(r.text, "")
+
+
 class GrokLane(unittest.TestCase):
     def test_read_only_sandbox_and_env(self):
         spec = adapters.launch(Lane("grok", "grok-4.7", "xhigh"), Path("/w"), Path("/m"), Path("/f"), web=False)
         i = spec.argv.index("--sandbox")
         self.assertEqual(spec.argv[i + 1], "read-only")  # strict breaks exec hooks; off has no write guard
-        self.assertIn("GROK_SANDBOX", spec.env_unset)
         self.assertEqual(spec.env_set, {"GROK_MEMORY": "0"})
         self.assertNotIn("--no-memory", spec.argv)
         self.assertEqual(spec.argv[spec.argv.index("--deny") + 1], "MCPTool(*)")
@@ -106,18 +134,22 @@ class Validation(unittest.TestCase):
         return validate.check(body, CONTRACT)
 
     def test_done(self):
-        self.assertEqual(self.ok(f"### 1) VERDICT\nx\n6) PROOF: {TOKEN}\nRESULT_COMPLETE\n")[0], "done")
+        self.assertEqual(self.ok(f"### 1) VERDICT\nThe parser is correct.\n6) PROOF: {TOKEN}\nRESULT_COMPLETE\n")[0], "done")
 
     def test_proof_on_next_line_and_backticks(self):
-        self.assertEqual(self.ok(f"1) Verdict (≤80 words)\nx\n6) PROOF\n`{TOKEN}`\nRESULT_COMPLETE")[0], "done")
+        self.assertEqual(self.ok(f"1) Verdict (≤80 words): the parser is correct.\n6) PROOF\n`{TOKEN}`\nRESULT_COMPLETE")[0], "done")
 
     def test_heading_shapes(self):
         for h in ("### 1) VERDICT", "**1) Verdict**", "VERDICT:", "## Verdict ##", "1) Verdict — HOLD",
                   "# Verdict: HOLD"):
-            self.assertEqual(self.ok(f"{h}\n6) PROOF: {TOKEN}\nRESULT_COMPLETE")[0], "done", h)
+            self.assertEqual(self.ok(f"{h}\nThe claim holds; see the parser.\n6) PROOF: {TOKEN}\nRESULT_COMPLETE")[0], "done", h)
         for h in ("Verdict is uncertain because", "my verdict", "VERDICTIVE"):
             status, problems = self.ok(f"{h}\n6) PROOF: {TOKEN}\nRESULT_COMPLETE")
             self.assertIn("missing required heading: VERDICT", problems, h)
+
+    def test_a_bare_schema_is_not_a_review(self):
+        _, p = self.ok(f"1) VERDICT\n6) PROOF: {TOKEN}\nRESULT_COMPLETE")
+        self.assertIn("no review text besides the heading, PROOF and marker", p)
 
     def test_failures(self):
         self.assertEqual(self.ok("1) VERDICT\nI cannot.\nRESULT_INVALID")[1], ["peer declared RESULT_INVALID"])
@@ -146,6 +178,12 @@ class Preflight(unittest.TestCase):
         c = validate.preflight(self.base)
         self.assertEqual((c.require, c.token), ("VERDICT", TOKEN))
 
+    def test_symlinked_evidence_is_refused(self):
+        stage(self.base)
+        (self.base / "evidence" / "hosts").symlink_to("/etc/hosts")
+        with self.assertRaisesRegex(validate.PacketError, "symlinks"):
+            validate.preflight(self.base)
+
     def test_refusals(self):
         stage(self.base)
         (self.base / "PROMPT.md").write_text("RESULT_REQUIRE: A\nRESULT_REQUIRE: B\n")
@@ -171,8 +209,11 @@ class EndToEnd(unittest.TestCase):
             (self.bin / k).symlink_to(REPO / "tests" / "fake" / "harness")
         stage(self.base)
 
-    def xcheck(self, *args, mode="ok", timeout=60):
-        env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode}
+    def xcheck(self, *args, mode="ok", timeout=60, capacity=None):
+        env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
+               "XCHECK_CAPACITY_HELPER": str(REPO / "tests" / "fake" / "capacity")}
+        if capacity:
+            env["FAKE_CAPACITY"] = capacity
         env.pop("HERDR_ENV", None)
         return subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), *args], env=env,
                               capture_output=True, text=True, timeout=timeout)
@@ -223,6 +264,80 @@ class EndToEnd(unittest.TestCase):
                         "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("must not launch", p.stderr)
+
+    def test_echoed_quota_words_in_an_answer_are_not_a_quota_death(self):
+        rows = self.run_lanes("echo402")
+        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
+
+    def test_capacity_refusal_skips_the_lane(self):
+        lanes = "codex:gpt-6-sol:high,agy:gemini-3.8-flash-high"
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
+                        "--mode", "headless", capacity="reserve-low")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        rows = json.loads((self.base / "STATUS.json").read_text())["lanes"]
+        self.assertEqual({r["status"] for r in rows}, {"skipped"})
+        self.assertIn("reserve-low", rows[0]["reason"])
+
+    def test_grok_orchestrator_is_refused_headless(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "grok", "--mode", "headless",
+                        "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("Herdr mode", p.stderr)
+
+    def test_detach_then_bounded_wait(self):
+        common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
+                  "--lanes", "codex:gpt-6-sol:high,grok:grok-4.7:xhigh")
+        p = self.xcheck("run", *common, "--detach", mode="slow")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("xcheck wait", p.stdout)
+        p = self.xcheck("wait", "--base", str(self.base), "--timeout", "1", mode="slow")
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+        self.assertIn("still running", p.stdout)
+        p = self.xcheck("wait", "--base", str(self.base), mode="slow")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        rows = json.loads((self.base / "STATUS.json").read_text())["lanes"]
+        self.assertEqual({r["status"] for r in rows}, {"done"})
+
+    def test_dead_supervisor_and_runner_orphan_is_stopped_on_reattach(self):
+        common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
+                  "--lanes", "codex:gpt-6-sol:high")
+        self.assertEqual(self.xcheck("run", *common, "--detach", mode="hang").returncode, 0)
+        pids_file = self.base / "lanes" / "codex-gpt-6-sol-high" / "pids.json"
+        for _ in range(50):
+            if pids_file.exists() and json.loads(pids_file.read_text()).get("harness"):
+                break
+            time.sleep(0.1)
+        pids = json.loads(pids_file.read_text())
+        os.kill(int((self.base / "supervisor.pid").read_text()), signal.SIGKILL)
+        os.kill(pids["runner"], signal.SIGKILL)
+        time.sleep(0.5)
+        os.kill(pids["harness"], 0)  # the orphan is still alive
+        p = self.xcheck("wait", "--base", str(self.base), mode="hang")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("harness was still running and was stopped", row["reason"])
+        time.sleep(0.5)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pids["harness"], 0)
+
+    def test_orchestrator_identity_and_api_keys_never_reach_a_peer(self):
+        dump = self.bin / "env"
+        leak = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_EFFORT": "max",
+                "ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "HERDR_PANE_ID": "w1:p1",
+                "CODEX_COMPANION_SESSION_ID": "c", "GROK_SANDBOX": "ws"}
+        keep = {"GROK_TELEMETRY_ENABLED": "0"}
+        env = {**os.environ, **leak, **keep, "FAKE_ENV_DUMP": str(dump),
+               "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok"}
+        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high"
+        p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
+                            "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
+                           env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for kind in adapters.KINDS:
+            seen = json.loads(dump.with_suffix(f".{kind}.json").read_text())
+            self.assertFalse(set(leak) & set(seen), f"{kind} saw {set(leak) & set(seen)}")
+            self.assertEqual(seen.get("GROK_TELEMETRY_ENABLED"), "0")
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()

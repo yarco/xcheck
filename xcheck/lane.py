@@ -17,10 +17,29 @@ import sys
 import time
 from pathlib import Path
 
-from . import adapters, validate
+from . import adapters, capacity, validate
 from .files import Run, atomic_write, now
 
 TAIL_LINES = 40
+
+# The orchestrator's own session identity must not reach a peer: a child
+# `claude` seeing CLAUDECODE / CLAUDE_CODE_SESSION_ID / the messaging socket is
+# a nested session of the orchestrator, CLAUDE_EFFORT is the orchestrator's
+# effort, and HERDR_* would let a peer drive the operator's Herdr session.
+# Provider API keys are removed too: every lane runs on subscription auth, and
+# a key in the environment would bill it instead. User preferences such as
+# GROK_TELEMETRY_* stay.
+SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX")
+SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+               "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+               "GROK_SANDBOX"}  # the operator's default profile; the adapter picks the lane's
+
+
+def lane_env(spec: adapters.Launch) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_NAMES}
+    env.update(spec.env_set)
+    return env
 
 
 class _Stop(Exception):
@@ -39,14 +58,24 @@ def run_lane(base: Path, name: str) -> int:
     final, stream_path, err_path = d / "final.md", d / "stream.jsonl", d / "stderr.log"
     spec = adapters.launch(lane, work, message, final, run.web)
 
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("HERDR_") and k not in spec.env_unset}
-    env.update(spec.env_set)
+    env = lane_env(spec)
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, _raise_stop)
 
     started = time.time()
     reader = adapters.Reader(lane.kind)
+    # Recorded before any spend, so a crashed supervisor's successor sees this
+    # lane as live from its first instant.
+    atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": None}))
+
+    # Capacity is read here, immediately before spending and outside any
+    # orchestrator sandbox when the runner lives in a Herdr pane.
+    if run.capacity and name not in run.forced:
+        same_pool = sum(1 for l in run.lanes.values() if l.pool == lane.pool)
+        ok, note = capacity.check_lane(lane, same_pool)
+        print(f"xcheck lane {name}: capacity {note}", flush=True)
+        if not ok:
+            return _finish(run, name, started, "skipped", note, None, reader, err_path)
     status, reason, code = None, "", None
     stdin = open(spec.stdin, "rb") if spec.stdin else subprocess.DEVNULL
     with open(stream_path, "ab") as stream, open(err_path, "ab") as err:
@@ -109,7 +138,7 @@ def run_lane(base: Path, name: str) -> int:
                 reason += f"; harness error: {reader.error}"
         else:
             status = "failed"
-            reason = reader.error or f"no answer (exit {code})"
+            reason = reader.error or _first_stderr_line(err_path) or f"no answer (exit {code})"
     return _finish(run, name, started, status, reason, code, reader, err_path)
 
 
@@ -126,6 +155,17 @@ def _consume(reader: adapters.Reader, raw: bytes) -> None:
         view = reader.feed(obj)
         if view:
             print(view, flush=True)
+
+
+def _first_stderr_line(path: Path) -> str:
+    """A harness that dies before streaming (bad flag, bad model) says why here."""
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip():
+                return f"stderr: {adapters._clip(line, 240)}"
+    except OSError:
+        pass
+    return ""
 
 
 def _kill(proc: subprocess.Popen) -> None:

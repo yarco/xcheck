@@ -34,6 +34,10 @@ def preflight(base: Path) -> Contract:
     for f in (packet, prompt):
         if not f.is_file():
             raise PacketError(f"missing {f.name}")
+    # Lanes get copies; a symlink would copy whatever it points at, outside BASE.
+    links = [str(p.relative_to(base)) for p in base.rglob("*") if p.is_symlink()]
+    if links:
+        raise PacketError(f"staged files must not be symlinks: {', '.join(links[:5])}")
     p_lines = packet.read_text(encoding="utf-8").splitlines()
     target = _one(p_lines, r"^Proof target:\s*(\S+)\s*$", "'Proof target: <path>'", "PACKET.md").group(1)
     resolved = (base / target).resolve()
@@ -76,8 +80,18 @@ def _proof(lines: list[str]) -> str | None:
         value = (m.group(1) or "").strip()
         if not value:
             value = next((l.strip() for l in lines[i + 1:] if l.strip()), "")
-        return value.strip("`").strip()
+        return value.strip("`*_ ").strip()
     return None
+
+
+def _substantive(lines: list[str], keyword: str, token: str) -> bool:
+    """Some review text beyond the schema scaffolding (heading keyword, PROOF,
+    token, marker). Text on the heading line itself counts."""
+    structural = re.compile(r"^(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+)?PROOF\b|^(?:RESULT_COMPLETE|RESULT_INVALID)$", re.I)
+    body = " ".join(l for l in (x.strip() for x in lines) if l and not structural.match(l))
+    body = body.replace(token, " ")
+    body = re.sub(re.escape(keyword), " ", body, flags=re.I)
+    return len(re.sub(r"[\W\d_]+", "", body)) >= 12
 
 
 def check(text: str, contract: Contract) -> tuple[str, list[str]]:
@@ -92,6 +106,8 @@ def check(text: str, contract: Contract) -> tuple[str, list[str]]:
     heading = _heading_re(contract.require)
     if not any(heading.match(l) for l in lines):
         problems.append(f"missing required heading: {contract.require}")
+    if not _substantive(lines, contract.require, contract.token):
+        problems.append("no review text besides the heading, PROOF and marker")
     proof = _proof(lines)
     if proof is None:
         problems.append("missing PROOF line")

@@ -43,6 +43,8 @@ class Run:
     started: str
     panes: dict[str, str]        # herdr: lane → pane id (only panes this run created)
     herdr: dict                  # herdr: caller pane/tab/workspace; {} when headless
+    capacity: bool = True        # each lane probes its pool before spending
+    forced: list = None          # lanes launched past a capacity refusal
 
     def lane(self, name: str) -> Lane:
         return self.lanes[name]
@@ -57,7 +59,7 @@ class Run:
             "contract": vars(self.contract),
             "web": self.web, "idle": self.idle, "cap": self.cap, "mode": self.mode,
             "orch": self.orch, "started": self.started, "panes": self.panes,
-            "herdr": self.herdr,
+            "herdr": self.herdr, "capacity": self.capacity, "forced": self.forced or [],
         }, indent=2))
 
     @classmethod
@@ -70,5 +72,6 @@ class Run:
             contract=Contract(**d["contract"]),
             web=d["web"], idle=d["idle"], cap=d["cap"], mode=d["mode"],
             orch=d["orch"], started=d["started"], panes=d.get("panes", {}),
-            herdr=d.get("herdr", {}),
+            herdr=d.get("herdr", {}), capacity=d.get("capacity", True),
+            forced=d.get("forced", []),
         )

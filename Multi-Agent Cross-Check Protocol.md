@@ -42,6 +42,8 @@ judgment call (no log-regex classifiers, no automatic retries).
 | I9 | A dead orchestrator loses nothing: lanes finish on their own and write their own `exit.json` | `xcheck wait --base` |
 | I10 | One cross-check spends quota at a time on this machine | global flock + refusal while any recorded lane is alive |
 | I11 | Lane name is provenance: `<harness>-<exact model>[-<effort>]`, and that model is what is launched | `adapters.Lane.name` |
+| I12 | The orchestrating model spends no turns while lanes work | one blocking call that prints only the final table; `--detach` + `wait --timeout S` where a tool call cannot hold that long |
+| I13 | No orchestrator identity or API key reaches a peer | lane runner scrubs `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_EFFORT`, `CODEX_COMPANION_*`, `HERDR_*`, provider API keys |
 
 Scope: one operator, one machine (macOS), attended runs. A reviewer finding
 that needs a second concurrent run, a reboot mid-run, or an unattended
@@ -61,11 +63,22 @@ X="$HOME/.local/bin/xcheck"
 2. **Record** BASE, roster, and the exact command in the task's tracker
    (e.g. its `TODO.md`) before spending anything.
 3. **Announce** the roster in chat: `Fan-out: N peers → <lanes>. Not peers: <harness> (<why>)`.
-4. **Run** `xcheck run`. It blocks until every lane has ended and prints the
-   status table. A lane can take up to `--cap` (default 2700 s), so run it as a
-   background shell job and wait for its completion notice; do not poll panes
-   or files while it runs. Harnesses whose foreground calls are capped (Claude
-   Code 10 min, opencode 10 min, Grok 2 min) must use their background mode.
+4. **Run** it without spending turns (I12). The call blocks until every lane has
+   ended and prints only the status table; do not read panes, files, or logs
+   while it runs. Pick the form your harness can hold:
+
+   | Orchestrator | Form |
+   |---|---|
+   | Claude Code | `xcheck run …` as a background shell job (`run_in_background`); the completion notice is the one return |
+   | opencode | `run … --detach`, then `wait --base B --timeout S` with the shell call's `timeout` set above S. Its shell tool (1.18.32) defaults to 120 s, runs each command in its own process group, and has no background parameter; the detached supervisor is in its own session, so it survives the call |
+   | Grok | Herdr mode only (its sandbox covers its whole process tree; `run` refuses headless). Run `xcheck run` as a background command, then one `get_command_or_subagent_output` with `timeout_ms` up to 3 600 000 (user-guide 20-background-tasks) |
+   | pi | `run … --detach` + `wait --timeout <call cap>`; never pi's own `delegate`/`subagent` tools as peers (they start pi) |
+   | Codex | not yet in v2: its sandbox blocks the lanes' network and Herdr control. Use `../x-check-old/` (its installed runtime + `~/.codex/rules/xcheck.rules`) |
+   | Agy | allowed; every Agy lane is dropped (`--orch agy`) |
+
+   `wait --timeout S` exits 3 while lanes still run, so each extra return costs
+   one short message. Stage and launch before loading unrelated material into
+   the orchestrator: every return re-sends its whole context.
 5. **Report** every non-`done` lane in the next chat message, using its
    `reason` and `stderr_tail` from `STATUS.json`:
    `⚠️ <lane> <status> — <cause in plain words>. Fix: <remedy>. Continuing with <others>.`
@@ -73,14 +86,17 @@ X="$HOME/.local/bin/xcheck"
 
 `run` options: `--lanes kind:model[:effort],…` replaces the roster;
 `--mode auto|headless|herdr` (auto = Herdr when available); `--web packet|live`;
-`--idle` (600) / `--cap` (2700) seconds; `--force-lane NAME` launches past a
-capacity refusal (say so in chat); `--skip-capacity` for smoke runs.
+`--idle` (900 s without any stream output) / `--cap` (3600 s spend budget per
+lane); `--force-lane NAME` launches past a capacity refusal (say so in chat);
+`--skip-capacity` for smoke runs; `--detach`.
 
-Other commands: `xcheck status --base B` (render from files),
-`xcheck wait --base B` (reattach after the orchestrator died).
+Other commands: `xcheck wait --base B [--timeout S]` (block until done; also
+reattaches and finishes the job if the supervisor died), `xcheck status --base B`
+(render from files), `xcheck doctor`.
 
 Exit codes: 0 finished (read the table), 2 refused before any spend
-(packet, lock, launch-once, orchestrator rule), 130 supervisor interrupted.
+(packet, lock, launch-once, orchestrator rule), 3 still running (`wait
+--timeout`), 130 supervisor interrupted.
 
 ---
 
@@ -98,7 +114,13 @@ Exit codes: 0 finished (read the table), 2 refused before any spend
 The orchestrator's own harness is removed (`--orch`). `--orch agy` removes all
 Agy lanes. Pins live in `xcheck/adapters.py`; `xcheck doctor` confirms Grok and
 Agy pins appear in `grok models` / `agy models`. Refresh pins deliberately; the
-lane name changes with them.
+lane name changes with them. Claude pins use the versioned id
+(`claude-opus-5-5`, not `opus-5-5`); capacity maps it to the opus bucket.
+
+Opt-in only: `agy:<third-party-selector>` (expensive; correlated with the
+Sonnet lane when both run). Never: `agy:gpt-oss-120b-medium`: `agy models` still
+lists it, but its agent loop aborts with `Agent execution terminated due to
+error.` and no answer.
 
 The two Gemini lanes are not interchangeable. Flash tends to ratify the
 packet's claims, including false ones; Pro tends to find defects and reject
@@ -157,7 +179,8 @@ Staging rules (each one has cost a round when broken):
 ```text
 1) VERDICT: a decision and its single most important reason, ≤80 words.
 2) Findings. For each: severity; evidence (file, symbol, behaviour); root cause;
-   how often the scenario occurs and what ignoring it costs; the smallest repair
+   the mechanism and premises the diagnosis rests on; how often the scenario
+   occurs and what ignoring it costs; the smallest repair
    (code or pseudodiff when the evidence allows); what must stay true;
    a verification that fails while the defect is present; confidence.
 3) What you would delete from the target, and why deleting it is safe.
@@ -172,8 +195,10 @@ RESULT_REQUIRE: VERDICT
 ```
 
 Copy the PROOF line as written: the validator accepts `6) PROOF: <token>` or
-`6) PROOF` followed by the token on the next line; anything else after
-`PROOF:` is compared as the token and fails.
+`6) PROOF` followed by the token on the next line (bold or backticks around
+either are fine); anything else after `PROOF:` is compared as the token and
+fails. An answer also needs some review text besides the heading, PROOF, and
+marker. `tests/test_laws.py` states the whole contract as properties.
 
 ---
 
@@ -221,17 +246,20 @@ the panes. In headless mode a supervisor signal stops the lanes (`interrupted`).
 `bin/agent-capacity` (carried from v1) reads each pool's free subscription
 meter without spending a prompt: Codex app-server rate limits, Claude OAuth
 usage, Grok billing (weekly credits view), Agy's local quota summary (per
-family). `run` probes each selected pool once. A lane launches only on
-`eligible`; the reserve is 10 %, and for Agy families it is `5 + 5n` % for `n`
-lanes from that family (capped at 90). `reserve-low`, `auth-required`, and
-`capacity-unknown` are skipped and must be announced.
+family). Each lane runner probes its own pool immediately before spending,
+so in Herdr mode the probe runs in the pane, outside any orchestrator sandbox.
+A lane launches only on `eligible`; the reserve is 10 %, and for Agy families
+it is `5 + 5n` % for the `n` lanes of this run in that family (capped at 90).
+`reserve-low`, `auth-required`, and `capacity-unknown` end the lane as
+`skipped`, which must be announced.
 
 Claude's `security` exit 36 in the probe means a locked login keychain: run
 `keychain-unlock-gui` (operator at the screen), or pass a manual reading via
 `AGENT_CAPACITY_CLAUDE_MANUAL_REMAINING` + `…_CAPTURED_AT` (≤5 min old).
 
-Capacity is a snapshot. A lane that hits its cap mid-run fails with the
-harness's own error message.
+Capacity is a snapshot, and a healthy Agy family reading does not rule out a
+per-model cap ("Individual quota reached"). A lane that hits a cap mid-run
+fails with the harness's own error message; it is never retried in that run.
 
 ---
 
@@ -257,9 +285,12 @@ The read-only sandbox still lets it run read commands (`cat`, `rg`) anywhere.
 **Claude Code**: `claude -p --restricted --permission-mode dontAsk
 --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools Read
 --allowedTools Read --add-dir <work> --no-session-persistence --model <m>
---effort <e> --output-format stream-json --verbose`, message on stdin,
-`ANTHROPIC_API_KEY` removed (subscription auth). `--restricted` ignores user
-settings and hooks. Final text is the `result` event's `result`; on
+--effort <e> --permission-prompts none --output-format stream-json --verbose
+--include-partial-messages`, message on stdin. `--restricted` ignores user
+settings and hooks. `--permission-prompts none` denies anything that would
+prompt instead of waiting; partial messages keep the stream moving through a
+long think so the idle clock only measures real silence. Never `--bare`: it
+skips the keychain, so subscription auth fails. Final text is the `result` event's `result`; on
 `is_error: true` that field is the error message (and `subtype` may still say
 `success`), so it is never treated as an answer. Its `rate_limit_event` carries
 five-hour and seven-day utilisation.
@@ -267,8 +298,7 @@ five-hour and seven-day utilisation.
 **Grok**: `grok --prompt-file <message> -m <model> --reasoning-effort <e>
 --cwd <work> --tools read_file --deny 'MCPTool(*)' --no-subagents --no-plan
 --no-auto-update --sandbox read-only --always-approve --output-format
-streaming-json --disable-web-search`, with `GROK_MEMORY=0` set and
-`GROK_SANDBOX` removed from the environment.
+streaming-json --disable-web-search`, with `GROK_MEMORY=0` set.
 
 - Sandbox: `read-only` reads everywhere and kernel-denies writes outside
   `~/.grok` and tmp. `strict` cannot read `/opt/homebrew`, so the operator's
@@ -279,15 +309,21 @@ streaming-json --disable-web-search`, with `GROK_MEMORY=0` set and
 - MCP: Grok still starts the operator's MCP servers and lists their tools via
   `search_tool`; `--deny 'MCPTool(*)'` makes every `use_tool` call fail with
   "Denied by permission policy". Keep the deny.
-- `--no-memory` is not a Grok flag; memory is `GROK_MEMORY=0`.
-- Final text is the `text` chunks after the last `tool_call`; errors are
-  `{"type":"error","message":…}`.
+- `--no-memory` is accepted but absent from `grok --help`; the documented
+  switch is `GROK_MEMORY=0`, which v2 uses.
+- `--tools` is honoured only headless; the interactive TUI ignores it
+  (user-guide 14-headless-mode), which is one reason v2 never drives the TUI.
+- Final text is the last model message after the last `tool_call`; a `usage`
+  event closes each message. Narration from earlier messages is never glued
+  onto the answer (v1 lost reviews to exactly that in `--output-format json`'s
+  `.text`). Errors are `{"type":"error","message":…}`.
 - Docs: `~/.grok/docs/user-guide/` (18-sandbox, 14-headless-mode, 10-hooks).
 
 **Agy**: `agy --sandbox --mode plan --model <selector> --output-format
 stream-json --print-timeout 0s --log-file <lane>/agy-cli.log`, message on stdin
 (no `-p`; `-p` makes it ignore stdin). The selector carries the effort; do not
-pass `--effort`.
+pass `--effort` (the flag exists, but fixed selectors such as the Claude Thinking
+ones reject it).
 
 - Agy 1.2.12 print mode completes turns that call file tools (paged
   `view_file`, `run_command` reads), so it reads the packet like every other
@@ -309,8 +345,18 @@ pass `--effort`.
 --pane <id> --direction right|down --ratio <existing share> --cwd <dir>
 --no-focus` returns `.result.pane.pane_id`; `pane run <id> <command>` types a
 command into the pane's shell; `pane rename`, `pane get` (tab/workspace
-check), `pane close`. The lane runner strips `HERDR_*` from the harness
-environment so no peer can drive the operator's session.
+check), `pane close`. Address panes only by the ids a split returned, never by
+title or focus.
+
+**Environment (I13).** The orchestrating harness exports its session identity
+into every child shell: Claude Code sets `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
+`CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_MESSAGING_SOCKET`/`_TOKEN`,
+`CLAUDE_EFFORT`; companions add `CODEX_COMPANION_*`; Herdr adds `HERDR_*`. A
+peer that inherits them is a nested session of the orchestrator. The lane
+runner removes those, every provider API key (all lanes use subscription
+auth), and `GROK_SANDBOX` (the adapter picks the profile). User preferences
+such as `GROK_TELEMETRY_*` pass through. Re-verify: `env` in the orchestrator's
+shell, then the fake-harness env test.
 
 **Independence limit.** Codex and Agy can run read commands, so they can read
 paths outside their workspace, including another lane's `RESULT-*.md` if it
@@ -361,5 +407,10 @@ vault.
 
 ## Repository
 
-`python3 -m unittest discover -s tests` (stdlib only; fake harness for
-end-to-end runs, real stream fixtures for parsers). History is `git log`.
+`python3 -m unittest discover -s tests`. Code is stdlib-only; the one
+test-only dependency is Hypothesis (`requirements-test.txt`), imported
+unguarded so a missing install fails by name instead of skipping the property
+lane. `tests/test_xcheck.py` runs end-to-end against a fake harness that speaks
+each CLI's stream shape, plus real captured streams in `tests/fixtures/`;
+`tests/test_laws.py` holds the property laws for the answer contract and the
+stream reader. History is `git log`.

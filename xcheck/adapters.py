@@ -78,7 +78,6 @@ def parse_lane(spec: str) -> Lane:
 class Launch:
     argv: list[str]
     stdin: Path | None  # file to feed on stdin, or None for /dev/null
-    env_unset: tuple[str, ...] = ()
     env_set: dict[str, str] = field(default_factory=dict)
 
 
@@ -97,13 +96,16 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, web: bool) -> Lau
         tools = "Read,WebSearch,WebFetch" if web else "Read"
         argv = [
             "claude", "-p", "--restricted", "--permission-mode", "dontAsk",
+            # With -p, anything that would prompt is denied instead of waiting.
+            "--permission-prompts", "none",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--tools", tools, "--allowedTools", tools, "--add-dir", str(work),
             "--no-session-persistence", "--model", lane.model, "--effort", lane.effort,
-            "--output-format", "stream-json", "--verbose",
+            # Partial messages keep the stream moving during a long silent
+            # think, so the idle clock measures real inactivity.
+            "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         ]
-        # Subscription auth only; an API key in the environment would bill it.
-        return Launch(argv, message, env_unset=("ANTHROPIC_API_KEY",))
+        return Launch(argv, message)
     if lane.kind == "grok":
         tools = "read_file,web_search,web_fetch" if web else "read_file"
         argv = [
@@ -120,9 +122,9 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, web: bool) -> Lau
         ]
         if not web:
             argv.append("--disable-web-search")
-        # --no-memory is not a grok 1.0.41 flag; the env switch is documented.
-        # GROK_SANDBOX in the operator's shell would otherwise pick the profile.
-        return Launch(argv, None, env_unset=("GROK_SANDBOX",), env_set={"GROK_MEMORY": "0"})
+        # --no-memory is accepted but hidden from `grok --help`; GROK_MEMORY=0
+        # is the documented switch (user-guide 14-headless-mode).
+        return Launch(argv, None, env_set={"GROK_MEMORY": "0"})
     if lane.kind == "agy":
         # Prompt on stdin (no -p). --mode plan keeps it read-only; do not add
         # --disable-slash-commands, which disables plan mode. Agy has no tool
@@ -143,7 +145,8 @@ HELP_COMMANDS = {
               "--output-last-message"]),
     "claude": (["claude", "--help"], ["--print", "--restricted", "--permission-mode",
                "--strict-mcp-config", "--mcp-config", "--tools", "--allowedTools", "--add-dir",
-               "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose"]),
+               "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
+               "--permission-prompts", "--include-partial-messages"]),
     "grok": (["grok", "--help"], ["--prompt-file", "--model", "--reasoning-effort", "--cwd",
              "--tools", "--deny", "--no-subagents", "--no-plan", "--no-auto-update", "--sandbox",
              "--always-approve", "--output-format", "streaming-json", "--disable-web-search"]),
@@ -163,6 +166,7 @@ class Reader:
     text: str = ""
     error: str | None = None
     _buf: list[str] = field(default_factory=list)
+    _last: str = ""  # grok: the last complete assistant message
 
     def feed(self, obj: dict) -> str | None:
         """Consume one stream object; return a short human line for the view."""
@@ -172,7 +176,7 @@ class Reader:
         if self.kind == "codex" and final_file.is_file():
             self.text = final_file.read_text(encoding="utf-8", errors="replace")
         elif self.kind == "grok":
-            self.text = "".join(self._buf)
+            self.text = "".join(self._buf) or self._last
 
     # -- codex: JSONL items; the -o file holds the final message.
     def _codex(self, o: dict) -> str | None:
@@ -213,14 +217,22 @@ class Reader:
             return "\n".join(out) or None
         return None
 
-    # -- grok: ACP updates; text chunks after the last tool call are the answer.
+    # -- grok: ACP updates. A `usage` event closes one model message; the answer
+    # is the last message after the last tool call, so narration from an
+    # earlier message is never glued onto the answer's heading.
     def _grok(self, o: dict) -> str | None:
         t = o.get("type")
         if t == "text":
             self._buf.append(o.get("data", ""))
             return None
+        if t == "usage":
+            if self._buf:
+                self._last = "".join(self._buf)
+                self._buf.clear()
+            return None
         if t == "tool_call":
             self._buf.clear()
+            self._last = ""
             return f"> {o.get('toolName')} {_clip(json.dumps(o.get('rawInput')), 100)}"
         if t == "error":
             self.error = o.get("message")

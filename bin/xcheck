@@ -2,12 +2,14 @@
 """X-Check: fan a staged review packet out to peer agent CLIs and collect answers.
 
   xcheck run    --base B [--lanes kind:model[:effort],...] [--orch KIND] [--mode auto|headless|herdr]
-  xcheck wait   --base B      reattach to a run whose supervisor died
+  xcheck run    ... --detach  start the supervisor in the background and return
+  xcheck wait   --base B [--timeout S]   block until the run ends (exit 3 = still
+                running after S seconds); also reattaches if the supervisor died
   xcheck status --base B      render STATUS from files, no waiting
   xcheck doctor               check adapter flags and model pins against installed CLIs
   xcheck lane   --base B --lane NAME   (internal: run one lane)
 
-See X-Check.md for the protocol.
+See Multi-Agent Cross-Check Protocol.md for the protocol.
 """
 
 import argparse
@@ -32,16 +34,20 @@ def main() -> int:
     r.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster minus --orch")
     r.add_argument("--mode", default="auto", choices=["auto", "headless", "herdr"])
     r.add_argument("--web", default="packet", choices=["packet", "live"])
-    r.add_argument("--idle", type=int, default=600, help="seconds without output before a lane is killed")
-    r.add_argument("--cap", type=int, default=2700, help="hard wall-clock seconds per lane")
+    r.add_argument("--idle", type=int, default=900, help="seconds without any stream output before a lane is killed")
+    r.add_argument("--cap", type=int, default=3600, help="wall-clock spend budget per lane, in seconds")
     r.add_argument("--force-lane", action="append", default=[], metavar="NAME",
                    help="launch this lane even if capacity says no (record why in chat)")
     r.add_argument("--skip-capacity", action="store_true", help="no capacity probe (tests, smoke runs)")
     r.add_argument("--force", action="store_true", help="ignore live lanes from another run")
+    r.add_argument("--detach", action="store_true",
+                   help="return once launched; collect with `xcheck wait` (for capped tool calls)")
 
-    for name in ("wait", "status"):
-        s = sub.add_parser(name)
-        s.add_argument("--base", required=True, type=Path)
+    w = sub.add_parser("wait")
+    w.add_argument("--base", required=True, type=Path)
+    w.add_argument("--timeout", type=int, help="return with exit 3 after this many seconds")
+    st = sub.add_parser("status")
+    st.add_argument("--base", required=True, type=Path)
     sub.add_parser("doctor")
     ln = sub.add_parser("lane")
     ln.add_argument("--base", required=True, type=Path)
@@ -49,6 +55,8 @@ def main() -> int:
 
     a = p.parse_args()
     try:
+        if a.cmd == "run" and a.detach:
+            return run.detach([x for x in sys.argv[1:] if x != "--detach"], a.base)
         if a.cmd == "run":
             if a.lanes:
                 lanes = [adapters.parse_lane(s.strip()) for s in a.lanes.split(",") if s.strip()]
@@ -57,7 +65,7 @@ def main() -> int:
             return run.start(a.base, lanes, a.mode, a.orch, a.web == "live", a.idle, a.cap,
                              set(a.force_lane), a.skip_capacity, a.force)
         if a.cmd == "wait":
-            return run.wait(a.base)
+            return run.wait(a.base, a.timeout)
         if a.cmd == "status":
             print(run.render_status(Run.load(a.base.resolve())))
             return 0
