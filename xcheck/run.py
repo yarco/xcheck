@@ -360,13 +360,12 @@ def doctor() -> int:
     argument values are pinned by unit tests and smoke runs, not here."""
     from . import install
     bad = 0
-    source, current = install.digest(), install.installed_digest()
-    if install.SHARE in BIN.parents:
-        print(f"ok   running the installed copy {current}")
-    elif current == source:
-        print(f"ok   installed copy matches this source ({source})")
+    root, current = install.source_root(), install.installed_digest()
+    source = install.digest(root) if root and root.is_dir() else None
+    if source is not None and current == source:
+        print(f"ok   installed copy matches source {root} ({source})")
     else:
-        print(f"FAIL installed copy {current or 'missing'} != source {source}: run bin/xcheck install")
+        print(f"FAIL installed copy {current or 'missing'} != source {source or 'missing'}: run bin/xcheck install")
         bad += 1
     for kind, (cmd, flags) in adapters.HELP_COMMANDS.items():
         try:

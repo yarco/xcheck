@@ -80,7 +80,6 @@ def main() -> int:
         if a.cmd == "install":
             from xcheck import install
             dest = install.install()
-            install.prune()
             print(f"xcheck: installed {dest}\n  {install.LINK} → it\n  Codex rule: {install.RULES}")
             return 0
         if a.cmd == "lane":

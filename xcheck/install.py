@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +26,7 @@ SOURCE = Path(__file__).resolve().parent.parent
 SHARE = Path.home() / ".local" / "share" / "xcheck"
 LINK = Path.home() / ".local" / "bin" / "xcheck"
 RULES = Path.home() / ".codex" / "rules" / "xcheck.rules"
+SOURCE_RECORD = SHARE / "source"
 EXECUTABLES = ("bin/xcheck", "bin/agent-capacity")
 
 
@@ -48,14 +48,27 @@ def installed_digest() -> str | None:
         return None
 
 
+def source_root() -> Path | None:
+    """The original repo, including when called through the installed copy."""
+    if SOURCE.is_relative_to(SHARE):
+        try:
+            return Path(SOURCE_RECORD.read_text(encoding="utf-8").strip())
+        except OSError:
+            return None
+    return SOURCE
+
+
 def install() -> Path:
-    ident = digest()
+    root = source_root()
+    if root is None or not (root / "bin" / "xcheck").is_file():
+        raise SystemExit("xcheck: source tree unavailable; run bin/xcheck install from the repo")
+    ident = digest(root)
     dest = SHARE / ident
     if not dest.exists():
         SHARE.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=SHARE))
-        for rel in runtime_files():
-            data = (SOURCE / rel).read_bytes()
+        for rel in runtime_files(root):
+            data = (root / rel).read_bytes()
             if rel in EXECUTABLES:
                 # Pin this interpreter and isolate it from PYTHON* variables and
                 # user site-packages, so the caller's environment cannot inject code.
@@ -68,6 +81,9 @@ def install() -> Path:
         stage.chmod(0o555)
         os.replace(stage, dest)
     _symlink(SHARE / "current", Path(ident))
+    record = SOURCE_RECORD.with_name(f".source.{os.getpid()}")
+    record.write_text(str(root.resolve()) + "\n", encoding="utf-8")
+    os.replace(record, SOURCE_RECORD)
     LINK.parent.mkdir(parents=True, exist_ok=True)
     if LINK.exists() and not LINK.is_symlink():
         raise SystemExit(f"{LINK} exists and is not a symlink; refusing to replace it")
@@ -77,8 +93,8 @@ def install() -> Path:
         "# Multi-Agent Cross-Check Protocol (xcheck). Written by `xcheck install`.\n"
         "# The target is a read-only copy under ~/.local that Codex's sandbox cannot\n"
         "# write; never point this rule at the vault source.\n"
-        f'prefix_rule(pattern=["xcheck"], decision="allow")\n'
-        f'prefix_rule(pattern=["{LINK}"], decision="allow")\n'
+        + "".join(f'prefix_rule(pattern=["{LINK}", "{cmd}"], decision="allow")\n'
+                  for cmd in ("run", "wait", "status", "doctor"))
     )
     return dest
 
@@ -89,16 +105,3 @@ def _symlink(link: Path, target: Path) -> None:
         tmp.unlink()
     tmp.symlink_to(target)
     os.replace(tmp, link)
-
-
-def prune(keep: int = 3) -> None:
-    """Remove all but the newest `keep` snapshots (never the current one)."""
-    current = installed_digest()
-    snaps = sorted((p for p in SHARE.iterdir() if p.is_dir() and not p.name.startswith(".")),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
-    for p in snaps[keep:]:
-        if p.name != current:
-            for q in p.rglob("*"):
-                q.chmod(0o755)
-            p.chmod(0o755)
-            shutil.rmtree(p)

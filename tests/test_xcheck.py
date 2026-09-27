@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import shutil
 import signal
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -173,6 +175,59 @@ class CapacityProbe(unittest.TestCase):
             self.assertEqual(capacity._probe(["codex"])["status"], "eligible")
         self.assertEqual(call.call_args.args[0][:3],
                          [sys.executable, "-I", str(capacity.HELPER)])
+
+
+class Installation(unittest.TestCase):
+    def test_rule_only_allows_the_absolute_public_commands(self):
+        from xcheck import install
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share, link = root / "share", root / "bin" / "xcheck"
+            rules, source = root / "rules" / "xcheck.rules", share / "source"
+            with patch.multiple(install, SHARE=share, LINK=link, RULES=rules, SOURCE_RECORD=source):
+                try:
+                    install.install()
+                    self.assertEqual(source.read_text().strip(), str(REPO))
+                    lines = [line for line in rules.read_text().splitlines() if line.startswith("prefix_rule")]
+                    self.assertEqual(lines, [
+                        f'prefix_rule(pattern=["{link}", "{cmd}"], decision="allow")'
+                        for cmd in ("run", "wait", "status", "doctor")
+                    ])
+                    self.assertEqual(rules.read_text().count("Written by `xcheck install`"), 1)
+                finally:
+                    for path in share.rglob("*"):
+                        if not path.is_symlink():
+                            path.chmod(0o755)
+
+    def test_doctor_detects_stale_installed_copy_from_captured_help(self):
+        from xcheck import install, run
+        helps = {tuple(cmd): (FIX / "cli-help" / f'{kind.replace(" ", "-")}.txt').read_text()
+                 for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
+        models = "\n".join(l.model for l in adapters.DEFAULT_ROSTER)
+
+        def fake_run(cmd, **_):
+            return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), models), "")
+
+        with patch.object(install, "source_root", return_value=REPO), \
+             patch.object(install, "installed_digest", return_value="stale"), \
+             patch.object(run.subprocess, "run", side_effect=fake_run), \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(run.doctor(), 1)
+        self.assertIn("FAIL installed copy stale != source", output.getvalue())
+
+        with patch.object(install, "source_root", return_value=REPO), \
+             patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
+             patch.object(run.subprocess, "run", side_effect=fake_run), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(run.doctor(), 0)
+
+        helps[tuple(adapters.HELP_COMMANDS["grok"][0])] = helps[tuple(adapters.HELP_COMMANDS["grok"][0])].replace("--sandbox", "")
+        with patch.object(install, "source_root", return_value=REPO), \
+             patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
+             patch.object(run.subprocess, "run", side_effect=fake_run), \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(run.doctor(), 1)
+        self.assertIn("grok: missing ['--sandbox']", output.getvalue())
 
 
 class TrustFiles(unittest.TestCase):
