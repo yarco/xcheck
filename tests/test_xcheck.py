@@ -262,6 +262,21 @@ class PoolAdmission(unittest.TestCase):
         self.assertTrue(finished_while_locked)
         self.assertEqual(results, [None])
 
+    def test_a_briefly_held_gate_is_not_a_busy_pool(self):
+        # A sibling lane deciding admission holds the gate for an instant; that
+        # is neither a wait worth announcing nor worth a full pool poll.
+        directory = self.root / ".pools" / "codex"
+        directory.mkdir(parents=True)
+        waits = []
+        with (directory / "gate").open("a+") as gate:
+            fcntl.flock(gate, fcntl.LOCK_EX)
+            threading.Timer(0.2, fcntl.flock, (gate, fcntl.LOCK_UN)).start()
+            t0 = time.time()
+            held = self.pools.acquire(self.root, "codex", "A", t0 + 5, on_wait=waits.append)
+        self.addCleanup(held.release)
+        self.assertLess(time.time() - t0, 1)
+        self.assertEqual(waits, [])
+
     def test_same_run_shares_but_every_holder_must_release_for_another_run(self):
         first, second = self.take("codex", "A"), self.take("codex", "A")
         self.assertIsNotNone(first)

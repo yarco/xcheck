@@ -23,7 +23,8 @@ import os
 import time
 from pathlib import Path
 
-POLL = 2.0
+POLL = 2.0        # pool held by another run
+GATE_POLL = 0.05  # gate held by a lane deciding admission, for an instant
 
 
 class Held:
@@ -40,27 +41,19 @@ class Held:
 
 
 def acquire(root: Path, pool: str, run_id: str, deadline: float, on_wait=None) -> Held | None:
-    """Block until this run may spend from `pool`; None once `deadline` passes."""
+    """Block until this run may spend from `pool`; None once `deadline` passes.
+    Waiting for the gate and for the pool both count against `deadline`."""
     d = root / ".pools" / pool
     d.mkdir(parents=True, exist_ok=True)
     busy = open(d / "busy", "a+")
-    announced, owner = False, ""
+    announced = False
     try:
         while time.time() < deadline:
+            pause = GATE_POLL
             with open(d / "gate", "a+") as gate:
-                try:
-                    fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    pass
-                else:
-                    if time.time() >= deadline:
-                        break
+                if _try(gate, fcntl.LOCK_EX):
                     owner = _read(d / "owner")
-                    try:
-                        fcntl.flock(busy, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        free = True
-                    except BlockingIOError:
-                        free = False
+                    free = _try(busy, fcntl.LOCK_EX)
                     if free or owner == run_id:
                         if free:
                             _write(d / "owner", run_id)
@@ -69,18 +62,24 @@ def acquire(root: Path, pool: str, run_id: str, deadline: float, on_wait=None) -
                         # hold the gate, so the conversion cannot be raced.
                         fcntl.flock(busy, fcntl.LOCK_SH | fcntl.LOCK_NB)
                         return Held(busy)
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            if on_wait and not announced:
-                on_wait(owner)
-                announced = True
-            time.sleep(min(POLL, remaining))
+                    if on_wait and not announced:
+                        on_wait(owner)
+                        announced = True
+                    pause = POLL
+            time.sleep(max(0.0, min(pause, deadline - time.time())))
     except BaseException:
         busy.close()
         raise
     busy.close()
     return None
+
+
+def _try(fh, op: int) -> bool:
+    try:
+        fcntl.flock(fh, op | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
 
 
 def _read(path: Path) -> str:
