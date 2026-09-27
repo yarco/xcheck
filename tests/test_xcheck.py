@@ -87,6 +87,7 @@ class CodexLane(unittest.TestCase):
         for web, value in ((False, 'web_search="disabled"'), (True, 'web_search="live"')):
             argv = adapters.launch(Lane("codex", "gpt-6-sol", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), web).argv
             self.assertIn(value, argv)
+            self.assertIn("check_for_update_on_startup=false", argv)
             self.assertNotIn("--search", argv)
 
 
@@ -125,7 +126,44 @@ class GrokLane(unittest.TestCase):
         self.assertEqual(spec.argv[i + 1], "read-only")  # strict breaks exec hooks; off has no write guard
         self.assertEqual(spec.env_set, {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"})
         self.assertNotIn("--no-memory", spec.argv)
-        self.assertEqual(spec.argv[spec.argv.index("--deny") + 1], "MCPTool(*)")
+        self.assertNotIn("MCPTool(*)", spec.argv)
+
+    def test_bash_is_available_in_both_views_without_manual_approval(self):
+        lane = Lane("grok", "grok-4.7", "low")
+        stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
+        app = adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
+        self.assertIn("run_terminal_cmd", stream[stream.index("--tools") + 1].split(","))
+        self.assertNotIn("Bash", app)
+        self.assertIn("--always-approve", stream)
+        self.assertIn("--always-approve", app)
+        self.assertNotIn("MCPTool(*)", stream)
+        self.assertNotIn("MCPTool(*)", app)
+
+    def test_message_allows_workspace_scratch_without_widening_other_peers(self):
+        from xcheck.run import _message
+        grok = _message("tui", True, "grok")
+        claude = _message("tui", True, "claude")
+        self.assertIn("disposable writes inside this workspace", grok)
+        self.assertIn("Do not change PACKET.md", grok)
+        self.assertNotIn("disposable writes", claude)
+        self.assertIn("use only tools that read", claude)
+        self.assertIn("Connected MCP tools are available", grok)
+
+    def test_connected_mcp_is_available_to_stream_and_app_peers(self):
+        for kind, model, effort in (("codex", "gpt-6-sol", "low"),
+                                    ("claude", "claude-sonnet-5", "low"),
+                                    ("grok", "grok-4.7", "low")):
+            lane = Lane(kind, model, effort)
+            stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
+            app = adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
+            if kind == "codex":
+                self.assertNotIn("--ignore-user-config", stream)
+            elif kind == "claude":
+                self.assertNotIn("--strict-mcp-config", stream + app)
+                self.assertIn("mcp__*", stream[stream.index("--allowedTools") + 1])
+                self.assertIn("mcp__*", app[app.index("--allowedTools") + 1])
+            else:
+                self.assertNotIn("MCPTool(*)", stream + app)
 
 
 class SignalGroup(unittest.TestCase):
@@ -480,7 +518,9 @@ class EndToEnd(unittest.TestCase):
                 "CODEX_COMPANION_SESSION_ID": "c", "GROK_SANDBOX": "ws"}
         keep = {"GROK_TELEMETRY_ENABLED": "0"}
         env = {**os.environ, **leak, **keep, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
-               "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok"}
+               "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
+               "CODEX_CONFIG": str(self.root / "codex-config.toml"),
+               "AGY_SETTINGS": str(self.root / "agy-settings.json")}
         lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],

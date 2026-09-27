@@ -41,12 +41,18 @@ MESSAGE = (
     "convened. This directory holds copies of the owner's own files, staged for you "
     "by the review harness. Read ./PACKET.md for the task, then ./PROMPT.md for the "
     "answer schema; where they disagree about output format, PROMPT.md decides. Work "
-    "from the files in this directory; use only tools that read (files, commands that "
-    "change nothing{web_tools}), never MCP tools. Standing instructions from your "
-    "user-level configuration (note search, retrieval routing, workflow rules) are for "
-    "other work and do not apply here. {deliver}{web} Nobody will answer questions "
+    "from the files in this directory; {tool_scope} Connected MCP tools are "
+    "available for this review. Use them when relevant; do not send messages, "
+    "change external records, or perform other external actions. {deliver}{web} "
+    "Nobody will answer questions "
     "mid-review. If you read them and still think something is wrong, say so plainly "
     "and stop.\n"
+)
+
+GROK_SCOPE = (
+    "Bash and other tools are available for checks, including disposable writes "
+    "inside this workspace. Do not change PACKET.md, PROMPT.md, evidence/, or "
+    "files outside this workspace."
 )
 
 
@@ -96,7 +102,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
             d = run.lane_dir(name)
             d.mkdir(parents=True)
             lane_view = "tui" if run.lanes[name].kind in adapters.APP_ONLY else view
-            (d / "message.txt").write_text(_message(lane_view, web), encoding="utf-8")
+            (d / "message.txt").write_text(_message(lane_view, web, run.lanes[name].kind), encoding="utf-8")
         run.save()
     except OSError:
         shutil.rmtree(base / "lanes", ignore_errors=True)
@@ -127,8 +133,15 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     return _wait(run, children)
 
 
-def _message(view: str, web: bool) -> str:
-    return MESSAGE.format(deliver=DELIVER[view], web_tools=", web search" if web else "", web=(
+def _message(view: str, web: bool, kind: str) -> str:
+    scope = GROK_SCOPE if kind == "grok" else (
+        "use only tools that read (files, commands that change nothing"
+        + (", web search" if web else "") + ").")
+    deliver = DELIVER[view] if kind != "grok" else (
+        "Print your complete answer as your final message; the harness saves it."
+        if view == "stream" else
+        "Write your complete answer to ./ANSWER.md in a single write, ending with its final line; the harness publishes it.")
+    return MESSAGE.format(deliver=deliver, tool_scope=scope, web=(
         " Search the web when it can settle a fact your answer depends on, and cite"
         " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
 

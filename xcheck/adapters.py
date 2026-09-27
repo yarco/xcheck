@@ -4,8 +4,9 @@ Every flag here was checked against the installed CLI's own help and a real
 smoke run (codex-cli 0.157.1, Claude Code 2.1.283, grok 1.0.41, agy 1.2.12).
 `xcheck doctor` re-checks that each flag still appears in `--help`.
 
-A lane never writes files. It prints its answer as its final message; the lane
-runner extracts that text from the harness's structured stream.
+Stream lanes print their answer as a final message; the lane runner extracts
+that text from the harness's structured stream. Grok may write scratch files
+in its workspace while reviewing.
 """
 
 from __future__ import annotations
@@ -89,10 +90,11 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
     `log` its forensic log. Agy has no headless form: see `tui`."""
     if lane.kind == "codex":
         argv = [
-            "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
+            "codex", "exec", "--skip-git-repo-check", "--ephemeral",
             "-s", "read-only", "-C", str(work),
             "-m", lane.model, "-c", f'model_reasoning_effort="{lane.effort}"',
             "-c", f'web_search="{"live" if web else "disabled"}"',
+            "-c", "check_for_update_on_startup=false",
             "--json", "-o", str(final), "-",
         ]
         return Launch(argv, message)
@@ -102,8 +104,7 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
             "claude", "-p", "--restricted", "--permission-mode", "dontAsk",
             # With -p, anything that would prompt is denied instead of waiting.
             "--permission-prompts", "none",
-            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-            "--tools", tools, "--allowedTools", tools, "--add-dir", str(work),
+            "--tools", tools, "--allowedTools", tools + ",mcp__*", "--add-dir", str(work),
             "--no-session-persistence", "--model", lane.model, "--effort", lane.effort,
             "--debug-file", str(log),
             # Partial messages keep the stream moving during a long silent
@@ -112,11 +113,11 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
         ]
         return Launch(argv, message, env_set=CLAUDE_ENV)
     if lane.kind == "grok":
-        tools = "read_file,web_search,web_fetch" if web else "read_file"
+        tools = "read_file,grep,list_dir,run_terminal_cmd,web_search,web_fetch" if web else "read_file,grep,list_dir,run_terminal_cmd"
         argv = [
             "grok", "--prompt-file", str(message), "-m", lane.model,
             "--reasoning-effort", lane.effort, "--cwd", str(work),
-            "--tools", tools, "--deny", "MCPTool(*)", "--no-subagents", "--no-plan",
+            "--tools", tools, "--no-subagents", "--no-plan",
             "--sandbox", "read-only", "--always-approve", "--debug-file", str(log),
             "--output-format", "streaming-json",
         ]
@@ -149,8 +150,7 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
         tools = "Read,Write,WebSearch,WebFetch" if web else "Read,Write"
         argv = [
             "claude", "--restricted", "--permission-mode", "dontAsk",
-            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-            "--tools", tools, "--allowedTools", tools, "--add-dir", str(work),
+            "--tools", tools, "--allowedTools", tools + ",mcp__*", "--add-dir", str(work),
             "--model", lane.model, "--effort", lane.effort, "--debug-file", str(log), message,
         ]
         return Launch(argv, None, env_set=CLAUDE_ENV)
@@ -165,10 +165,11 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
         ]
         return Launch(argv, None)
     if lane.kind == "grok":
-        # The app ignores --tools (user-guide 14); deny rules do apply.
+        # The app ignores --tools (user-guide 14); the sandbox still limits
+        # writes outside temp paths. Bash remains available without prompts.
         argv = [
             "grok", "-m", lane.model, "--reasoning-effort", lane.effort, "--cwd", str(work),
-            "--deny", "MCPTool(*)", "--deny", "Bash", "--no-subagents", "--no-plan",
+            "--no-subagents", "--no-plan",
             "--sandbox", "read-only", "--always-approve", "--debug-file", str(log),
             *([] if web else ["--disable-web-search"]), message,
         ]
@@ -186,12 +187,12 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
 # Hidden-but-accepted flags are never used, so every entry must be listed.
 HELP_COMMANDS = {
     "codex exec": (["codex", "exec", "--help"], ["--skip-git-repo-check", "--ephemeral",
-                   "--ignore-user-config", "--sandbox", "--cd", "--model", "--config", "--json",
+                   "--sandbox", "--cd", "--model", "--config", "--json",
                    "--output-last-message"]),
     "codex": (["codex", "--help"], ["--sandbox", "--ask-for-approval", "--cd", "--model",
               "--config", "--search"]),
     "claude": (["claude", "--help"], ["--print", "--restricted", "--permission-mode",
-               "--strict-mcp-config", "--mcp-config", "--tools", "--allowedTools", "--add-dir",
+               "--tools", "--allowedTools", "--add-dir",
                "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
                "--permission-prompts", "--include-partial-messages", "--debug-file"]),
     "grok": (["grok", "--help"], ["--prompt-file", "--model", "--reasoning-effort", "--cwd",
