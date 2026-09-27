@@ -212,11 +212,33 @@ class GrokLane(unittest.TestCase):
             if kind == "codex":
                 self.assertNotIn("--ignore-user-config", stream)
             elif kind == "claude":
-                self.assertNotIn("--strict-mcp-config", stream + app)  # restricted still loads MCP
-                self.assertIn("mcp__*", stream[stream.index("--allowedTools") + 1])
-                self.assertIn("mcp__*", app[app.index("--allowedTools") + 1])
+                pass  # ClaudeMcp covers it
             else:
                 self.assertNotIn("MCPTool(*)", stream + app)
+
+
+class ClaudeMcp(unittest.TestCase):
+    def test_operator_servers_load_and_each_server_is_preapproved_by_name(self):
+        # --restricted ignores ~/.claude.json and `mcp__*` is not honoured as an
+        # allow pattern: both were verified live, so each server is named.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / ".claude.json"
+            cfg.write_text(json.dumps({"mcpServers": {"qmd": {}, "keenable-free": {}},
+                                       "claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Kiwi.com"]}))
+            lane = Lane("claude", "claude-sonnet-5", "low")
+            with patch.object(adapters, "CLAUDE_JSON", cfg):
+                stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
+                app = adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
+            for argv in (stream, app):
+                self.assertEqual(argv[argv.index("--mcp-config") + 1], str(cfg))
+                allowed = argv[argv.index("--allowedTools") + 1].split(",")
+                self.assertTrue({"mcp__qmd", "mcp__keenable-free", "mcp__claude_ai_Gmail",
+                                 "mcp__claude_ai_Kiwi_com"} <= set(allowed), allowed)
+                self.assertNotIn("mcp__*", allowed)
+                self.assertNotIn("--strict-mcp-config", argv)
+            with patch.object(adapters, "CLAUDE_JSON", Path(tmp) / "absent.json"):
+                argv = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
+            self.assertNotIn("--mcp-config", argv)
 
 
 class IdleDefaults(unittest.TestCase):

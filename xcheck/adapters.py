@@ -112,12 +112,10 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
     if lane.kind == "claude":
         tools = "Read,WebSearch,WebFetch" if web else "Read"
         argv = [
-            # --restricted skips settings files and hooks but still loads MCP servers
-            # (only --strict-mcp-config would skip them).
-            "claude", "-p", "--restricted", "--permission-mode", "dontAsk",
+            "claude", "-p", "--restricted", *claude_mcp(), "--permission-mode", "dontAsk",
             # With -p, anything that would prompt is denied instead of waiting.
             "--permission-prompts", "none",
-            "--tools", tools, "--allowedTools", tools + ",mcp__*", "--add-dir", str(work),
+            "--tools", tools, "--allowedTools", ",".join([tools, *claude_mcp_allow()]), "--add-dir", str(work),
             "--no-session-persistence", "--model", lane.model, "--effort", lane.effort,
             "--debug-file", str(log),
             # Partial messages keep the stream moving during a long silent
@@ -171,6 +169,27 @@ def _opencode_model(lane: Lane) -> list[str]:
 # updater are off through their documented variables (neither `--no-memory` nor
 # `--no-auto-update` is in `grok --help`).
 GROK_ENV = {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"}
+
+# Claude: --restricted ignores ~/.claude.json, so the operator's own MCP
+# servers load only through --mcp-config (account connectors load either way).
+# `mcp__*` is not an allow pattern Claude honours; each server is allowed by
+# name, `mcp__<server>`, with non-identifier characters as `_`
+# ("claude.ai Gmail" -> mcp__claude_ai_Gmail). bypassPermissions is refused
+# in restricted mode.
+CLAUDE_JSON = Path.home() / ".claude.json"
+
+
+def claude_mcp() -> list[str]:
+    return ["--mcp-config", str(CLAUDE_JSON)] if CLAUDE_JSON.is_file() else []
+
+
+def claude_mcp_allow() -> list[str]:
+    try:
+        data = json.loads(CLAUDE_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    names = [*(data.get("mcpServers") or {}), *(data.get("claudeAiMcpEverConnected") or [])]
+    return sorted({"mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", n) for n in names})
 CLAUDE_ENV = {"DISABLE_AUTOUPDATER": "1"}
 
 # Kinds whose headless (print) mode cannot be trusted with tools: Agy ends the
@@ -187,8 +206,8 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
     if lane.kind == "claude":
         tools = "Read,Write,WebSearch,WebFetch" if web else "Read,Write"
         argv = [
-            "claude", "--restricted", "--permission-mode", "dontAsk",
-            "--tools", tools, "--allowedTools", tools + ",mcp__*", "--add-dir", str(work),
+            "claude", "--restricted", *claude_mcp(), "--permission-mode", "dontAsk",
+            "--tools", tools, "--allowedTools", ",".join([tools, *claude_mcp_allow()]), "--add-dir", str(work),
             "--model", lane.model, "--effort", lane.effort, "--debug-file", str(log), message,
         ]
         return Launch(argv, None, env_set=CLAUDE_ENV)
@@ -233,7 +252,7 @@ HELP_COMMANDS = {
                    "--output-last-message"]),
     "codex": (["codex", "--help"], ["--sandbox", "--ask-for-approval", "--cd", "--model",
               "--config", "--search"]),
-    "claude": (["claude", "--help"], ["--print", "--restricted", "--permission-mode", "--tools", "--allowedTools", "--add-dir",
+    "claude": (["claude", "--help"], ["--print", "--restricted", "--mcp-config", "--permission-mode", "--tools", "--allowedTools", "--add-dir",
                "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
                "--permission-prompts", "--include-partial-messages", "--debug-file"]),
     "grok": (["grok", "--help"], ["--prompt-file", "--model", "--reasoning-effort", "--cwd",

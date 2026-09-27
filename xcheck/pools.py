@@ -86,7 +86,7 @@ def _try(fh, op: int) -> bool:
 
 def _read(path: Path) -> str:
     try:
-        return path.read_text().strip()
+        return path.read_text()  # exactly as written: a stripped id would never match its own run
     except OSError:
         return ""
 
