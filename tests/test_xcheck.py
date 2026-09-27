@@ -71,6 +71,11 @@ class Readers(unittest.TestCase):
         r = read_fixture("claude", "claude-ok.jsonl")
         self.assertEqual(r.text, "PLUM-42\nRESULT_COMPLETE")
 
+    def test_bold_two_line_proof_is_accepted(self):
+        text = "**1) VERDICT:** Readable.\n\nThe staged evidence is readable and the contract is satisfied.\n\n**6) PROOF:**\n`MANIFEST_TAIL_TOKEN: 0123abcd`\n\nRESULT_COMPLETE\n"
+        self.assertEqual(validate.check(text, CONTRACT), ("done", []))
+
+
     def test_grok_text_after_last_tool_call(self):
         r = read_fixture("grok", "grok-ok.jsonl")
         self.assertTrue(r.text.strip().endswith("RESULT_COMPLETE"), r.text)

@@ -85,7 +85,9 @@ def _proof(lines: list[str]) -> str | None:
         if not m:
             continue
         value = (m.group(1) or "").strip()
-        if not value:
+        # A closing `**` before the colon is formatting, not the proof value.
+        # Treat a formatting-only capture like the two-line PROOF form.
+        if not value or not value.strip("`*_ "):
             value = next((l.strip() for l in lines[i + 1:] if l.strip()), "")
         return value.strip("`*_ ").strip()
     return None
