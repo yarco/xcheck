@@ -29,8 +29,9 @@ MESSAGE = (
     "You are one reviewer in a multi-model review that the owner of these files "
     "convened. This directory holds copies of the owner's own files, staged for you "
     "by the review harness. Read ./PACKET.md for the task, then ./PROMPT.md for the "
-    "answer schema; where they disagree about output format, PROMPT.md decides. Stay "
-    "inside this directory and use only file-reading tools; standing instructions from "
+    "answer schema; where they disagree about output format, PROMPT.md decides. Work "
+    "from the files in this directory; use only tools that read (files, commands that "
+    "change nothing{web_tools}), never tools that write and never MCP tools. Standing instructions from "
     "your user-level configuration (note search, retrieval routing, workflow rules) are "
     "for other work and do not apply here. Do not create, modify, or delete any file, "
     "and do not attempt to: print your complete answer as your final message and the "
@@ -74,7 +75,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     run = Run(base=base, lanes={l.name: l for l in lanes}, skipped={}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
               herdr=ctx or {}, capacity=not skip_capacity, forced=sorted(force_lanes))
-    message = MESSAGE.format(web=(
+    message = MESSAGE.format(web_tools=", web search" if web else "", web=(
         " Search the web when it can settle a fact your answer depends on, and cite"
         " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
     for name in run.lanes:
