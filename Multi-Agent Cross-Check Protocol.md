@@ -33,31 +33,38 @@ judgment call (no log-regex classifiers, no automatic retries).
 |---|---|---|
 | I1 | Peers are harnesses other than the orchestrator's; all get the same packet; none is shown another's answer | `run --orch` refuses a same-kind lane; per-lane workspace copies |
 | I2 | Complete evidence: whole files, repo-relative paths, a proof token as the last staged line | packet rules below + `Proof target:` + PROOF check |
-| I3 | Peers are read-only, have no MCP, and no web unless `--web live` | adapter flags (see Harness facts) |
+| I3 | Peers are read-only and have no MCP; they may search the web unless `--web packet` | adapter flags (see Harness facts) |
 | I4 | Every lane ends: `--idle` without output or `--cap` wall time kills its process group | lane runner |
 | I5 | No silent shrinkage: every selected lane has a status row, and every non-`done` row is told to the operator in chat | `STATUS.md` + orchestrator duty |
 | I6 | No spend below the capacity reserve; nothing is retried automatically | capacity preflight; no retry code exists |
 | I7 | Files are the truth: the answer is the harness's final message, extracted from its structured stream and validated | lane runner + `xcheck/validate.py` |
 | I8 | One launch per BASE | `BASE/.launched/` (atomic mkdir) |
 | I9 | A dead orchestrator loses nothing: lanes finish on their own and write their own `exit.json` | `xcheck wait --base` |
-| I10 | One cross-check spends quota at a time on this machine | global flock + refusal while any recorded lane is alive |
+| I10 | At most one run spends from a quota pool at a time; lanes of one run share it; disjoint pools run in parallel | per-pool `flock` held by the lane runner while it can spend (`xcheck/pools.py`) |
 | I11 | Lane name is provenance: `<harness>-<exact model>[-<effort>]`, and that model is what is launched | `adapters.Lane.name` |
 | I12 | The orchestrating model spends no turns while lanes work | one blocking call that prints only the final table; `--detach` + `wait --timeout S` where a tool call cannot hold that long |
 | I13 | No orchestrator identity or API key reaches a peer | lane runner scrubs `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_EFFORT`, `CODEX_COMPANION_*`, `HERDR_*`, provider API keys |
+| I14 | Liveness is proven by the kernel, never by PIDs or the process table | each runner and supervisor holds an exclusive lock on its own `alive` file; alive = that lock is taken |
 
-Scope: one operator, one machine (macOS), attended runs. A reviewer finding
-that needs a second concurrent run, a reboot mid-run, or an unattended
-multi-hour wait is out of scope unless a real run hit it.
+Scope: one operator, one machine (macOS), attended runs, several orchestrator
+sessions possibly running cross-checks at once. A reviewer finding that needs
+a reboot mid-run or an unattended multi-hour wait is out of scope unless a real
+run hit it.
 
 ---
 
 ## Run it
 
 ```bash
-X="$HOME/.local/bin/xcheck"
-"$X" doctor                                   # flags + model pins vs installed CLIs
-"$X" run --base /tmp/agent-offload/<slug> --orch claude   # default roster minus claude
+xcheck doctor                                          # installed copy, flags, model pins
+xcheck run --base /tmp/agent-offload/<slug> --orch claude   # default roster minus claude
 ```
+
+`xcheck` on PATH is `~/.local/bin/xcheck`, a read-only copy published by
+`bin/xcheck install` from this folder (re-run it after changing `bin/` or
+`xcheck/`; `doctor` fails while the copy is stale). Run the command plainly,
+with no `NAME=value` prefix, `cd … &&`, pipe, or redirect: that is the shape
+the Codex allow rule matches.
 
 1. **Stage** `BASE=/tmp/agent-offload/<slug>/` (packet contract below).
 2. **Record** BASE, roster, and the exact command in the task's tracker
@@ -73,7 +80,7 @@ X="$HOME/.local/bin/xcheck"
    | opencode | `run … --detach`, then `wait --base B --timeout S` with the shell call's `timeout` set above S. Its shell tool (1.18.32) defaults to 120 s, runs each command in its own process group, and has no background parameter; the detached supervisor is in its own session, so it survives the call |
    | Grok | Herdr mode only (its sandbox covers its whole process tree; `run` refuses headless). Run `xcheck run` as a background command, then one `get_command_or_subagent_output` with `timeout_ms` up to 3 600 000 (user-guide 20-background-tasks) |
    | pi | `run … --detach` + `wait --timeout <call cap>`; never pi's own `delegate`/`subagent` tools as peers (they start pi) |
-   | Codex | not yet in v2: its sandbox blocks the lanes' network and Herdr control. Use `../x-check-old/` (its installed runtime + `~/.codex/rules/xcheck.rules`) |
+   | Codex | `run … --detach`, then `wait --base B --timeout S` under the call's timeout. `~/.codex/rules/xcheck.rules` (written by `install`) runs `xcheck` outside the sandbox with no approval; the rule is safe because its target is the read-only copy under `~/.local`, which the sandbox cannot write |
    | Agy | allowed; every Agy lane is dropped (`--orch agy`) |
 
    `wait --timeout S` exits 3 while lanes still run, so each extra return costs
@@ -85,17 +92,22 @@ X="$HOME/.local/bin/xcheck"
 6. **Merge** (rules below) into `CONSENSUS.md` in BASE.
 
 `run` options: `--lanes kind:model[:effort],…` replaces the roster;
-`--mode auto|headless|herdr` (auto = Herdr when available); `--web packet|live`;
+`--mode auto|headless|herdr` (auto = Herdr when available); `--web live|packet`
+(default `live`: peers may search the web and cite what they used; `packet` for
+untrusted input, where a prompt-injected packet plus a fetch tool could leak
+what the lane can read);
 `--idle` (900 s without any stream output) / `--cap` (3600 s spend budget per
 lane); `--force-lane NAME` launches past a capacity refusal (say so in chat);
-`--skip-capacity` for smoke runs; `--detach`.
+`--skip-capacity` for smoke runs; `--detach`. A lane whose pool is held by
+another run waits in its own process (no orchestrator turns) for up to `--cap`,
+then ends `skipped`.
 
 Other commands: `xcheck wait --base B [--timeout S]` (block until done; also
 reattaches and finishes the job if the supervisor died), `xcheck status --base B`
-(render from files), `xcheck doctor`.
+(render from files), `xcheck doctor`, `bin/xcheck install`.
 
 Exit codes: 0 finished (read the table), 2 refused before any spend
-(packet, lock, launch-once, orchestrator rule), 3 still running (`wait
+(packet, launch-once, orchestrator rule), 3 still running (`wait
 --timeout`), 130 supervisor interrupted.
 
 ---
@@ -237,8 +249,15 @@ titled `xcheck:<lane>` and runs the same lane runner with `pane run`, so it
 shows the harness's live tool calls and text. Completion is the lane's
 `exit.json`, never pane text. After a lane ends its pane lingers 3 s, then the
 supervisor closes it, only if it is still in the caller's tab. The wall shows a
-rendered event stream, not the vendor's interactive TUI: no TUI is driven, so
-no splash, trust dialog, composer, or overlay can stall a lane.
+rendered event stream, not the vendor's interactive TUI.
+
+What that means in practice: each pane runs the same harness (Codex, Claude,
+Grok, Agy) in its non-interactive mode and shows what it does as it happens:
+every file it reads, every command and search, and its text. You cannot type
+into a peer mid-run; you watch it. v1 instead started the interactive app and
+typed the prompt into it, which is where splash screens, trust dialogs,
+surveys, composer readiness, swallowed prompts and quota modals came from (most
+of v1's `herdr-host`). None of those exist here.
 
 If the supervisor dies in Herdr mode the panes keep running and finish on
 their own. `xcheck wait --base B` reattaches, waits, renders status and closes
@@ -370,6 +389,12 @@ auth), and `GROK_SANDBOX` (the adapter picks the profile). User preferences
 such as `GROK_TELEMETRY_*` pass through. Re-verify: `env` in the orchestrator's
 shell, then the fake-harness env test.
 
+**Codex as orchestrator.** Measured under this machine's Codex config: its
+`workspace-write` sandbox allowed the lanes' network and keychain reads but
+denied reading the process table (`ps`). v2 therefore never needs `ps` for
+liveness (I14), and the allow rule removes the sandbox from the run entirely,
+so Codex never has to escalate mid-run.
+
 **Operator rules reach peers.** Codex lanes load `~/.codex/AGENTS.md` (even
 with `--ignore-user-config` and `-c project_doc_max_bytes=0`), and Grok lanes
 load `~/.agents/rules` through `extra_rule_dirs` in `~/.grok/config.toml` (a
@@ -418,13 +443,9 @@ vault.
 ## Not in v2 (add only when a real run needs it)
 
 - Perplexity search lane (v1 had `pwm-packet` wiring).
-- A Codex-sandboxed or Grok-sandboxed orchestrator (v1's installed runtime and
-  `~/.codex/rules/xcheck.rules`). From Claude Code or opencode this is not
-  needed; from inside Grok, use Herdr mode (panes run outside its sandbox).
-- `--web live` beyond flag plumbing.
-- Cross-run parallelism, per-pool admission, reboot detection, late harvest,
-  detached cleanup workers, pane-screen classification: v1 machinery for
-  scenarios outside this scope or created by driving interactive TUIs.
+- Reboot detection, late harvest after a deadline, detached cleanup workers,
+  pane-screen classification: v1 machinery for scenarios outside this scope or
+  created by driving interactive TUIs.
 
 ## Repository
 

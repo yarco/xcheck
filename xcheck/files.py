@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import os
 import tempfile
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .adapters import Lane
+
+ROOT = Path("/tmp/agent-offload")
 from .validate import Contract
 
 
@@ -20,6 +23,28 @@ def atomic_write(path: Path, text: str) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
+
+
+def hold_life(path: Path):
+    """Hold an exclusive lock on `path` for this process's lifetime. Liveness of
+    the holder is then `is_alive(path)`: the kernel drops the lock on exit,
+    crash included, so there is no PID to reuse and no process table to read
+    (which a sandboxed orchestrator may not be allowed to do)."""
+    fh = open(path, "a+")
+    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fh
+
+
+def is_alive(path: Path) -> bool | None:
+    """True while the holder lives, False after it exited, None if it never started."""
+    if not path.exists():
+        return None
+    with open(path, "a+") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
 
 
 def now(t: float | None = None) -> str:

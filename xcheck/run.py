@@ -9,8 +9,6 @@ running), so the model spends one small turn per S seconds, never a poll loop.
 
 from __future__ import annotations
 
-import errno
-import fcntl
 import json
 import os
 import shutil
@@ -21,9 +19,7 @@ import time
 from pathlib import Path
 
 from . import adapters, herdr, validate
-from .files import Run, atomic_write, now
-
-ROOT = Path("/tmp/agent-offload")
+from .files import ROOT, Run, atomic_write, hold_life, is_alive, now
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 START_GRACE = 90  # seconds for a placed runner to record its pid
 LINGER = 3        # seconds a finished Herdr pane stays visible
@@ -51,7 +47,7 @@ class RunError(Exception):
 
 
 def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: bool,
-          idle: int, cap: int, force_lanes: set[str], skip_capacity: bool, force: bool) -> int:
+          idle: int, cap: int, force_lanes: set[str], skip_capacity: bool) -> int:
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
         raise RunError(f"BASE must live under {ROOT}")
@@ -61,13 +57,6 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         raise RunError(f"duplicate lanes: {names}")
     if orch in {l.kind for l in lanes}:
         raise RunError(f"a {orch} orchestrator must not launch a {orch} peer")
-
-    _lock = _global_lock()  # held until this process exits
-    if not force:
-        live = _live_lanes()
-        if live:
-            raise RunError("lanes from another run are still alive: " + ", ".join(live)
-                           + " (wait for them, or pass --force)")
 
     ctx = herdr.caller() if mode in ("auto", "herdr") else None
     if mode == "herdr" and ctx is None:
@@ -85,7 +74,9 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     run = Run(base=base, lanes={l.name: l for l in lanes}, skipped={}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
               herdr=ctx or {}, capacity=not skip_capacity, forced=sorted(force_lanes))
-    message = MESSAGE.format(web="" if web else " Do not use web search or web fetch tools.")
+    message = MESSAGE.format(web=(
+        " Search the web when it can settle a fact your answer depends on, and cite"
+        " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
     for name in run.lanes:
         d = run.lane_dir(name)
         (d / "work").mkdir(parents=True)
@@ -95,7 +86,8 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
             shutil.copytree(base / "evidence", d / "work" / "evidence")
         (d / "message.txt").write_text(message, encoding="utf-8")
     run.save()
-    atomic_write(base / "supervisor.pid", str(os.getpid()))
+    atomic_write(base / "supervisor.pid", str(os.getpid()))  # for operators; liveness is the lock
+    _alive = hold_life(base / "supervisor.alive")
     print(f"xcheck: {len(run.lanes)} lanes ({mode}) → {', '.join(run.lanes)}", flush=True)
 
     children: dict[str, subprocess.Popen] = {}
@@ -122,7 +114,7 @@ def detach(argv: list[str], base: Path) -> int:
     base = base.resolve()
     log = base / "supervisor.log"
     with open(log, "ab") as out:
-        p = subprocess.Popen([sys.executable, str(BIN), *argv], stdout=out, stderr=subprocess.STDOUT,
+        p = subprocess.Popen([sys.executable, "-I", str(BIN), *argv], stdout=out, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True)
     deadline = time.time() + 30
     while time.time() < deadline:
@@ -139,7 +131,7 @@ def detach(argv: list[str], base: Path) -> int:
 
 
 def _runner_argv(base: Path, name: str) -> list[str]:
-    return [sys.executable, str(BIN), "lane", "--base", str(base), "--lane", name]
+    return [sys.executable, "-I", str(BIN), "lane", "--base", str(base), "--lane", name]
 
 
 # ------------------------------------------------------------------ wait
@@ -149,22 +141,20 @@ def wait(base: Path, timeout: int | None) -> int:
     base = base.resolve()
     run = Run.load(base)
     until = time.time() + timeout if timeout else None
-    sup = _read_int(base / "supervisor.pid")
     if (base / ".done").exists():
         print((base / "STATUS.md").read_text(), flush=True)
         return 0
-    if _pid_is_xcheck(sup, base):
+    if is_alive(base / "supervisor.alive"):
         while not (base / ".done").exists():
             if until and time.time() >= until:
                 return _still_running(run)
-            if not _pid_is_xcheck(sup, base):
+            if not is_alive(base / "supervisor.alive"):
                 break
             time.sleep(2)
         if (base / ".done").exists():
             print((base / "STATUS.md").read_text(), flush=True)
             return 0
     # The supervisor is gone without finishing: reattach and finish its job.
-    _lock = _global_lock(block=True)
     return _wait(run, {}, until)
 
 
@@ -210,7 +200,7 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
             elif alive is None and time.time() - t0 > START_GRACE:
                 _write_exit(run, name, "failed", "lane runner never started")
                 pending.discard(name)
-            elif time.time() - t0 > run.cap + 180:
+            elif time.time() - t0 > 2 * run.cap + 180:  # pool wait + spend
                 _write_exit(run, name, "failed", "lane runner outlived its cap; left running")
                 pending.discard(name)
         _close_finished(run, closed)
@@ -231,38 +221,22 @@ def _exit_path(run: Run, name: str) -> Path:
     return run.lane_dir(name) / "exit.json"
 
 
-def _read_int(path: Path) -> int | None:
-    try:
-        return int(path.read_text().strip())
-    except (OSError, ValueError):
-        return None
-
-
 def _runner_alive(run: Run, name: str, children) -> bool | None:
     if name in children:
         return children[name].poll() is None
-    try:
-        pids = json.loads((run.lane_dir(name) / "pids.json").read_text())
-    except (OSError, ValueError):
-        return None
-    return _pid_is_xcheck(pids.get("runner"), run.base)
+    return is_alive(run.lane_dir(name) / "alive")
 
 
 def _pid_cmd(pid) -> str:
+    """Command line of `pid`, or "" when it is gone or unreadable (a sandbox may
+    forbid reading the process table; then nothing is killed on a guess)."""
     if not isinstance(pid, int):
         return ""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        return subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                              capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
         return ""
-    except PermissionError:
-        pass
-    return subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
-
-
-def _pid_is_xcheck(pid, base: Path) -> bool:
-    cmd = _pid_cmd(pid)
-    return "xcheck" in cmd and str(base) in cmd
 
 
 def _settle_dead_runner(run: Run, name: str) -> None:
@@ -340,42 +314,6 @@ def render_status(run: Run) -> str:
     return text
 
 
-# ------------------------------------------------------------------ guards
-
-
-def _global_lock(block: bool = False):
-    ROOT.mkdir(parents=True, exist_ok=True)
-    f = open(ROOT / ".xcheck.lock", "a+")
-    try:
-        fcntl.flock(f, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
-    except OSError as e:
-        if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-            raise RunError("another xcheck supervisor is running on this machine")
-        raise
-    return f
-
-
-def _live_lanes() -> list[str]:
-    """Lanes of any run that may still be spending: a live runner, or a lane
-    placed moments ago whose runner has not recorded itself yet."""
-    live = []
-    for lane_dir in ROOT.glob("*/lanes/*"):
-        if (lane_dir / "exit.json").exists():
-            continue
-        base = lane_dir.parent.parent
-        pids = lane_dir / "pids.json"
-        if pids.exists():
-            try:
-                runner = json.loads(pids.read_text()).get("runner")
-            except (OSError, ValueError):
-                runner = None
-            if _pid_is_xcheck(runner, base):
-                live.append(f"{base.name}/{lane_dir.name}")
-        elif time.time() - lane_dir.stat().st_mtime < START_GRACE:
-            live.append(f"{base.name}/{lane_dir.name} (starting)")
-    return live
-
-
 # ------------------------------------------------------------------ doctor
 
 
@@ -383,7 +321,16 @@ def doctor() -> int:
     """Check every adapter flag against the installed CLI's own help, and the
     model pins against the CLIs' model lists. Config keys (codex -c ...) and
     argument values are pinned by unit tests and smoke runs, not here."""
+    from . import install
     bad = 0
+    source, current = install.digest(), install.installed_digest()
+    if install.SHARE in BIN.parents:
+        print(f"ok   running the installed copy {current}")
+    elif current == source:
+        print(f"ok   installed copy matches this source ({source})")
+    else:
+        print(f"FAIL installed copy {current or 'missing'} != source {source}: run bin/xcheck install")
+        bad += 1
     for kind, (cmd, flags) in adapters.HELP_COMMANDS.items():
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)

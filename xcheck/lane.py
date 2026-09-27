@@ -17,8 +17,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import adapters, capacity, validate
-from .files import Run, atomic_write, now
+from . import adapters, capacity, pools, validate
+from .files import ROOT, Run, atomic_write, hold_life, now
 
 TAIL_LINES = 40
 
@@ -64,9 +64,20 @@ def run_lane(base: Path, name: str) -> int:
 
     started = time.time()
     reader = adapters.Reader(lane.kind)
+    _alive = hold_life(d / "alive")  # released by the kernel when this runner ends
     # Recorded before any spend, so a crashed supervisor's successor sees this
     # lane as live from its first instant.
     atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": None}))
+
+    # One run at a time spends from a pool; wait here (no orchestrator turns).
+    held = pools.acquire(ROOT, lane.pool, str(run.base), started + run.cap,
+                         on_wait=lambda owner: print(
+                             f"xcheck lane {name}: waiting for pool {lane.pool} "
+                             f"(held by {Path(owner).name or 'another run'})", flush=True))
+    if held is None:
+        return _finish(run, name, started, "skipped",
+                       f"pool {lane.pool} stayed busy for {run.cap}s", None, reader, err_path)
+    started = time.time()  # idle and cap clocks start when spending can
 
     # Capacity is read here, immediately before spending and outside any
     # orchestrator sandbox when the runner lives in a Herdr pane.
@@ -128,6 +139,7 @@ def run_lane(base: Path, name: str) -> int:
             _kill(proc)
         code = proc.wait()
         _reap_group(proc.pid)  # MCP servers, language servers, other leftovers of the lane
+        held.release()
     if spec.stdin:
         stdin.close()
     reader.finish(final)

@@ -360,6 +360,57 @@ class EndToEnd(unittest.TestCase):
             self.assertFalse(set(leak) & set(seen), f"{kind} saw {set(leak) & set(seen)}")
             self.assertEqual(seen.get("GROK_TELEMETRY_ENABLED"), "0")
 
+    def second_base(self):
+        other = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir="/tmp/agent-offload"))
+        self.addCleanup(shutil.rmtree, other, True)
+        stage(other)
+        return other
+
+    def detach(self, base, lanes, mode):
+        p = self.xcheck("run", "--base", str(base), "--orch", "other", "--mode", "headless",
+                        "--skip-capacity", "--lanes", lanes, "--detach", mode=mode)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def lane_exit(self, base, lane):
+        self.assertEqual(self.xcheck("wait", "--base", str(base)).returncode, 0)
+        return json.loads((base / "lanes" / lane / "exit.json").read_text())
+
+    def test_runs_on_the_same_pool_queue(self):
+        other = self.second_base()
+        self.detach(self.base, "codex:gpt-6-sol:high", "slow")
+        self.detach(other, "codex:gpt-6-sol:high", "slow")
+        first = self.lane_exit(self.base, "codex-gpt-6-sol-high")
+        second = self.lane_exit(other, "codex-gpt-6-sol-high")
+        self.assertEqual((first["status"], second["status"]), ("done", "done"))
+        self.assertGreaterEqual(second["started"], first["ended"])
+        self.assertIn("waiting for pool codex", (other / "lanes" / "codex-gpt-6-sol-high" / "view.log").read_text())
+
+    def test_disjoint_pools_and_same_run_lanes_run_together(self):
+        other = self.second_base()
+        t0 = time.time()
+        self.detach(self.base, "agy:gemini-3.8-flash-high,agy:gemini-3.1-pro-high", "slow")
+        self.detach(other, "grok:grok-4.7:xhigh", "slow")
+        for base, lane in ((self.base, "agy-gemini-3.8-flash-high"), (self.base, "agy-gemini-3.1-pro-high"),
+                           (other, "grok-4.7-xhigh")):
+            self.assertEqual(self.lane_exit(base, lane)["status"], "done")
+            self.assertNotIn("waiting for pool", (base / "lanes" / lane / "view.log").read_text())
+        self.assertLess(time.time() - t0, 12)  # three 4 s lanes, not serialized
+
+    def test_a_killed_lane_runner_releases_its_pool(self):
+        other = self.second_base()
+        self.detach(self.base, "codex:gpt-6-sol:high", "hang")
+        pids_file = self.base / "lanes" / "codex-gpt-6-sol-high" / "pids.json"
+        for _ in range(50):
+            if pids_file.exists() and json.loads(pids_file.read_text()).get("harness"):
+                break
+            time.sleep(0.1)
+        pids = json.loads(pids_file.read_text())
+        os.kill(int((self.base / "supervisor.pid").read_text()), signal.SIGKILL)
+        os.kill(pids["runner"], signal.SIGKILL)
+        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(pids["harness"])], capture_output=True))
+        self.detach(other, "codex:gpt-6-sol:high", "ok")
+        self.assertEqual(self.lane_exit(other, "codex-gpt-6-sol-high")["status"], "done")
+
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()
         work = self.base / "lanes" / "codex-gpt-6-sol-high" / "work"

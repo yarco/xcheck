@@ -7,6 +7,7 @@
                 running after S seconds); also reattaches if the supervisor died
   xcheck status --base B      render STATUS from files, no waiting
   xcheck doctor               check adapter flags and model pins against installed CLIs
+  xcheck install              publish a read-only copy as `xcheck` on PATH (+ Codex rule)
   xcheck lane   --base B --lane NAME   (internal: run one lane)
 
 See Multi-Agent Cross-Check Protocol.md for the protocol.
@@ -33,13 +34,13 @@ def main() -> int:
                    help="the orchestrating harness; its kind is never a peer")
     r.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster minus --orch")
     r.add_argument("--mode", default="auto", choices=["auto", "headless", "herdr"])
-    r.add_argument("--web", default="packet", choices=["packet", "live"])
+    r.add_argument("--web", default="live", choices=["live", "packet"],
+                   help="live (default): peers may search the web; packet: files only (untrusted input)")
     r.add_argument("--idle", type=int, default=900, help="seconds without any stream output before a lane is killed")
     r.add_argument("--cap", type=int, default=3600, help="wall-clock spend budget per lane, in seconds")
     r.add_argument("--force-lane", action="append", default=[], metavar="NAME",
                    help="launch this lane even if capacity says no (record why in chat)")
     r.add_argument("--skip-capacity", action="store_true", help="no capacity probe (tests, smoke runs)")
-    r.add_argument("--force", action="store_true", help="ignore live lanes from another run")
     r.add_argument("--detach", action="store_true",
                    help="return once launched; collect with `xcheck wait` (for capped tool calls)")
 
@@ -49,6 +50,7 @@ def main() -> int:
     st = sub.add_parser("status")
     st.add_argument("--base", required=True, type=Path)
     sub.add_parser("doctor")
+    sub.add_parser("install")
     ln = sub.add_parser("lane")
     ln.add_argument("--base", required=True, type=Path)
     ln.add_argument("--lane", required=True)
@@ -63,7 +65,7 @@ def main() -> int:
             else:
                 lanes = [l for l in adapters.DEFAULT_ROSTER if l.kind != a.orch]
             return run.start(a.base, lanes, a.mode, a.orch, a.web == "live", a.idle, a.cap,
-                             set(a.force_lane), a.skip_capacity, a.force)
+                             set(a.force_lane), a.skip_capacity)
         if a.cmd == "wait":
             return run.wait(a.base, a.timeout)
         if a.cmd == "status":
@@ -71,6 +73,12 @@ def main() -> int:
             return 0
         if a.cmd == "doctor":
             return run.doctor()
+        if a.cmd == "install":
+            from xcheck import install
+            dest = install.install()
+            install.prune()
+            print(f"xcheck: installed {dest}\n  {install.LINK} → it\n  Codex rule: {install.RULES}")
+            return 0
         if a.cmd == "lane":
             return lane.run_lane(a.base.resolve(), a.lane)
     except (run.RunError, validate.PacketError, ValueError) as e:
