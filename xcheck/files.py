@@ -115,7 +115,7 @@ class Run:
     lanes: dict[str, Lane]       # selected lanes, by name
     contract: Contract
     web: bool
-    idle: int
+    idle: int                    # 0 = default for each lane's actual view
     cap: int
     mode: str                    # headless | herdr
     orch: str

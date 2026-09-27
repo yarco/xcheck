@@ -23,8 +23,6 @@ from . import adapters, herdr, validate
 from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, is_alive, now, workspace
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 START_GRACE = 90  # seconds for a placed runner to record its pid
-TUI_IDLE = 180    # default --idle for apps (they animate while working)
-STREAM_IDLE = 900 # default --idle for headless streams
 LINGER = 3        # seconds a finished Herdr pane stays visible
 STILL_RUNNING = 3
 
@@ -89,9 +87,9 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         raise RunError(f"{base} was already launched; use `xcheck wait` or a fresh BASE")
     mode = "herdr" if ctx else "headless"
     view = ("tui" if mode == "herdr" else "stream") if view == "auto" else view
-    # An app draws a spinner or timer while it works, so a still screen means it
-    # stopped: a short idle window is safe there. A stream can be quiet longer.
-    idle = idle or (TUI_IDLE if view == "tui" else STREAM_IDLE)
+    # Zero means each runner chooses its own view's default. Agy always uses
+    # its app, even when the run's other lanes use the stream view.
+    idle = idle or 0
 
     run = Run(base=base, lanes={l.name: l for l in lanes}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},

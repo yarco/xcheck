@@ -22,6 +22,14 @@ import shutil
 from . import adapters, capacity, pools, trust, tui, validate
 from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, now, signal_group, workspace
 
+TUI_IDLE = 180
+STREAM_IDLE = 900
+
+
+def idle_for(configured: int, view: str) -> int:
+    """A per-run override wins; otherwise use the actual lane view."""
+    return configured or (TUI_IDLE if view == "tui" else STREAM_IDLE)
+
 TAIL_LINES = 40
 
 # The orchestrator's own session identity must not reach a peer: a child
@@ -91,6 +99,7 @@ def _run_lane(base: Path, name: str) -> int:
     final, stream_path, err_path = d / "final.md", d / "stream.jsonl", d / "stderr.log"
     log = d / "harness.log"  # the harness's own debug log: where root causes are found
     view = "tui" if lane.kind in adapters.APP_ONLY else run.view
+    idle = idle_for(run.idle, view)
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, _raise_stop)
 
@@ -122,7 +131,7 @@ def _run_lane(base: Path, name: str) -> int:
         if not ok:
             return _finish(run, name, started, "skipped", note, None, reader, err_path)
     if view == "tui":
-        return _run_tui(run, name, lane, d, work, message, log, started, reader, held)
+        return _run_tui(run, name, lane, d, work, message, log, started, reader, held, idle)
 
     spec = adapters.launch(lane, work, message, final, log, run.web)
     env = lane_env(spec)
@@ -162,8 +171,8 @@ def _run_lane(base: Path, name: str) -> int:
                 if not sel.get_map() and proc.poll() is not None:
                     break
                 t = time.time()
-                if t - last > run.idle:
-                    status, reason = "timeout", f"no output for {run.idle}s"
+                if t - last > idle:
+                    status, reason = "timeout", f"no output for {idle}s"
                 elif t - started > run.cap:
                     status, reason = "timeout", f"exceeded the {run.cap}s cap"
                 if status:
@@ -204,7 +213,7 @@ def _stage(run: Run, work: Path) -> None:
 
 
 def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log: Path,
-             started: float, reader: adapters.Reader, held) -> int:
+             started: float, reader: adapters.Reader, held, idle: int) -> int:
     """The harness's own interactive app, in a pty this runner owns (Herdr wall)."""
     trust.ensure(lane.kind, work)  # no "trust this folder?" screen, ever
     spec = adapters.tui(lane, work, message.read_text(encoding="utf-8").strip(), log, run.web)
@@ -216,7 +225,7 @@ def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log:
 
     try:
         status, reason, code, text = tui.run(spec.argv, lane_env(spec), work, answer, screen,
-                                             run.idle, run.cap, spawned)
+                                             idle, run.cap, spawned)
     except _Stop as stop:
         status, reason, code = "interrupted", f"runner received {stop}", None
         text = answer.read_text(encoding="utf-8", errors="replace") if answer.exists() else ""

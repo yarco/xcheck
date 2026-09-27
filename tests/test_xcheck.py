@@ -166,6 +166,15 @@ class GrokLane(unittest.TestCase):
                 self.assertNotIn("MCPTool(*)", stream + app)
 
 
+class IdleDefaults(unittest.TestCase):
+    def test_default_uses_actual_lane_view_and_explicit_override_wins(self):
+        from xcheck.lane import idle_for
+        self.assertEqual(idle_for(0, "stream"), 900)
+        self.assertEqual(idle_for(0, "tui"), 180)  # Agy app in a stream run
+        self.assertEqual(idle_for(37, "tui"), 37)
+        self.assertEqual(idle_for(37, "stream"), 37)
+
+
 class SignalGroup(unittest.TestCase):
     def test_an_exited_unreaped_leader_is_not_an_error(self):
         # macOS killpg answers EPERM here; it crashed real Agy and Grok lanes
