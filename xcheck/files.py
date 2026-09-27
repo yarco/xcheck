@@ -16,6 +16,13 @@ from .adapters import Lane
 # Runs, pool locks and liveness files live here; tests point it elsewhere so
 # they never contend with a real run for a quota pool.
 ROOT = Path(os.environ.get("XCHECK_ROOT", "/tmp/agent-offload"))
+
+
+def workspace(lane: str) -> Path:
+    """A lane's working directory: the same path every run, so apps that trust
+    folders by exact path (Codex, Agy) are told once, never asked again. The
+    lane's pool lock makes it exclusive; the runner restages it each run."""
+    return Path(os.path.realpath(ROOT)) / ".lanes" / lane
 from .validate import Contract
 
 
@@ -25,6 +32,26 @@ def atomic_write(path: Path, text: str) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
+
+
+def signal_group(pgid: int, sig: int) -> bool:
+    """Signal a lane's process group; False if nothing was left to signal.
+
+    macOS `killpg` returns EPERM, not ESRCH, when the group's leader has exited
+    but is not yet reaped, and when any member of the group cannot be signalled
+    (a sandboxed helper). Neither may crash the runner: fall back to the leader.
+    """
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        try:
+            os.kill(pgid, sig)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
 
 
 def hold_life(path: Path):

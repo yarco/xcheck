@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -19,7 +18,7 @@ import time
 from pathlib import Path
 
 from . import adapters, herdr, validate
-from .files import ROOT, Run, atomic_write, hold_life, is_alive, now
+from .files import ROOT, Run, atomic_write, hold_life, is_alive, now, signal_group, workspace
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 START_GRACE = 90  # seconds for a placed runner to record its pid
 LINGER = 3        # seconds a finished Herdr pane stays visible
@@ -88,11 +87,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
     for name in run.lanes:
         d = run.lane_dir(name)
-        (d / "work").mkdir(parents=True)
-        for f in ("PACKET.md", "PROMPT.md"):
-            shutil.copy2(base / f, d / "work" / f)
-        if (base / "evidence").is_dir():
-            shutil.copytree(base / "evidence", d / "work" / "evidence")
+        d.mkdir(parents=True)
         (d / "message.txt").write_text(message, encoding="utf-8")
     run.save()
     atomic_write(base / "supervisor.pid", str(os.getpid()))  # for operators; liveness is the lock
@@ -257,13 +252,14 @@ def _settle_dead_runner(run: Run, name: str) -> None:
     except (OSError, ValueError):
         harness = None
     note = "lane runner died without writing exit.json"
-    if harness and str(d) in _pid_cmd(harness):  # every adapter argv names the lane dir
-        try:
-            os.killpg(harness, signal.SIGTERM)
+    cmd = _pid_cmd(harness)  # identity: every adapter argv names the lane dir or workspace
+    if harness and (str(d) in cmd or str(workspace(name)) in cmd):
+        if signal_group(harness, signal.SIGTERM):
             note += "; its harness was still running and was stopped"
-        except ProcessLookupError:
-            pass
     result = run.base / f"RESULT-{name}.md"
+    answer = workspace(name) / "ANSWER.md"
+    if not result.exists() and run.view == "tui" and answer.exists():
+        result.write_text(answer.read_text(encoding="utf-8", errors="replace"))  # salvage
     if result.exists():
         status, problems = validate.check(result.read_text(errors="replace"), run.contract)
         _write_exit(run, name, status, f"{note}; published answer: {'; '.join(problems) or 'valid'}")

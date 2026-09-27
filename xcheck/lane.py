@@ -17,8 +17,10 @@ import sys
 import time
 from pathlib import Path
 
-from . import adapters, capacity, pools, tui, validate
-from .files import ROOT, Run, atomic_write, hold_life, now
+import shutil
+
+from . import adapters, capacity, pools, trust, tui, validate
+from .files import ROOT, Run, atomic_write, hold_life, now, signal_group, workspace
 
 TAIL_LINES = 40
 
@@ -51,10 +53,36 @@ def _raise_stop(signum, _frame):
 
 
 def run_lane(base: Path, name: str) -> int:
+    """Run one lane; whatever happens, end with exit.json."""
+    try:
+        return _run_lane(base, name)
+    except _Stop:
+        raise
+    except Exception as e:  # a runner bug must not look like a silent death
+        import traceback
+        run = Run.load(base)
+        d = run.lane_dir(name)
+        (d / "runner-error.log").write_text(traceback.format_exc())
+        if not (d / "exit.json").exists():
+            status, reason, text = "failed", f"lane runner error: {e!r} (runner-error.log)", ""
+            answer = workspace(name) / "ANSWER.md"
+            if run.view == "tui" and answer.exists():  # never lose a finished answer to a runner bug
+                text = answer.read_text(encoding="utf-8", errors="replace")
+                status, problems = validate.check(text, run.contract)
+                reason = "; ".join(problems) or validate.COMPLETE
+                reason += f"; salvaged after lane runner error {e!r}"
+                atomic_write(run.base / f"RESULT-{name}.md", text)
+            atomic_write(d / "exit.json", json.dumps({
+                "lane": name, "status": status, "reason": reason, "exit_code": None, "error": None,
+                "ended": now(), "stderr_tail": [], "result_bytes": len(text.encode())}, indent=2))
+        return 1
+
+
+def _run_lane(base: Path, name: str) -> int:
     run = Run.load(base)
     lane = run.lane(name)
     d = run.lane_dir(name)
-    work, message = d / "work", d / "message.txt"
+    work, message = workspace(name), d / "message.txt"
     final, stream_path, err_path = d / "final.md", d / "stream.jsonl", d / "stderr.log"
     spec = adapters.launch(lane, work, message, final, run.web)
 
@@ -78,6 +106,7 @@ def run_lane(base: Path, name: str) -> int:
         return _finish(run, name, started, "skipped",
                        f"pool {lane.pool} stayed busy for {run.cap}s", None, reader, err_path)
     started = time.time()  # idle and cap clocks start when spending can
+    _stage(run, work)  # only now: the pool lock makes this workspace ours
 
     # Capacity is read here, immediately before spending and outside any
     # orchestrator sandbox when the runner lives in a Herdr pane.
@@ -158,9 +187,21 @@ def run_lane(base: Path, name: str) -> int:
     return _finish(run, name, started, status, reason, code, reader, err_path)
 
 
+def _stage(run: Run, work: Path) -> None:
+    """Fresh copy of the packet in the lane's stable workspace."""
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    for f in ("PACKET.md", "PROMPT.md"):
+        shutil.copy2(run.base / f, work / f)
+    if (run.base / "evidence").is_dir():
+        shutil.copytree(run.base / "evidence", work / "evidence")
+
+
 def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, started: float,
              reader: adapters.Reader, held) -> int:
     """The harness's own interactive app, in a pty this runner owns (Herdr wall)."""
+    trust.ensure(lane.kind, work)  # no "trust this folder?" screen, ever
     spec = adapters.tui(lane, work, message.read_text(encoding="utf-8").strip(), run.web)
     answer, screen = work / "ANSWER.md", d / "screen.log"
 
@@ -215,17 +256,12 @@ def _first_stderr_line(path: Path) -> str:
 
 
 def _reap_group(pgid: int) -> None:
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
+    signal_group(pgid, signal.SIGTERM)
 
 
 def _kill(proc: subprocess.Popen) -> None:
     for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
+        if proc.poll() is not None or not signal_group(proc.pid, sig):
             return
         try:
             proc.wait(timeout=wait)

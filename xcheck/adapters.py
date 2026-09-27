@@ -156,9 +156,6 @@ def tui(lane: Lane, work: Path, message: str, web: bool) -> Launch:
             "codex", "-s", "workspace-write", "-a", "never", "-C", str(work),
             "-m", lane.model, "-c", f'model_reasoning_effort="{lane.effort}"',
             "-c", 'history.persistence="none"',
-            # The TUI asks to trust every new directory; trust this exact one
-            # for this process only, with no config-file edit.
-            "-c", f'projects."{work}".trust_level="trusted"',
             "-c", f'web_search="{"live" if web else "disabled"}"',
             message,
         ]

@@ -32,8 +32,10 @@ answer = {
     "invalid": "### 1) VERDICT\nfine but no proof and no marker\n",
     "declined": "I cannot do this review.\nRESULT_INVALID\n",
     "echo402": f"### 1) VERDICT\nThe packet quotes `HTTP 402 payment required` and `session limit reached`; both are evidence, not errors.\n6) PROOF: {token}\nRESULT_COMPLETE\n",
+    "answer-exit": None,
     "slow": f"### 1) VERDICT\nThe claim holds after a slow read.\n6) PROOF: {token}\nRESULT_COMPLETE\n",
 }.get(mode)
+answer_ok = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
 if mode == "slow":
     time.sleep(4)
 
@@ -53,6 +55,9 @@ if tui:
         (target / "ANSWER.md").write_text("### 1) VERDICT\npartial draft")
         time.sleep(2)
         (target / "ANSWER.md").write_text(f"### 1) VERDICT\nThe claim holds after a rewrite.\n6) PROOF: {token}\nRESULT_COMPLETE\n")
+    elif mode == "answer-exit":  # agy: writes its answer, then its app exits by itself
+        (target / "ANSWER.md").write_text(answer_ok)
+        sys.exit(0)
     elif mode != "hang":
         (target / "ANSWER.md").write_text(answer or "")
     time.sleep(60)

@@ -138,6 +138,59 @@ class GrokLane(unittest.TestCase):
         self.assertEqual(spec.argv[spec.argv.index("--deny") + 1], "MCPTool(*)")
 
 
+class SignalGroup(unittest.TestCase):
+    def test_an_exited_unreaped_leader_is_not_an_error(self):
+        # macOS killpg answers EPERM here; it crashed real Agy and Grok lanes
+        import pty
+        from xcheck.files import signal_group
+        pid, fd = pty.fork()
+        if pid == 0:
+            os._exit(0)
+        self.addCleanup(os.close, fd)
+        time.sleep(0.3)
+        signal_group(pid, signal.SIGTERM)  # must not raise
+        os.waitpid(pid, 0)
+        self.assertFalse(signal_group(pid, signal.SIGTERM))
+
+
+class TrustFiles(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir)
+        os.environ["CODEX_CONFIG"] = str(self.dir / "config.toml")
+        os.environ["AGY_SETTINGS"] = str(self.dir / "settings.json")
+        self.addCleanup(os.environ.pop, "CODEX_CONFIG")
+        self.addCleanup(os.environ.pop, "AGY_SETTINGS")
+        from xcheck import trust
+        self.trust = trust
+
+    def test_codex_both_spellings_other_config_kept_and_idempotent(self):
+        cfg = self.dir / "config.toml"
+        cfg.write_text('model = "x"\n\n[projects."/private/tmp/agent-offload/.lanes/a"]\ntrust_level = "untrusted"\n')
+        self.assertTrue(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
+        text = cfg.read_text()
+        self.assertIn('model = "x"', text)
+        self.assertEqual(text.count('trust_level = "trusted"'), 2)
+        self.assertNotIn("untrusted", text)
+        self.assertIn('[projects."/tmp/agent-offload/.lanes/a"]', text)
+        self.assertFalse(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
+
+    def test_agy_trusts_both_spellings_and_silences_the_survey(self):
+        s = self.dir / "settings.json"
+        s.write_text('{"theme": "dark", "trustedWorkspaces": ["/x"]}')
+        self.assertTrue(self.trust.ensure("agy", Path("/private/tmp/agent-offload/.lanes/b")))
+        data = json.loads(s.read_text())
+        self.assertEqual(data["theme"], "dark")
+        self.assertEqual(data["trustedWorkspaces"], ["/x", "/private/tmp/agent-offload/.lanes/b",
+                                                     "/tmp/agent-offload/.lanes/b"])
+        self.assertIs(data["showFeedbackSurvey"], False)
+        self.assertFalse(self.trust.ensure("agy", Path("/private/tmp/agent-offload/.lanes/b")))
+
+    def test_claude_and_grok_need_nothing(self):
+        self.assertFalse(self.trust.ensure("claude", Path("/private/tmp/x")))
+        self.assertFalse((self.dir / "config.toml").exists())
+
+
 class Validation(unittest.TestCase):
     def ok(self, body):
         return validate.check(body, CONTRACT)
@@ -225,6 +278,8 @@ class EndToEnd(unittest.TestCase):
     def xcheck(self, *args, mode="ok", timeout=60, capacity=None):
         env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
                "XCHECK_ROOT": str(self.root),
+               "CODEX_CONFIG": str(self.root / "codex-config.toml"),
+               "AGY_SETTINGS": str(self.root / "agy-settings.json"),
                "XCHECK_CAPACITY_HELPER": str(REPO / "tests" / "fake" / "capacity")}
         if capacity:
             env["FAKE_CAPACITY"] = capacity
@@ -417,6 +472,21 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         return {r["lane"]: r for r in json.loads((self.base / "STATUS.json").read_text())["lanes"]}
 
+    def test_tui_lanes_are_trusted_before_they_start(self):
+        self.run_tui("ok")
+        codex = (self.root / "codex-config.toml").read_text()
+        agy = json.loads((self.root / "agy-settings.json").read_text())
+        work = os.path.realpath(self.root / ".lanes" / "codex-gpt-6-sol-high")
+        self.assertIn(f'[projects."{work}"]\ntrust_level = "trusted"', codex)
+        self.assertIn(os.path.realpath(self.root / ".lanes" / "agy-gemini-3.8-flash-high"), agy["trustedWorkspaces"])
+        self.assertIs(agy["showFeedbackSurvey"], False)
+        before = (self.root / "codex-config.toml").read_text()
+        other = self.second_base()
+        p = self.xcheck("run", "--base", str(other), "--orch", "other", "--lanes", "codex:gpt-6-sol:high",
+                        "--mode", "headless", "--view", "tui", "--skip-capacity")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual((self.root / "codex-config.toml").read_text(), before)  # idempotent
+
     def test_tui_lanes_publish_answer_md_and_are_closed(self):
         t0 = time.time()
         rows = self.run_tui("ok")
@@ -426,6 +496,11 @@ class EndToEnd(unittest.TestCase):
             self.assertTrue((self.base / f"RESULT-{name}.md").read_text().endswith("RESULT_COMPLETE\n"))
         message = (self.base / "lanes" / "grok-4.7-xhigh" / "message.txt").read_text()
         self.assertIn("ANSWER.md", message)
+
+    def test_an_app_that_exits_right_after_answering_is_done(self):
+        # macOS killpg on an unreaped exited leader returns EPERM; that must not kill the runner
+        rows = self.run_tui("answer-exit")
+        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
 
     def test_a_tui_draft_is_not_published_until_complete_and_stable(self):
         rows = self.run_tui("slowwrite")
@@ -439,7 +514,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()
-        work = self.base / "lanes" / "codex-gpt-6-sol-high" / "work"
+        work = self.root / ".lanes" / "codex-gpt-6-sol-high"
         self.assertEqual(sorted(p.name for p in work.iterdir()), ["PACKET.md", "PROMPT.md", "evidence"])
 
 

@@ -26,6 +26,7 @@ import tty
 from pathlib import Path
 
 from . import validate
+from .files import signal_group
 
 STABLE = 3.0
 LOG_LIMIT = 8 * 1024 * 1024
@@ -96,10 +97,7 @@ def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
         if pid:
             code = _end(pid)
         else:
-            try:
-                os.killpg(leader, signal.SIGTERM)  # leftovers of an app that exited
-            except (ProcessLookupError, PermissionError):
-                pass
+            signal_group(leader, signal.SIGTERM)  # leftovers of an app that exited
         log.close()
         signal.signal(signal.SIGWINCH, previous)
         if saved is not None:
@@ -149,9 +147,11 @@ def _sync_size(fd: int) -> None:
 def _end(pid: int) -> int | None:
     """End the app's whole process group; return its exit code."""
     for sig, wait in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 3.0)):
-        try:
-            os.killpg(pid, sig)
-        except ProcessLookupError:
+        done, wstatus = os.waitpid(pid, os.WNOHANG)  # reap first: it may have exited already
+        if done:
+            signal_group(pid, signal.SIGTERM)  # its leftovers
+            return os.waitstatus_to_exitcode(wstatus)
+        if not signal_group(pid, sig):
             break
         deadline = time.time() + wait
         while time.time() < deadline:
