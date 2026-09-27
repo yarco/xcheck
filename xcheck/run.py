@@ -46,7 +46,7 @@ MESSAGE = (
     "and stop.\n"
 )
 
-GROK_SCOPE = (
+SHELL_SCOPE = (  # harnesses with Bash under an OS write sandbox
     "Bash and other tools are available for checks, including disposable writes "
     "inside this workspace. Do not change PACKET.md, PROMPT.md, evidence/, or "
     "files outside this workspace."
@@ -138,10 +138,11 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
 
 
 def _message(view: str, web: bool, kind: str) -> str:
-    scope = GROK_SCOPE if kind == "grok" else (
+    shell = kind in ("grok", "opencode")
+    scope = SHELL_SCOPE if shell else (
         "use only tools that read (files, commands that change nothing"
         + (", web search" if web else "") + ").")
-    deliver = DELIVER[view] if kind != "grok" else (
+    deliver = DELIVER[view] if not shell else (
         "Print your complete answer as your final message; the harness saves it."
         if view == "stream" else
         "Write your complete answer to ./ANSWER.md in a single write, ending with its final line; the harness publishes it.")
@@ -365,13 +366,14 @@ def doctor() -> int:
         missing = [f for f in flags if f not in text]
         print(f"{'FAIL' if missing else 'ok  '} {kind}: " + (f"missing {missing}" if missing else f"{len(flags)} flags present"))
         bad += bool(missing)
-    for kind, cmd in (("grok", ["grok", "models"]), ("agy", ["agy", "models"])):
+    for kind, cmd in (("grok", ["grok", "models"]), ("agy", ["agy", "models"]),
+                      ("opencode", ["opencode", "models", "opencode"])):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             listing = out.stdout + out.stderr
         except (OSError, subprocess.TimeoutExpired):
             listing = ""
-        for lane in adapters.DEFAULT_ROSTER:
+        for lane in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN):
             if lane.kind == kind:
                 ok = lane.model in listing
                 print(f"{'ok  ' if ok else 'FAIL'} {kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")

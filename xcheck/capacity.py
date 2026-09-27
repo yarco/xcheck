@@ -63,6 +63,8 @@ def reserve_for(lane: Lane, same_pool: int) -> float:
 
 def read(lane: Lane, same_pool: int = 1) -> Reading:
     """The lane's pool reading against its reserve. Never raises."""
+    if lane.kind == "opencode":  # parse_lane admits Zen free models only
+        return Reading("eligible", "free Zen model: no quota to protect; a free-usage limit is the lane's error")
     reserve = reserve_for(lane, same_pool)
     try:
         windows = METERS[lane.kind](lane)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fake codex/claude/grok/agy: speaks each CLI's real stream shape.
+"""Fake codex/claude/grok/agy/opencode: speaks each CLI's real stream shape.
 
 The kind is argv[0]'s basename. FAKE_MODE selects the behaviour:
 ok | invalid | declined | error | hang | silent-exit.
@@ -68,7 +68,7 @@ if os.environ.get("FAKE_ENV_DUMP"):
 # Interactive (TUI) invocations: the app writes ANSWER.md in its cwd, then idles
 # like a real TUI waiting for the next prompt.
 tui = {"claude": "-p" not in argv, "codex": "exec" not in argv,
-       "grok": "--prompt-file" not in argv, "agy": "-i" in argv}[kind]
+       "grok": "--prompt-file" not in argv, "agy": "-i" in argv, "opencode": "run" not in argv}[kind]
 if tui:
     print(f"\x1b[2J\x1b[H\x1b[1mfake {kind} TUI\x1b[0m\r\nworking on the review…\r", flush=True)
     target = Path(argv[argv.index("-C") + 1]) if kind == "codex" else Path.cwd()
@@ -129,6 +129,16 @@ elif kind == "grok":
     for i in range(0, len(answer), 7):
         emit({"type": "text", "data": answer[i:i + 7]})
     emit({"type": "end", "stopReason": "end_turn"})
+elif kind == "opencode":
+    part = lambda **p: {"type": "text", "part": {"type": "text", **p}}
+    emit({"type": "step_start", "part": {"type": "step-start"}})
+    if mode == "error":
+        emit({"type": "error", "error": {"name": "APIError", "data": {"message": "FreeUsageLimitError: free usage exceeded"}}})
+        sys.exit(1)
+    emit(part(text="I will read the packet first."))
+    emit({"type": "tool_use", "part": {"type": "tool", "tool": "read", "state": {"status": "completed", "input": {"filePath": "PACKET.md"}}}})
+    emit(part(text=answer))
+    emit({"type": "step_finish", "part": {"type": "step-finish"}})
 elif kind == "agy":
     sys.stdin.read()
     emit({"event": "init", "init": {}})

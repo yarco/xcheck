@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-KINDS = ("codex", "claude", "grok", "agy")
+KINDS = ("codex", "claude", "grok", "agy", "opencode")
 
 # Quota pool per kind; Agy has two independently metered families.
 AGY_GEMINI_PREFIX = "gemini-"
@@ -26,7 +26,7 @@ AGY_GEMINI_PREFIX = "gemini-"
 class Lane:
     kind: str
     model: str
-    effort: str = ""  # empty for agy: the selector already carries it
+    effort: str = ""  # empty for agy (the selector carries it); optional opencode --variant
 
     @property
     def name(self) -> str:
@@ -60,6 +60,14 @@ DEFAULT_ROSTER = (
     Lane("agy", "claude-sonnet-4-6"),
 )
 
+# Supported but never default. Muse Contributor Free lets Meta train on the
+# prompts and every file the lane reads: add it only for packets the operator
+# is content to share (`run --add`).
+OPT_IN = (
+    Lane("agy", "claude-opus-4-6-thinking"),
+    Lane("opencode", "muse-spark-1.3-contributor-free"),
+)
+
 
 def parse_lane(spec: str) -> Lane:
     """`kind:model[:effort]` → Lane. Agy takes no effort."""
@@ -73,7 +81,10 @@ def parse_lane(spec: str) -> Lane:
             raise ValueError(f"model and effort must be plain identifiers: {part!r}")
     if kind == "agy" and effort:
         raise ValueError(f"agy selectors carry their own effort; drop ':{effort}'")
-    if kind != "agy" and not effort:
+    if kind == "opencode" and not model.endswith("-free"):
+        # No meter exists for paid Zen balance, and capacity fails closed.
+        raise ValueError(f"opencode lanes run OpenCode Zen free models only: {spec!r}")
+    if kind not in ("agy", "opencode") and not effort:
         raise ValueError(f"{kind} lane needs an explicit effort: {spec!r}")
     return Lane(kind, model, effort)
 
@@ -126,7 +137,32 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
         if not web:
             argv.append("--disable-web-search")
         return Launch(argv, None, env_set=GROK_ENV)
+    if lane.kind == "opencode":
+        argv = [*opencode_sandbox(work), "opencode", "run", "--auto", *_opencode_model(lane),
+                "--format", "json", message.read_text(encoding="utf-8").strip()]
+        return Launch(argv, None)
     raise ValueError(f"{lane.kind} has no headless form; it runs as its app (tui)")
+
+
+# OpenCode's free tier serves only its stock tool set: any permission rule
+# (even `bash: deny`) is refused with 403 FreeTierError. So the tools stay
+# stock, `--auto` answers every permission ask (an unanswered ask in `run`
+# waits forever), and the write boundary is the OS: a Seatbelt profile that
+# allows writes only in the lane workspace, OpenCode's own state, and the
+# per-user temp tree. Bash and the edit tools get "Operation not permitted"
+# anywhere else. MCP servers that must write elsewhere fail to start.
+def opencode_sandbox(work: Path) -> list[str]:
+    home = Path.home()
+    allowed = [work, home / ".local/share/opencode", home / ".local/state/opencode",
+               home / ".cache/opencode", Path("/private/var/folders")]
+    profile = ("(version 1)(allow default)(deny file-write*)(allow file-write* "
+               + " ".join(f'(subpath "{p}")' for p in allowed)
+               + ' (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))')
+    return ["sandbox-exec", "-p", profile]
+
+
+def _opencode_model(lane: Lane) -> list[str]:
+    return ["-m", f"opencode/{lane.model}", *(["--variant", lane.effort] if lane.effort else [])]
 
 
 # Grok: `read-only` reads everywhere and kernel-denies writes outside ~/.grok and
@@ -182,6 +218,10 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
             "--model", lane.model, "--log-file", str(log), "-i", message,
         ]
         return Launch(argv, None)
+    if lane.kind == "opencode":
+        argv = [*opencode_sandbox(work), "opencode", str(work), "--auto", *_opencode_model(lane),
+                "--prompt", message]
+        return Launch(argv, None)
     raise ValueError(f"unknown kind {lane.kind}")
 
 
@@ -202,6 +242,8 @@ HELP_COMMANDS = {
              "--debug-file"]),
     "agy": (["agy", "--help"], ["--sandbox", "--dangerously-skip-permissions", "--mode",
             "--model", "--log-file", "--prompt-interactive"]),
+    "opencode run": (["opencode", "run", "--help"], ["--auto", "--model", "--format", "--variant"]),
+    "opencode": (["opencode", "--help"], ["--auto", "--model", "--prompt"]),
 }
 
 
@@ -227,6 +269,8 @@ class Reader:
             self.text = final_file.read_text(encoding="utf-8", errors="replace")
         elif self.kind == "grok":
             self.text = "".join(self._buf) or self._last
+        elif self.kind == "opencode":
+            self.text = "\n".join(self._buf)
 
     # -- codex: JSONL items; the -o file holds the final message.
     def _codex(self, o: dict) -> str | None:
@@ -289,6 +333,22 @@ class Reader:
             return f"! {self.error}"
         if t == "end":
             return f"· end {o.get('stopReason')}"
+        return None
+
+    # -- opencode: `run --format json` parts. The answer is the text after the
+    # last tool call, so narration between tool calls is never the answer.
+    def _opencode(self, o: dict) -> str | None:
+        t, part = o.get("type"), o.get("part") or {}
+        if t == "text":
+            self._buf.append(part.get("text", ""))
+            return _clip(part.get("text", ""))
+        if t == "tool_use":
+            self._buf.clear()
+            return f"> {part.get('tool')} {_clip(json.dumps((part.get('state') or {}).get('input')), 100)}"
+        if t == "error":
+            err = o.get("error") or {}
+            self.error = (err.get("data") or {}).get("message") or err.get("name") or "error"
+            return f"! {self.error}"
         return None
 
 

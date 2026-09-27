@@ -52,6 +52,8 @@ def acquire(root: Path, pool: str, run_id: str, deadline: float, on_wait=None) -
             pause = GATE_POLL
             with open(d / "gate", "a+") as gate:
                 if _try(gate, fcntl.LOCK_EX):
+                    if time.time() >= deadline:  # never admit after the deadline
+                        break
                     owner = _read(d / "owner")
                     free = _try(busy, fcntl.LOCK_EX)
                     if free or owner == run_id:

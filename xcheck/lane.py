@@ -40,7 +40,8 @@ TAIL_LINES = 40
 # Provider API keys are removed too: every lane runs on subscription auth, and
 # a key in the environment would bill it instead. User preferences such as
 # GROK_TELEMETRY_* stay.
-SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX")
+SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
+                  "OPENCODE")  # an opencode orchestrator's session; any config override breaks the free tier
 SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
                "GROK_SANDBOX"}  # the operator's default profile; the adapter picks the lane's
 

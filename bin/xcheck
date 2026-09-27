@@ -2,6 +2,7 @@
 """X-Check: fan a staged review packet out to peer agent CLIs and collect answers.
 
   xcheck run    --base B [--lanes kind:model[:effort],...] [--orch KIND] [--mode auto|headless|herdr]
+  xcheck run    ... --add opencode:muse-spark-1.3-contributor-free   append an opt-in lane
   xcheck run    ... --detach  start the supervisor in the background and return
   xcheck wait   --base B [--timeout S]   block until the run ends (exit 3 = still
                 running after S seconds); also reattaches if the supervisor died
@@ -34,6 +35,9 @@ def main() -> int:
     r.add_argument("--orch", required=True, choices=[*adapters.KINDS, "other"],
                    help="the orchestrating harness; its kind is never a peer")
     r.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster minus --orch")
+    r.add_argument("--add", action="append", default=[], metavar="LANE",
+                   help="append an opt-in lane (kind:model[:effort]) to the roster, e.g. "
+                        "opencode:muse-spark-1.3-contributor-free")
     r.add_argument("--mode", default="auto", choices=["auto", "headless", "herdr"])
     r.add_argument("--view", default="auto", choices=["auto", "tui", "stream"],
                    help="tui: each harness's own interactive app (default in Herdr); "
@@ -71,6 +75,7 @@ def main() -> int:
                 lanes = [adapters.parse_lane(s.strip()) for s in a.lanes.split(",") if s.strip()]
             else:
                 lanes = [l for l in adapters.DEFAULT_ROSTER if l.kind != a.orch]
+            lanes += [adapters.parse_lane(s.strip()) for s in a.add]
             return run.start(a.base, lanes, a.mode, a.orch, a.web == "live", a.idle, a.cap,
                              set(a.force_lane), a.skip_capacity, a.view)
         if a.cmd == "wait":

@@ -54,7 +54,12 @@ class LaneNames(unittest.TestCase):
 
     def test_parse_lane(self):
         self.assertEqual(adapters.parse_lane("codex:gpt-6-sol:high"), Lane("codex", "gpt-6-sol", "high"))
-        for bad in ("codex:gpt-6-sol", "agy:gemini-3.1-pro-high:high", "nope:x:y", "codex"):
+        self.assertEqual(adapters.parse_lane("opencode:muse-spark-1.3-contributor-free"),
+                         Lane("opencode", "muse-spark-1.3-contributor-free"))
+        self.assertEqual(adapters.parse_lane("opencode:nemotron-3-ultra-free:high").name,
+                         "opencode-nemotron-3-ultra-free-high")
+        for bad in ("codex:gpt-6-sol", "agy:gemini-3.1-pro-high:high", "nope:x:y", "codex",
+                    "opencode:muse-spark-1.3"):  # paid Zen: no meter, so refused
             with self.assertRaises(ValueError):
                 adapters.parse_lane(bad)
 
@@ -124,6 +129,47 @@ class GrokReader(unittest.TestCase):
             r.feed(o)
         r.finish(Path("/nonexistent"))
         self.assertEqual(r.text, "")
+
+
+class OpencodeLane(unittest.TestCase):
+    LANE = Lane("opencode", "muse-spark-1.3-contributor-free")
+
+    def test_answer_is_the_text_after_the_last_tool_call(self):
+        r = adapters.Reader("opencode")
+        for line in (REPO / "tests" / "fixtures" / "opencode-ok.jsonl").read_text().splitlines():
+            r.feed(json.loads(line))
+        r.finish(Path("/nonexistent"))
+        self.assertEqual(r.text, "1) VERDICT: readable.\n6) PROOF: MANIFEST_TAIL_TOKEN: 0123abcd\nRESULT_COMPLETE")
+        r = adapters.Reader("opencode")
+        r.feed({"type": "error", "error": {"name": "APIError", "data": {"message": "free usage exceeded"}}})
+        self.assertEqual(r.error, "free usage exceeded")
+
+    def test_stock_tools_auto_approved_inside_an_os_write_sandbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work, msg = Path(tmp).resolve(), Path(tmp) / "m.txt"
+            msg.write_text("review\n")
+            for argv in (adapters.launch(self.LANE, work, msg, work / "f", work / "l", True).argv,
+                         adapters.tui(self.LANE, work, "review", work / "l", True).argv):
+                self.assertEqual(argv[:2], ["sandbox-exec", "-p"])
+                self.assertIn(f'(subpath "{work}")', argv[2])
+                self.assertIn("--auto", argv)
+                self.assertIn("opencode/muse-spark-1.3-contributor-free", argv)
+                self.assertNotIn("--agent", argv)  # any non-stock agent or rule loses the free tier
+
+    def test_the_sandbox_denies_writes_outside_the_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(dir=Path.home()) as outside:
+            work = Path(tmp).resolve()
+            profile = adapters.opencode_sandbox(work)
+            inside = subprocess.run([*profile, "touch", str(work / "ok")], capture_output=True)
+            escape = subprocess.run([*profile, "touch", str(Path(outside) / "escape")], capture_output=True)
+            self.assertEqual(inside.returncode, 0, inside.stderr)
+            self.assertNotEqual(escape.returncode, 0)
+            self.assertIn(b"Operation not permitted", escape.stderr)
+            self.assertFalse((Path(outside) / "escape").exists())
+
+    def test_free_models_have_no_quota_to_protect(self):
+        from xcheck import capacity
+        self.assertEqual(capacity.read(self.LANE).status, "eligible")
 
 
 class GrokLane(unittest.TestCase):
@@ -447,7 +493,7 @@ class Installation(unittest.TestCase):
         from xcheck import install, run
         helps = {tuple(cmd): (FIX / "cli-help" / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
-        models = "\n".join(l.model for l in adapters.DEFAULT_ROSTER)
+        models = "\n".join(l.model for l in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))
 
         def fake_run(cmd, **_):
             return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), models), "")
@@ -672,7 +718,7 @@ class EndToEnd(unittest.TestCase):
                               capture_output=True, text=True, timeout=timeout)
 
     def run_lanes(self, mode="ok", extra=()):
-        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh"  # stream view
+        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,opencode:muse-spark-1.3-contributor-free"  # stream view
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--skip-capacity", *extra, mode=mode)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
@@ -813,7 +859,7 @@ class EndToEnd(unittest.TestCase):
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
                "CODEX_CONFIG": str(self.root / "codex-config.toml"),
                "AGY_SETTINGS": str(self.root / "agy-settings.json")}
-        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high"
+        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
                            env=env, capture_output=True, text=True, timeout=60)
@@ -896,7 +942,7 @@ class EndToEnd(unittest.TestCase):
             held.release()
 
     def run_tui(self, mode, extra=()):
-        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high"
+        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free"
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--view", "tui", "--skip-capacity", *extra, mode=mode)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
