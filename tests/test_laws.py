@@ -188,38 +188,47 @@ class GrokReaderLaws(unittest.TestCase):
 
 @st.composite
 def codex_configs(draw):
+    """(text, path, canonical): canonical is the layout Codex itself writes."""
     suffix = draw(st.from_regex(r"[a-z][a-z0-9_-]{0,30}", fullmatch=True))
     path = "/private/tmp/agent-offload/.lanes/" + suffix
+    state = draw(st.sampled_from([None, "trusted", "untrusted"]))
+    extra = draw(st.booleans())
+    if draw(st.booleans()):
+        lines = [f'[projects."{path}"]']
+        if state is not None:
+            lines.append(f'trust_level = "{state}"')
+        if extra:
+            lines.append('model = "keep-me"')
+        return "\n".join(lines) + "\n", path, True
     quote = draw(st.sampled_from(['"', "'"]))
     space = draw(st.sampled_from(["", " ", "\t"]))
     newline = draw(st.sampled_from(["\n", "\r\n"]))
-    header = f"{space}[{space}projects{space}.{space}{quote}{path}{quote}{space}]{space}"
-    state = draw(st.sampled_from([None, "trusted", "untrusted"]))
-    lines = [header]
+    lines = [f"{space}[{space}projects{space}.{space}{quote}{path}{quote}{space}]{space}"]
     if state is not None:
         value_quote = draw(st.sampled_from(['"', "'"]))
         lines.append(f"{space}trust_level{space}={space}{value_quote}{state}{value_quote}")
-    if draw(st.booleans()):
+    if extra:
         lines.append('model = "keep-me"')
-    text = newline.join(lines) + (newline if draw(st.booleans()) else "")
-    return text, path
+    return newline.join(lines) + (newline if draw(st.booleans()) else ""), path, False
 
 
 class CodexTrustLaws(unittest.TestCase):
-    @given(codex_configs())
-    @SETTINGS
-    def test_only_the_named_project_trust_changes(self, config):
-        text, path = config
-        expected = tomllib.loads(text)
-        expected["projects"][path]["trust_level"] = "trusted"
-        self.assertEqual(tomllib.loads(trust._codex(text, [path])), expected)
+    """Either only the named project's trust changes, or nothing is written.
+    The canonical layout (what Codex and xcheck write) is always updated."""
 
     @given(codex_configs())
     @SETTINGS
-    def test_repeating_the_same_trust_update_is_byte_identical(self, config):
-        text, path = config
-        once = trust._codex(text, [path])
-        self.assertEqual(trust._codex(once, [path]), once)
+    def test_only_the_named_project_trust_changes_or_the_update_is_refused(self, config):
+        text, path, canonical = config
+        expected = tomllib.loads(text)
+        expected["projects"][path]["trust_level"] = "trusted"
+        try:
+            updated = trust._codex(text, [path])
+        except ValueError:
+            self.assertFalse(canonical, "a canonical table must be updated")
+            return
+        self.assertEqual(tomllib.loads(updated), expected)
+        self.assertEqual(trust._codex(updated, [path]), updated)
 
 
 if __name__ == "__main__":

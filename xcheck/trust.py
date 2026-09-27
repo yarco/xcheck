@@ -24,7 +24,6 @@ import os
 import re
 import tempfile
 import tomllib
-from copy import deepcopy
 from pathlib import Path
 
 
@@ -56,45 +55,32 @@ def ensure(kind: str, workspace: Path) -> bool:
 
 
 def _codex(text: str, paths: list[str]) -> str:
-    expected = deepcopy(tomllib.loads(text))
-    projects = expected.setdefault("projects", {})
-    if not isinstance(projects, dict):
-        raise ValueError("Codex projects must be a table")
+    """Mark each path trusted. Codex and this module both write the canonical
+    `[projects."<dir>"]` table with a `trust_level = "..."` line; that layout is
+    edited, any other is refused. The result must parse to the old config with
+    only those trust levels changed, or nothing is written."""
+    expected = tomllib.loads(text)
     for p in paths:
-        project = projects.setdefault(p, {})
-        if not isinstance(project, dict):
-            raise ValueError(f"Codex project {p!r} must be a table")
+        project = expected.setdefault("projects", {}).setdefault(p, {})
         if project.get("trust_level") == "trusted":
             continue
-        key = json.dumps(p, ensure_ascii=False)
-        literal = re.escape("'" + p + "'")
-        header = f'[projects.{key}]'
-        section = re.search(
-            rf'''(?m)^[ \t]*\[[ \t]*(?:projects|"projects"|'projects')[ \t]*\.[ \t]*(?:{re.escape(key)}|{literal})[ \t]*\][ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)''',
-            text,
-        )
-        if section is None:
-            if p in tomllib.loads(text).get("projects", {}):
-                raise ValueError(f"unsupported Codex project table layout: {p!r}")
-            text = text.rstrip("\n") + f'\n\n{header}\ntrust_level = "trusted"\n'
-        else:  # present: make sure it says trusted
-            following = re.search(r"(?m)^[ \t]*\[", text[section.end():])
-            end = section.end() + following.start() if following else len(text)
-            block = text[section.end():end]
-            setting = re.compile(
-                r'''(?m)^([ \t]*(?:trust_level|"trust_level"|'trust_level')[ \t]*=[ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*')([ \t]*(?:#[^\r\n]*)?\r?)$'''
-            )
-            if setting.search(block):
-                block = setting.sub(lambda m: m[1] + '"trusted"' + m[2], block, count=1)
-                text = text[:section.end()] + block + text[end:]
-            elif "trust_level" in project:
-                raise ValueError(f"unsupported Codex trust value layout: {p!r}")
-            else:
-                newline = "" if section.group().endswith("\n") else "\n"
-                text = text[:section.end()] + newline + 'trust_level = "trusted"\n' + text[section.end():]
+        header = f"[projects.{json.dumps(p)}]\n"
+        start = text.find(header)
+        if p not in tomllib.loads(text).get("projects", {}):
+            text = text.rstrip("\n") + f'\n\n{header}trust_level = "trusted"\n'
+        elif start >= 0:
+            body = start + len(header)
+            nxt = re.search(r"(?m)^\[", text[body:])
+            end = body + nxt.start() if nxt else len(text)
+            block, n = re.subn(r'(?m)^trust_level = "[^"\n]*"$', 'trust_level = "trusted"', text[body:end], count=1)
+            text = text[:body] + (block if n else 'trust_level = "trusted"\n' + block) + text[end:]
         project["trust_level"] = "trusted"
-    if tomllib.loads(text) != expected:
-        raise ValueError("Codex trust update would change unrelated configuration")
+    try:
+        same = tomllib.loads(text) == expected
+    except tomllib.TOMLDecodeError:
+        same = False
+    if not same:
+        raise ValueError("unsupported Codex project table layout; trust the lane workspace by hand")
     return text
 
 

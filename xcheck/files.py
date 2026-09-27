@@ -121,11 +121,11 @@ class Run:
     orch: str
     started: str
     panes: dict[str, str]        # herdr: lane → pane id (only panes this run created)
-    herdr: dict                  # herdr: caller pane/tab/workspace; {} when headless
+    herdr: dict                  # herdr: caller pane; {} when headless
     view: str = "stream"         # stream (headless NDJSON) | tui (interactive app, answers in ANSWER.md)
     capacity: bool = True        # each lane probes its pool before spending
     forced: list = None          # lanes launched past a capacity refusal
-    epoch: float = 0.0           # launch time, for the supervisor's watchdog
+    epoch: float = 0.0           # launch time: the "runner never started" grace counts from here
 
     def lane(self, name: str) -> Lane:
         return self.lanes[name]

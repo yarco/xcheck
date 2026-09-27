@@ -23,7 +23,6 @@ from . import adapters, herdr, validate
 from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, is_alive, now, workspace
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 START_GRACE = 90  # seconds for a placed runner to record its pid
-LINGER = 3        # seconds a finished Herdr pane stays visible
 STILL_RUNNING = 3
 
 DELIVER = {
@@ -214,8 +213,6 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
 
-    attempted_closes: set[str] = set()
-    stopping: dict[str, float] = {}
     pending = set(run.lanes)
     while pending:
         if interrupted:
@@ -240,20 +237,9 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
             elif alive is None and time.time() - run.epoch > START_GRACE:
                 _write_exit(run, name, "failed", "lane runner never started")
                 pending.discard(name)
-            elif alive and time.time() - run.epoch > 2 * run.cap + 180:  # pool wait + spend
-                # A runner enforces its own cap; one still alive here is stuck.
-                # Ask it to stop (it ends its app and writes exit.json), then force.
-                runner = _runner_pid(run, name)
-                if name not in stopping:
-                    stopping[name] = time.time()
-                    atomic_write(run.lane_dir(name) / "watchdog", "cap exceeded\n")
-                    _signal(runner, signal.SIGTERM)
-                elif time.time() - stopping[name] > 60:
-                    _signal(runner, signal.SIGKILL)
-        _close_finished(run, attempted_closes)
+            # A live runner needs no watchdog here: its own kernel alarm bounds it.
         if pending:
             time.sleep(1)
-    _close_finished(run, attempted_closes, linger=False)
     status = render_status(run)
     if interrupted:
         print(status + f"xcheck: supervisor interrupted ({interrupted[0]}); "
@@ -266,13 +252,6 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
 
 def _exit_path(run: Run, name: str) -> Path:
     return run.lane_dir(name) / "exit.json"
-
-
-def _runner_pid(run: Run, name: str) -> int | None:
-    try:
-        return json.loads((run.lane_dir(name) / "pids.json").read_text()).get("runner")
-    except (OSError, ValueError):
-        return None
 
 
 def _runner_alive(run: Run, name: str, children) -> bool | None:
@@ -316,8 +295,7 @@ def _settle_dead_runner(run: Run, name: str) -> None:
         status, problems = validate.check(result.read_text(errors="replace"), run.contract)
         _write_exit(run, name, status, f"{note}; published answer: {'; '.join(problems) or 'valid'}")
     else:
-        status = "timeout" if (d / "watchdog").exists() else "failed"
-        _write_exit(run, name, status, note)
+        _write_exit(run, name, "failed", note)
 
 
 def _signal(pid, sig: int) -> None:
@@ -333,24 +311,6 @@ def _write_exit(run: Run, name: str, status: str, reason: str) -> None:
         "lane": name, "status": status, "reason": reason, "exit_code": None, "error": None,
         "ended": now(), "stderr_tail": [],
     }, indent=2))
-
-
-def _close_finished(run: Run, attempted: set[str], linger: bool = True) -> None:
-    if run.mode != "herdr":
-        return
-    for name, pane in run.panes.items():
-        path = _exit_path(run, name)
-        if name in attempted or not path.exists():
-            continue
-        if linger and time.time() - path.stat().st_mtime < LINGER:
-            continue
-        record = json.loads(path.read_text())
-        if herdr.close(run.herdr, pane):
-            record.pop("cleanup_pending", None)
-        else:
-            record["cleanup_pending"] = f"cleanup pending: pane {pane} not confirmed closed; verify its tab/workspace before acting"
-        atomic_write(path, json.dumps(record, indent=2))
-        attempted.add(name)
 
 
 # ------------------------------------------------------------------ status
@@ -371,8 +331,7 @@ def render_status(run: Run) -> str:
              f"- mode `{run.mode}` · view `{run.view}` · orchestrator `{run.orch}` · started {run.started}", "",
              "| lane | status | seconds | note |", "|---|---|---|---|"]
     for r in rows:
-        note = "; ".join(filter(None, (r.get("reason"), r.get("cleanup_pending"))))
-        note = note.replace("|", "\\|").replace("\n", " ")
+        note = (r.get("reason") or "").replace("|", "\\|").replace("\n", " ")
         lines.append(f"| {r['lane']} | {r['status']} | {r.get('seconds', '')} | {note} |")
     text = "\n".join(lines) + "\n"
     atomic_write(run.base / "STATUS.md", text)

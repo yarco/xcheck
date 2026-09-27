@@ -161,9 +161,7 @@ class GrokLane(unittest.TestCase):
             if kind == "codex":
                 self.assertNotIn("--ignore-user-config", stream)
             elif kind == "claude":
-                self.assertNotIn("--strict-mcp-config", stream + app)
-                self.assertEqual(stream[stream.index("--mcp-config") + 1], str(adapters.CLAUDE_MCP_CONFIG))
-                self.assertEqual(app[app.index("--mcp-config") + 1], str(adapters.CLAUDE_MCP_CONFIG))
+                self.assertNotIn("--strict-mcp-config", stream + app)  # restricted still loads MCP
                 self.assertIn("mcp__*", stream[stream.index("--allowedTools") + 1])
                 self.assertIn("mcp__*", app[app.index("--allowedTools") + 1])
             else:
@@ -179,16 +177,41 @@ class IdleDefaults(unittest.TestCase):
         self.assertEqual(idle_for(37, "stream"), 37)
 
 
-class WatchdogStatus(unittest.TestCase):
-    def test_watchdog_signal_is_timeout_and_external_signal_is_interrupted(self):
-        from types import SimpleNamespace
-        from xcheck.lane import _Stop, _stop_status
+class RunnerBound(unittest.TestCase):
+    def test_own_alarm_is_timeout_and_external_signal_is_interrupted(self):
+        from xcheck.lane import _Stop, _stop_status, bound
+        self.assertEqual(_stop_status(_Stop("SIGALRM"), 2)[0], "timeout")
+        self.assertEqual(_stop_status(_Stop("SIGTERM"), 2)[0], "interrupted")
+        self.assertGreater(bound(60), 2 * 60 + 180)  # pool wait + spend + probe timeout
+
+
+    def test_alarm_interrupts_a_stuck_capacity_probe_and_publishes_timeout(self):
+        from xcheck import lane
+        from xcheck.files import Run
         with tempfile.TemporaryDirectory() as tmp:
-            lane_dir = Path(tmp)
-            run = SimpleNamespace(lane_dir=lambda _name: lane_dir, cap=2)
-            self.assertEqual(_stop_status(run, "lane", _Stop("SIGTERM"))[0], "interrupted")
-            (lane_dir / "watchdog").touch()
-            self.assertEqual(_stop_status(run, "lane", _Stop("SIGTERM"))[0], "timeout")
+            root = Path(tmp)
+            base = root / "run"
+            stage(base)
+            peer = Lane("grok", "grok-4.7", "low")
+            run = Run(base, {peer.name: peer}, CONTRACT, False, 10, 10,
+                      "headless", "codex", "now", {}, {}, forced=[])
+            run.lane_dir(peer.name).mkdir(parents=True)
+            run.save()
+            previous = {sig: signal.getsignal(sig) for sig in
+                        (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM)}
+            try:
+                with patch.object(lane, "ROOT", root), \
+                     patch.object(lane, "workspace", return_value=root / "work"), \
+                     patch.object(lane, "bound", return_value=1), \
+                     patch.object(lane.capacity, "check_lane", side_effect=lambda *_: time.sleep(10)):
+                    lane.run_lane(base, peer.name)
+                record = json.loads((run.lane_dir(peer.name) / "exit.json").read_text())
+                self.assertEqual(record["status"], "timeout")
+                self.assertEqual(signal.alarm(0), 0)
+            finally:
+                signal.alarm(0)
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
 
 
 class PoolAdmission(unittest.TestCase):
@@ -261,65 +284,20 @@ class HerdrOwnership(unittest.TestCase):
     def setUp(self):
         from xcheck import herdr
         self.herdr = herdr
-        self.ctx = {"pane": "caller", "tab": "tab", "workspace": "workspace"}
 
-    def test_caller_requires_explicit_tab_and_workspace_identity(self):
+    def test_caller_needs_a_readable_layout_of_sufficient_size(self):
         with patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "caller"}):
-            for layout in (None, {"area": {"width": 210, "height": 64}},
-                           {"area": {"width": 210, "height": 64}, "tab_id": "tab", "workspace_id": None}):
+            for layout in (None, {}, {"area": {"width": 100, "height": 64}}, {"area": {"width": 210}}):
                 with self.subTest(layout=layout), patch.object(self.herdr, "_herdr", return_value={"layout": layout}):
                     self.assertIsNone(self.herdr.caller())
+            with patch.object(self.herdr, "_herdr", return_value={"layout": {"area": {"width": 210, "height": 64}}}):
+                self.assertEqual(self.herdr.caller(), {"pane": "caller"})
 
-    def test_unreadable_pane_is_not_confirmed_closed(self):
-        with patch.object(self.herdr, "_herdr", side_effect=self.herdr.HerdrError("unreadable")) as call:
-            self.assertFalse(self.herdr.close(self.ctx, "child"))
-        self.assertEqual(call.call_count, 1)
-
-    def test_absent_or_foreign_identity_never_authorizes_close(self):
-        for info in (None, {}, {"tab_id": "another", "workspace_id": "workspace"},
-                     {"tab_id": "tab", "workspace_id": "another"}):
-            with self.subTest(info=info), patch.object(self.herdr, "_herdr", return_value={"pane": info}) as call:
-                self.assertFalse(self.herdr.close(self.ctx, "child"))
-                self.assertEqual(call.call_count, 1)
-        with patch.object(self.herdr, "_herdr", return_value={"pane": {}}) as call:
-            self.assertFalse(self.herdr.close({"pane": "caller", "tab": None, "workspace": None}, "child"))
-            call.assert_not_called()
-
-    def test_only_the_owned_child_is_closed(self):
-        with patch.object(self.herdr, "_herdr", return_value={"pane": {"tab_id": "tab", "workspace_id": "workspace"}}) as call:
-            self.assertTrue(self.herdr.close(self.ctx, "child"))
-            self.assertEqual([c.args for c in call.call_args_list], [("pane", "get", "child"), ("pane", "close", "child")])
-            call.reset_mock()
-            self.assertFalse(self.herdr.close(self.ctx, "caller"))
-            call.assert_not_called()
-
-
-class PaneCleanup(unittest.TestCase):
-    def test_uncertain_cleanup_preserves_review_and_is_not_polled(self):
-        from types import SimpleNamespace
-        from xcheck import run
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            lane_dir = base / "lanes" / "reviewer"
-            lane_dir.mkdir(parents=True)
-            path = lane_dir / "exit.json"
-            original = {"lane": "reviewer", "status": "done", "reason": "RESULT_COMPLETE"}
-            path.write_text(json.dumps(original))
-            state = SimpleNamespace(mode="herdr", panes={"reviewer": "child"}, herdr={},
-                                    lane_dir=lambda _: lane_dir, base=base, lanes={"reviewer": None},
-                                    orch="other", started="now", view="tui", contract=CONTRACT)
-            attempted = set()
-            with patch.object(run.herdr, "close", return_value=False) as close:
-                run._close_finished(state, attempted, linger=False)
-                run._close_finished(state, attempted, linger=False)
-                self.assertEqual(close.call_count, 1)
-            record = json.loads(path.read_text())
-            self.assertEqual({k: record[k] for k in original}, original)
-            self.assertIn("not confirmed closed", record["cleanup_pending"])
-            self.assertIn("cleanup pending", run.render_status(state))
-            with patch.object(run.herdr, "close", return_value=True):
-                run._close_finished(state, set(), linger=False)
-            self.assertEqual(json.loads(path.read_text()), original)
+    def test_runner_replaces_the_pane_shell_so_the_pane_closes_with_it(self):
+        with patch.object(self.herdr, "_herdr", return_value={}) as call:
+            self.herdr._start("p2", "lane-a", lambda lane: f"runner {lane}")
+        self.assertEqual(call.call_args_list[-1].args, ("pane", "run", "p2", "exec runner lane-a"))
+        self.assertFalse(hasattr(self.herdr, "close"))  # nothing closes a pane by id
 
 
 class SignalGroup(unittest.TestCase):
@@ -473,25 +451,20 @@ class TrustFiles(unittest.TestCase):
         self.assertFalse(self.trust.ensure("claude", Path("/private/tmp/x")))
         self.assertFalse((self.dir / "config.toml").exists())
 
-    def test_codex_valid_toml_spellings_preserve_configuration(self):
+    def test_codex_canonical_tables_update_and_other_layouts_are_refused(self):
         p = "/private/tmp/agent-offload/.lanes/a"
-        cases = (
-            f'[projects."{p}"]',
-            f'[projects."{p}"]\ntrust_level = \'untrusted\'\n',
-            f"[projects.'{p}']\nmodel = \"x\"\n",
-            f'  [ projects . "{p}" ] # keep header\n  trust_level = "untrusted" # keep setting\n',
-        )
-        for original in cases:
+        for original in (f'[projects."{p}"]\n', f'[projects."{p}"]\ntrust_level = "untrusted"\n',
+                         f'[projects."{p}"]\nmodel = "x"\n[projects."/unrelated"]\ntrust_level = "untrusted"\n'):
             with self.subTest(original=original):
-                text = original + ('\n[projects."/unrelated"]\ntrust_level = "untrusted"\n' if original.endswith("\n") else "")
-                expected = tomllib.loads(text)
+                expected = tomllib.loads(original)
                 expected["projects"][p]["trust_level"] = "trusted"
-                updated = self.trust._codex(text, [p])
+                updated = self.trust._codex(original, [p])
                 self.assertEqual(tomllib.loads(updated), expected)
                 self.assertEqual(self.trust._codex(updated, [p]), updated)
-                if "# keep" in text:
-                    self.assertIn("# keep header", updated)
-                    self.assertIn("# keep setting", updated)
+        for original in (f"[projects.'{p}']\ntrust_level = 'untrusted'\n",
+                         f'  [ projects . "{p}" ]\ntrust_level = "untrusted"\n'):
+            with self.subTest(original=original), self.assertRaises(ValueError):
+                self.trust._codex(original, [p])
 
     def test_codex_unsupported_layout_is_never_written(self):
         p = "/private/tmp/agent-offload/.lanes/a"

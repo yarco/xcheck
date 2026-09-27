@@ -29,7 +29,7 @@ from typing import Any, Callable
 
 SCHEMA_VERSION = 1
 STATUSES = {"eligible", "reserve-low", "auth-required", "capacity-unknown"}
-HARNESSES = ("codex", "claude", "grok", "agy", "perplexity")
+HARNESSES = ("codex", "claude", "grok", "agy")
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 GROK_CREDITS_URL = f"{GROK_BILLING_URL}?format=credits"
 GROK_CLI_PRODUCT = "GrokBuild"
@@ -1096,109 +1096,6 @@ def shebang_command(first_line: str) -> list[str] | None:
     return parts
 
 
-def pwm_python() -> list[str] | None:
-    executable = shutil.which("pwm")
-    if not executable:
-        return None
-    try:
-        first_line = pathlib.Path(executable).read_text(encoding="utf-8").splitlines()[0]
-    except (OSError, UnicodeError, IndexError):
-        return None
-    return shebang_command(first_line)
-
-
-def parse_perplexity(payload: object, args: argparse.Namespace) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError("Perplexity quota response is not an object")
-    field = "remaining_pro" if args.pplx_kind == "pro" else "remaining_research"
-    remaining = integer(payload.get(field), field)
-    required = args.pplx_planned_cost + 1
-    limiting = "pro-search" if args.pplx_kind == "pro" else "deep-research"
-    source_limits = payload.get("source_limits")
-    if not isinstance(source_limits, list):
-        raise ValueError("Perplexity source limits are missing")
-    # `none` is pwm's sentinel for "no source focus", not a connector ID, so it
-    # has no counter to validate. Treating it as one failed the whole preflight.
-    if args.pplx_source and args.pplx_source != "none":
-        matching = [
-            item for item in source_limits
-            if isinstance(item, dict) and item.get("source_id") == args.pplx_source
-        ]
-        if not matching:
-            raise ValueError(f"Perplexity source counter is missing: {args.pplx_source}")
-        source_remaining = matching[0].get("remaining")
-        monthly = matching[0].get("monthly_limit")
-        if monthly is not None:
-            source_count = integer(source_remaining, f"source:{args.pplx_source}")
-            if source_count < 1:
-                return result(
-                    "perplexity",
-                    "reserve-low",
-                    remaining_count=source_count,
-                    limiting_window=f"source:{args.pplx_source}",
-                    source="pwm-structured-usage",
-                    note=f"source {args.pplx_source} has no remaining actions",
-                )
-    status = "eligible" if remaining >= required else "reserve-low"
-    return result(
-        "perplexity",
-        status,
-        remaining_count=remaining,
-        limiting_window=limiting,
-        source="pwm-structured-usage",
-        note=f"{remaining} remaining; planned cost {args.pplx_planned_cost}; preserve 1",
-    )
-
-
-def probe_perplexity(args: argparse.Namespace) -> dict[str, Any]:
-    interpreter = pwm_python()
-    if not interpreter:
-        return unknown("perplexity", "pwm-structured-usage", "pwm installation is unavailable")
-    # An expired cookie still gets HTTP 200 from the rate-limit endpoint —
-    # every counter just reads zero — so a limit payload alone cannot prove
-    # auth. get_user_info is the doctor's check: 200 means the session is
-    # live, anything else means the zeros are an artifact and the lane needs
-    # `pwm login`, not a wait for quota.
-    code = (
-        "import json;"
-        "from dataclasses import asdict;"
-        "from perplexity_web_mcp.cli.auth import get_user_info, load_token;"
-        "from perplexity_web_mcp.rate_limits import fetch_rate_limits;"
-        "t=load_token();"
-        "u=bool(get_user_info(t)) if t else False;"
-        "x=fetch_rate_limits(t) if u else None;"
-        "print(json.dumps({'auth':u,'limits':asdict(x) if x else None},separators=(',',':')))"
-    )
-    try:
-        completed = subprocess.run(
-            [*interpreter, "-c", code],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=args.timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return unknown("perplexity", "pwm-structured-usage", "Perplexity quota subprocess failed")
-    if completed.returncode != 0:
-        return unknown("perplexity", "pwm-structured-usage", "Perplexity quota subprocess returned an error")
-    try:
-        payload = json.loads(completed.stdout)
-        if not isinstance(payload, dict):
-            raise ValueError("unexpected quota payload shape")
-        if payload.get("auth") is not True:
-            return auth_required("perplexity", "pwm-structured-usage", "Perplexity login required; run: pwm login")
-        limits = payload.get("limits")
-        if limits is None:
-            return unknown(
-                "perplexity",
-                "pwm-structured-usage",
-                "Perplexity rate-limit fetch failed despite valid login",
-            )
-        return parse_perplexity(limits, args)
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return unknown("perplexity", "pwm-structured-usage", "Perplexity quota schema did not validate")
-
-
 def run_with_retry(
     harness: str,
     function: Callable[[argparse.Namespace], dict[str, Any]],
@@ -1258,9 +1155,6 @@ def parser() -> argparse.ArgumentParser:
         choices=("sonnet", "opus"),
         help="When set, only that model-specific Claude window is considered (plus general windows).",
     )
-    item.add_argument("--pplx-kind", choices=("pro", "research"), default="pro")
-    item.add_argument("--pplx-source", default="web")
-    item.add_argument("--pplx-planned-cost", type=int, default=1)
     return item
 
 
@@ -1322,8 +1216,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError(f"--timeout must be in (0, {MAX_PROBE_TIMEOUT:g}]")
     if args.retries not in (0, 1):
         raise ValueError("--retries must be 0 or 1")
-    if args.pplx_planned_cost < 1:
-        raise ValueError("--pplx-planned-cost must be positive")
 
 
 def main() -> int:
@@ -1335,7 +1227,6 @@ def main() -> int:
         "claude": probe_claude,
         "grok": probe_grok,
         "agy": probe_agy,
-        "perplexity": probe_perplexity,
     }
     results = collect_results(selected, adapters, args)
     envelope = {

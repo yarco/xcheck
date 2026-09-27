@@ -24,6 +24,7 @@ from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, 
 
 TUI_IDLE = 180
 STREAM_IDLE = 900
+LINGER = 3  # seconds a finished Herdr pane stays visible
 
 
 def idle_for(configured: int, view: str) -> int:
@@ -56,9 +57,16 @@ class _Stop(Exception):
     pass
 
 
-def _stop_status(run: Run, name: str, stop: _Stop) -> tuple[str, str]:
-    if (run.lane_dir(name) / "watchdog").exists():
-        return "timeout", f"supervisor watchdog stopped runner after cap ({run.cap}s)"
+def bound(cap: int) -> int:
+    """The runner's own hard limit: pool wait and spend (each up to `cap`) plus
+    the capacity probe and group shutdown. A kernel alarm enforces it, so a
+    runner stuck outside its loops still ends with a record, supervised or not."""
+    return 2 * cap + 300
+
+
+def _stop_status(stop: _Stop, cap: int) -> tuple[str, str]:
+    if str(stop) == "SIGALRM":
+        return "timeout", f"runner exceeded its own {bound(cap)}s bound"
     return "interrupted", f"runner received {stop}"
 
 
@@ -69,15 +77,15 @@ def _raise_stop(signum, _frame):
 def run_lane(base: Path, name: str) -> int:
     """Run one lane; whatever happens, end with exit.json."""
     try:
-        return _run_lane(base, name)
+        code = _run_lane(base, name)
     except _Stop as stop:  # a signal outside the guarded spans still ends with a record
         run = Run.load(base)
+        code = 130
         if not (run.lane_dir(name) / "exit.json").exists():
-            status, reason = _stop_status(run, name, stop)
+            status, reason = _stop_status(stop, run.cap)
             atomic_write(run.lane_dir(name) / "exit.json", json.dumps({
                 "lane": name, "status": status, "reason": reason,
                 "exit_code": None, "error": None, "ended": now(), "stderr_tail": []}, indent=2))
-        return 130
     except Exception as e:  # a runner bug must not look like a silent death
         import traceback
         run = Run.load(base)
@@ -95,7 +103,14 @@ def run_lane(base: Path, name: str) -> int:
             atomic_write(d / "exit.json", json.dumps({
                 "lane": name, "status": status, "reason": reason, "exit_code": None, "error": None,
                 "ended": now(), "stderr_tail": [], "result_bytes": len(text.encode())}, indent=2))
-        return 1
+        code = 1
+    signal.alarm(0)
+    if Run.load(base).mode == "herdr":
+        try:
+            time.sleep(LINGER)  # the final line stays readable; then the pane closes with us
+        except _Stop:
+            pass
+    return code
 
 
 def _run_lane(base: Path, name: str) -> int:
@@ -107,8 +122,9 @@ def _run_lane(base: Path, name: str) -> int:
     log = d / "harness.log"  # the harness's own debug log: where root causes are found
     view = "tui" if lane.kind in adapters.APP_ONLY else run.view
     idle = idle_for(run.idle, view)
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM):
         signal.signal(sig, _raise_stop)
+    signal.alarm(bound(run.cap))
 
     started = time.time()
     reader = adapters.Reader(lane.kind)
@@ -188,7 +204,7 @@ def _run_lane(base: Path, name: str) -> int:
             if pending:
                 _consume(reader, pending)
         except _Stop as stop:
-            status, reason = _stop_status(run, name, stop)
+            status, reason = _stop_status(stop, run.cap)
             _kill(proc)
         code = proc.wait()
         _reap_group(proc.pid)  # MCP servers, language servers, other leftovers of the lane
@@ -234,7 +250,7 @@ def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log:
         status, reason, code, text = tui.run(spec.argv, lane_env(spec), work, answer, screen,
                                              idle, run.cap, spawned)
     except _Stop as stop:
-        status, reason = _stop_status(run, name, stop)
+        status, reason = _stop_status(stop, run.cap)
         code = None
         text = answer.read_text(encoding="utf-8", errors="replace") if answer.exists() else ""
     finally:

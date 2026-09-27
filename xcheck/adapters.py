@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 KINDS = ("codex", "claude", "grok", "agy")
-CLAUDE_MCP_CONFIG = Path.home() / ".claude.json"
 
 # Quota pool per kind; Agy has two independently metered families.
 AGY_GEMINI_PREFIX = "gemini-"
@@ -102,8 +101,9 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
     if lane.kind == "claude":
         tools = "Read,WebSearch,WebFetch" if web else "Read"
         argv = [
-            "claude", "-p", "--restricted", "--mcp-config", str(CLAUDE_MCP_CONFIG),
-            "--permission-mode", "dontAsk",
+            # --restricted skips settings files and hooks but still loads MCP servers
+            # (only --strict-mcp-config would skip them).
+            "claude", "-p", "--restricted", "--permission-mode", "dontAsk",
             # With -p, anything that would prompt is denied instead of waiting.
             "--permission-prompts", "none",
             "--tools", tools, "--allowedTools", tools + ",mcp__*", "--add-dir", str(work),
@@ -151,8 +151,7 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
     if lane.kind == "claude":
         tools = "Read,Write,WebSearch,WebFetch" if web else "Read,Write"
         argv = [
-            "claude", "--restricted", "--mcp-config", str(CLAUDE_MCP_CONFIG),
-            "--permission-mode", "dontAsk",
+            "claude", "--restricted", "--permission-mode", "dontAsk",
             "--tools", tools, "--allowedTools", tools + ",mcp__*", "--add-dir", str(work),
             "--model", lane.model, "--effort", lane.effort, "--debug-file", str(log), message,
         ]
@@ -194,8 +193,7 @@ HELP_COMMANDS = {
                    "--output-last-message"]),
     "codex": (["codex", "--help"], ["--sandbox", "--ask-for-approval", "--cd", "--model",
               "--config", "--search"]),
-    "claude": (["claude", "--help"], ["--print", "--restricted", "--mcp-config",
-               "--permission-mode", "--tools", "--allowedTools", "--add-dir",
+    "claude": (["claude", "--help"], ["--print", "--restricted", "--permission-mode", "--tools", "--allowedTools", "--add-dir",
                "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
                "--permission-prompts", "--include-partial-messages", "--debug-file"]),
     "grok": (["grok", "--help"], ["--prompt-file", "--model", "--reasoning-effort", "--cwd",

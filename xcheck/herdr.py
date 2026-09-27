@@ -2,9 +2,9 @@
 
 In the default TUI view a pane shows the harness's interactive app, hosted by
 `xcheck lane`; stream view renders events instead. Completion is the lane's
-exit.json, never pane text. The host
-closes only pane IDs it created, and only while they are still in the caller's
-tab.
+exit.json, never pane text. The runner replaces the pane's shell (`exec`), and
+Herdr closes a pane when its process exits, so each pane closes itself when its
+lane ends; nothing ever closes a pane by id.
 """
 
 from __future__ import annotations
@@ -38,16 +38,12 @@ def caller() -> dict | None:
     if os.environ.get("HERDR_ENV") != "1" or not pane:
         return None
     try:
-        layout = _herdr("pane", "layout", "--pane", pane)["layout"]
+        area = _herdr("pane", "layout", "--pane", pane)["layout"]["area"]
+        if area["width"] < MIN_WIDTH or area["height"] < MIN_HEIGHT:
+            return None
     except (HerdrError, KeyError, TypeError, json.JSONDecodeError):
         return None
-    if not isinstance(layout, dict) or not all(isinstance(layout.get(k), str) and layout[k]
-                                               for k in ("tab_id", "workspace_id")):
-        return None
-    area = layout.get("area", {})
-    if area.get("width", 0) < MIN_WIDTH or area.get("height", 0) < MIN_HEIGHT:
-        return None
-    return {"pane": pane, "tab": layout.get("tab_id"), "workspace": layout.get("workspace_id")}
+    return {"pane": pane}
 
 
 def place(ctx: dict, lanes: list[str], cwd: str, command_for, created) -> None:
@@ -72,7 +68,7 @@ def place(ctx: dict, lanes: list[str], cwd: str, command_for, created) -> None:
 
 def _start(pane: str, lane: str, command_for) -> None:
     _herdr("pane", "rename", pane, f"xcheck:{lane}")
-    _herdr("pane", "run", pane, command_for(lane))
+    _herdr("pane", "run", pane, "exec " + command_for(lane))
 
 
 def _split(target: str, direction: str, ratio: float, cwd: str) -> str:
@@ -82,24 +78,6 @@ def _split(target: str, direction: str, ratio: float, cwd: str) -> str:
         return r["pane"]["pane_id"]
     except KeyError as e:
         raise HerdrError(f"pane split returned no pane id: {r}") from e
-
-
-def close(ctx: dict, pane: str) -> bool:
-    """Close a pane this run created, only if it is still in the caller's tab."""
-    if pane == ctx.get("pane") or not all(isinstance(ctx.get(k), str) and ctx[k]
-                                          for k in ("pane", "tab", "workspace")):
-        return False  # never the orchestrator's own pane
-    try:
-        info = _herdr("pane", "get", pane)["pane"]
-    except (HerdrError, KeyError, TypeError, json.JSONDecodeError):
-        return False  # already gone (or unreadable): nothing this run can close
-    if not isinstance(info, dict) or info.get("tab_id") != ctx["tab"] or info.get("workspace_id") != ctx["workspace"]:
-        return False
-    try:
-        _herdr("pane", "close", pane)
-        return True
-    except HerdrError:
-        return False
 
 
 def shell_command(argv: list[str]) -> str:
