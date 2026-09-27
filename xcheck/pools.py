@@ -44,31 +44,43 @@ def acquire(root: Path, pool: str, run_id: str, deadline: float, on_wait=None) -
     d = root / ".pools" / pool
     d.mkdir(parents=True, exist_ok=True)
     busy = open(d / "busy", "a+")
-    announced = False
-    while True:
-        with open(d / "gate", "a+") as gate:
-            fcntl.flock(gate, fcntl.LOCK_EX)
-            owner = _read(d / "owner")
-            try:
-                fcntl.flock(busy, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                free = True
-            except BlockingIOError:
-                free = False
-            if free or owner == run_id:
-                if free:
-                    _write(d / "owner", run_id)
-                # From exclusive (free) or nothing (joining our own run) to
-                # shared. Only gate holders ever take `busy` exclusively, and we
-                # hold the gate, so the conversion cannot be raced.
-                fcntl.flock(busy, fcntl.LOCK_SH)
-                return Held(busy)
-        if time.time() >= deadline:
-            busy.close()
-            return None
-        if on_wait and not announced:
-            on_wait(owner)
-            announced = True
-        time.sleep(POLL)
+    announced, owner = False, ""
+    try:
+        while time.time() < deadline:
+            with open(d / "gate", "a+") as gate:
+                try:
+                    fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    if time.time() >= deadline:
+                        break
+                    owner = _read(d / "owner")
+                    try:
+                        fcntl.flock(busy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        free = True
+                    except BlockingIOError:
+                        free = False
+                    if free or owner == run_id:
+                        if free:
+                            _write(d / "owner", run_id)
+                        # From exclusive (free) or nothing (joining our own run) to
+                        # shared. Only gate holders ever take `busy` exclusively, and we
+                        # hold the gate, so the conversion cannot be raced.
+                        fcntl.flock(busy, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        return Held(busy)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            if on_wait and not announced:
+                on_wait(owner)
+                announced = True
+            time.sleep(min(POLL, remaining))
+    except BaseException:
+        busy.close()
+        raise
+    busy.close()
+    return None
 
 
 def _read(path: Path) -> str:

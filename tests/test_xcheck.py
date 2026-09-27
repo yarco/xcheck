@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import io
 import os
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -160,6 +162,8 @@ class GrokLane(unittest.TestCase):
                 self.assertNotIn("--ignore-user-config", stream)
             elif kind == "claude":
                 self.assertNotIn("--strict-mcp-config", stream + app)
+                self.assertEqual(stream[stream.index("--mcp-config") + 1], str(adapters.CLAUDE_MCP_CONFIG))
+                self.assertEqual(app[app.index("--mcp-config") + 1], str(adapters.CLAUDE_MCP_CONFIG))
                 self.assertIn("mcp__*", stream[stream.index("--allowedTools") + 1])
                 self.assertIn("mcp__*", app[app.index("--allowedTools") + 1])
             else:
@@ -173,6 +177,149 @@ class IdleDefaults(unittest.TestCase):
         self.assertEqual(idle_for(0, "tui"), 180)  # Agy app in a stream run
         self.assertEqual(idle_for(37, "tui"), 37)
         self.assertEqual(idle_for(37, "stream"), 37)
+
+
+class WatchdogStatus(unittest.TestCase):
+    def test_watchdog_signal_is_timeout_and_external_signal_is_interrupted(self):
+        from types import SimpleNamespace
+        from xcheck.lane import _Stop, _stop_status
+        with tempfile.TemporaryDirectory() as tmp:
+            lane_dir = Path(tmp)
+            run = SimpleNamespace(lane_dir=lambda _name: lane_dir, cap=2)
+            self.assertEqual(_stop_status(run, "lane", _Stop("SIGTERM"))[0], "interrupted")
+            (lane_dir / "watchdog").touch()
+            self.assertEqual(_stop_status(run, "lane", _Stop("SIGTERM"))[0], "timeout")
+
+
+class PoolAdmission(unittest.TestCase):
+    def setUp(self):
+        from xcheck import pools
+        self.pools = pools
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def take(self, pool, run_id, seconds=0.2):
+        held = self.pools.acquire(self.root, pool, run_id, time.time() + seconds)
+        if held:
+            self.addCleanup(held.release)
+        return held
+
+    def test_an_expired_budget_never_admits_even_a_free_pool(self):
+        self.assertIsNone(self.take("codex", "A", -1))
+
+    def test_gate_contention_is_inside_the_admission_budget(self):
+        directory = self.root / ".pools" / "codex"
+        directory.mkdir(parents=True)
+        results = []
+        def enter():
+            try:
+                results.append(self.pools.acquire(self.root, "codex", "A", time.time() + 0.1))
+            except BaseException as exc:
+                results.append(exc)
+        with (directory / "gate").open("a+") as gate:
+            fcntl.flock(gate, fcntl.LOCK_EX)
+            worker = threading.Thread(target=enter, daemon=True)
+            worker.start()
+            try:
+                worker.join(1)
+                finished_while_locked = not worker.is_alive()
+            finally:
+                fcntl.flock(gate, fcntl.LOCK_UN)
+                worker.join(5)
+        for held in results:
+            if isinstance(held, self.pools.Held):
+                held.release()
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(finished_while_locked)
+        self.assertEqual(results, [None])
+
+    def test_same_run_shares_but_every_holder_must_release_for_another_run(self):
+        first, second = self.take("codex", "A"), self.take("codex", "A")
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertIsNone(self.take("codex", "B", 0.02))
+        first.release()
+        self.assertIsNone(self.take("codex", "B", 0.02))
+        second.release()
+        self.assertIsNotNone(self.take("codex", "B"))
+
+    def test_disjoint_pool_does_not_wait_for_a_busy_one(self):
+        self.assertIsNotNone(self.take("grok", "A"))
+        self.assertIsNotNone(self.take("agy-gemini", "B"))
+
+    def test_missing_owner_fails_closed_only_while_the_kernel_lock_is_held(self):
+        first = self.take("codex", "A")
+        self.assertIsNotNone(first)
+        (self.root / ".pools" / "codex" / "owner").unlink()
+        self.assertIsNone(self.take("codex", "B", 0.02))
+        first.release()
+        self.assertIsNotNone(self.take("codex", "B"))
+
+
+class HerdrOwnership(unittest.TestCase):
+    def setUp(self):
+        from xcheck import herdr
+        self.herdr = herdr
+        self.ctx = {"pane": "caller", "tab": "tab", "workspace": "workspace"}
+
+    def test_caller_requires_explicit_tab_and_workspace_identity(self):
+        with patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "caller"}):
+            for layout in (None, {"area": {"width": 210, "height": 64}},
+                           {"area": {"width": 210, "height": 64}, "tab_id": "tab", "workspace_id": None}):
+                with self.subTest(layout=layout), patch.object(self.herdr, "_herdr", return_value={"layout": layout}):
+                    self.assertIsNone(self.herdr.caller())
+
+    def test_unreadable_pane_is_not_confirmed_closed(self):
+        with patch.object(self.herdr, "_herdr", side_effect=self.herdr.HerdrError("unreadable")) as call:
+            self.assertFalse(self.herdr.close(self.ctx, "child"))
+        self.assertEqual(call.call_count, 1)
+
+    def test_absent_or_foreign_identity_never_authorizes_close(self):
+        for info in (None, {}, {"tab_id": "another", "workspace_id": "workspace"},
+                     {"tab_id": "tab", "workspace_id": "another"}):
+            with self.subTest(info=info), patch.object(self.herdr, "_herdr", return_value={"pane": info}) as call:
+                self.assertFalse(self.herdr.close(self.ctx, "child"))
+                self.assertEqual(call.call_count, 1)
+        with patch.object(self.herdr, "_herdr", return_value={"pane": {}}) as call:
+            self.assertFalse(self.herdr.close({"pane": "caller", "tab": None, "workspace": None}, "child"))
+            call.assert_not_called()
+
+    def test_only_the_owned_child_is_closed(self):
+        with patch.object(self.herdr, "_herdr", return_value={"pane": {"tab_id": "tab", "workspace_id": "workspace"}}) as call:
+            self.assertTrue(self.herdr.close(self.ctx, "child"))
+            self.assertEqual([c.args for c in call.call_args_list], [("pane", "get", "child"), ("pane", "close", "child")])
+            call.reset_mock()
+            self.assertFalse(self.herdr.close(self.ctx, "caller"))
+            call.assert_not_called()
+
+
+class PaneCleanup(unittest.TestCase):
+    def test_uncertain_cleanup_preserves_review_and_is_not_polled(self):
+        from types import SimpleNamespace
+        from xcheck import run
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            lane_dir = base / "lanes" / "reviewer"
+            lane_dir.mkdir(parents=True)
+            path = lane_dir / "exit.json"
+            original = {"lane": "reviewer", "status": "done", "reason": "RESULT_COMPLETE"}
+            path.write_text(json.dumps(original))
+            state = SimpleNamespace(mode="herdr", panes={"reviewer": "child"}, herdr={},
+                                    lane_dir=lambda _: lane_dir, base=base, lanes={"reviewer": None},
+                                    orch="other", started="now", view="tui", contract=CONTRACT)
+            attempted = set()
+            with patch.object(run.herdr, "close", return_value=False) as close:
+                run._close_finished(state, attempted, linger=False)
+                run._close_finished(state, attempted, linger=False)
+                self.assertEqual(close.call_count, 1)
+            record = json.loads(path.read_text())
+            self.assertEqual({k: record[k] for k in original}, original)
+            self.assertIn("not confirmed closed", record["cleanup_pending"])
+            self.assertIn("cleanup pending", run.render_status(state))
+            with patch.object(run.herdr, "close", return_value=True):
+                run._close_finished(state, set(), linger=False)
+            self.assertEqual(json.loads(path.read_text()), original)
 
 
 class SignalGroup(unittest.TestCase):
@@ -299,6 +446,18 @@ class TrustFiles(unittest.TestCase):
         self.assertIn('[projects."/tmp/agent-offload/.lanes/a"]', text)
         self.assertFalse(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
 
+    def test_codex_existing_section_without_trust_gets_trusted(self):
+        cfg = self.dir / "config.toml"
+        cfg.write_text('[projects."/private/tmp/agent-offload/.lanes/a"]\nmodel = "x"\n'
+                       '[projects."/another"]\ntrust_level = "untrusted"\n')
+        self.assertTrue(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
+        text = cfg.read_text()
+        section = text.split('[projects."/another"]')[0]
+        self.assertIn('trust_level = "trusted"', section)
+        self.assertIn('model = "x"', section)
+        self.assertIn('[projects."/another"]\ntrust_level = "untrusted"', text)
+        self.assertFalse(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
+
     def test_agy_trusts_both_spellings_and_silences_the_survey(self):
         s = self.dir / "settings.json"
         s.write_text('{"theme": "dark", "trustedWorkspaces": ["/x"]}')
@@ -313,6 +472,35 @@ class TrustFiles(unittest.TestCase):
     def test_claude_and_grok_need_nothing(self):
         self.assertFalse(self.trust.ensure("claude", Path("/private/tmp/x")))
         self.assertFalse((self.dir / "config.toml").exists())
+
+    def test_codex_valid_toml_spellings_preserve_configuration(self):
+        p = "/private/tmp/agent-offload/.lanes/a"
+        cases = (
+            f'[projects."{p}"]',
+            f'[projects."{p}"]\ntrust_level = \'untrusted\'\n',
+            f"[projects.'{p}']\nmodel = \"x\"\n",
+            f'  [ projects . "{p}" ] # keep header\n  trust_level = "untrusted" # keep setting\n',
+        )
+        for original in cases:
+            with self.subTest(original=original):
+                text = original + ('\n[projects."/unrelated"]\ntrust_level = "untrusted"\n' if original.endswith("\n") else "")
+                expected = tomllib.loads(text)
+                expected["projects"][p]["trust_level"] = "trusted"
+                updated = self.trust._codex(text, [p])
+                self.assertEqual(tomllib.loads(updated), expected)
+                self.assertEqual(self.trust._codex(updated, [p]), updated)
+                if "# keep" in text:
+                    self.assertIn("# keep header", updated)
+                    self.assertIn("# keep setting", updated)
+
+    def test_codex_unsupported_layout_is_never_written(self):
+        p = "/private/tmp/agent-offload/.lanes/a"
+        cfg = self.dir / "config.toml"
+        original = f'projects = {{ "{p}" = {{ trust_level = "untrusted" }} }}\n'
+        cfg.write_text(original)
+        with self.assertRaisesRegex(ValueError, "unsupported Codex project table"):
+            self.trust.ensure("codex", Path(p))
+        self.assertEqual(cfg.read_text(), original)
 
 
 class Validation(unittest.TestCase):
@@ -384,6 +572,34 @@ class Preflight(unittest.TestCase):
         stage_escape.write_text("Proof target: ../../etc/hosts\n")
         with self.assertRaisesRegex(validate.PacketError, "inside BASE"):
             validate.preflight(self.base)
+
+    def test_unstaged_proof_target_is_refused(self):
+        stage(self.base)
+        (self.base / "tail.txt").write_text(TOKEN + "\n")
+        (self.base / "PACKET.md").write_text("Proof target: tail.txt\n")
+        with self.assertRaisesRegex(validate.PacketError, "not staged"):
+            validate.preflight(self.base)
+
+    def test_absolute_proof_target_is_refused(self):
+        stage(self.base)
+        target = self.base / "evidence" / "manifest-tail.txt"
+        (self.base / "PACKET.md").write_text(f"Proof target: {target}\n")
+        with self.assertRaisesRegex(validate.PacketError, "BASE-relative"):
+            validate.preflight(self.base)
+
+    def test_accepted_proof_targets_reach_the_workspace(self):
+        from types import SimpleNamespace
+        from xcheck.lane import _stage
+        for index, target in enumerate(("evidence/manifest-tail.txt", "PACKET.md", "PROMPT.md")):
+            with self.subTest(target=target):
+                base, work = self.base / str(index), self.base / f"work-{index}"
+                stage(base)
+                (base / "PACKET.md").write_text(f"Proof target: {target}\n")
+                path = base / target
+                path.write_text(path.read_text() + "\n" + TOKEN + "\n")
+                contract = validate.preflight(base)
+                _stage(SimpleNamespace(base=base), work)
+                self.assertEqual(validate.last_line((work / contract.proof_target).read_text()), contract.token)
 
 
 class EndToEnd(unittest.TestCase):
@@ -463,6 +679,25 @@ class EndToEnd(unittest.TestCase):
                         "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("must not launch", p.stderr)
+
+    def test_invalid_launch_options_are_refused_without_consuming_base(self):
+        cases = (
+            (("--lanes", ","), "at least one peer"),
+            (("--cap", "0"), "positive seconds"),
+            (("--cap", "-1"), "positive seconds"),
+            (("--idle", "0"), "positive seconds"),
+            (("--idle", "-1"), "positive seconds"),
+            (("--force-lane", "not-selected"), "unselected lanes"),
+        )
+        for extra, reason in cases:
+            with self.subTest(extra=extra):
+                base = self.second_base()
+                result = self.xcheck("run", "--base", str(base), "--orch", "other", "--mode", "headless",
+                                     "--skip-capacity", "--lanes", "codex:gpt-6-sol:high", *extra)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertFalse((base / ".launched").exists())
+                self.assertFalse((base / "lanes").exists())
 
     def test_echoed_quota_words_in_an_answer_are_not_a_quota_death(self):
         rows = self.run_lanes("echo402")
@@ -596,6 +831,21 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse((other / "lanes" / "codex-gpt-6-sol-high" / "exit.json").exists())
         os.kill(pids["harness"], signal.SIGKILL)  # the orphan is gone: the pool frees
         self.assertEqual(self.lane_exit(other, "codex-gpt-6-sol-high")["status"], "done")
+
+    def test_tui_answer_closes_background_group_before_releasing_pool(self):
+        from xcheck import pools
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
+                        "--lanes", "codex:gpt-6-sol:high", "--mode", "headless",
+                        "--view", "tui", "--skip-capacity", mode="bg-child")
+        work = self.root / ".lanes" / "codex-gpt-6-sol-high"
+        child = int((work / "background-child.pid").read_text())
+        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        self.assertEqual(self.lane_exit(self.base, "codex-gpt-6-sol-high")["status"], "done")
+        held = pools.acquire(self.root, "codex", "next-run", time.time() + 1)
+        self.assertIsNotNone(held, "a surviving background child kept the quota lock")
+        if held:
+            held.release()
 
     def run_tui(self, mode, extra=()):
         lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high"

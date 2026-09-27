@@ -40,9 +40,13 @@ def preflight(base: Path) -> Contract:
         raise PacketError(f"staged files must not be symlinks: {', '.join(links[:5])}")
     p_lines = packet.read_text(encoding="utf-8").splitlines()
     target = _one(p_lines, r"^Proof target:\s*(\S+)\s*$", "'Proof target: <path>'", "PACKET.md").group(1)
+    if Path(target).is_absolute():
+        raise PacketError(f"proof target {target!r} must be BASE-relative")
     resolved = (base / target).resolve()
     if not resolved.is_relative_to(base.resolve()) or not resolved.is_file():
         raise PacketError(f"proof target {target!r} must be an existing file inside BASE")
+    if resolved not in {packet.resolve(), prompt.resolve()} and not resolved.is_relative_to((base / "evidence").resolve()):
+        raise PacketError(f"proof target {target!r} is not staged: use PACKET.md, PROMPT.md or evidence/")
     try:
         token = last_line(resolved.read_text(encoding="utf-8"))
     except UnicodeDecodeError:

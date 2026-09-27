@@ -58,6 +58,16 @@ if tui:
     elif mode == "answer-exit":  # agy: writes its answer, then its app exits by itself
         (target / "ANSWER.md").write_text(answer_ok)
         sys.exit(0)
+    elif mode == "bg-child":
+        child = os.fork()
+        if child == 0:
+            import signal
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            while True:
+                time.sleep(1)
+        (target / "background-child.pid").write_text(str(child))
+        (target / "ANSWER.md").write_text(answer_ok)
     elif mode != "hang":
         (target / "ANSWER.md").write_text(answer or "")
     time.sleep(60)

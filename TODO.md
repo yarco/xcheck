@@ -51,7 +51,55 @@ discover -s tests` (~100 s; Hypothesis is the only test dependency).
 10. Final goal: the most elegant long-term design, simpler but not basic,
     nuanced where it matters, researched (online too) for inspiration.
 
-## Current state (HEAD 22b8db1, 59 tests green)
+## Current state (2026-09-27 continuation)
+
+P0-1 through P0-8 are complete. The installed copy was refreshed after the
+adapter changes, and `xcheck doctor` passes. The full suite passes 66 tests.
+The operator approved removal of nine old per-run Codex trust entries and 44
+old per-run Agy entries; stable `/.lanes/` entries were retained.
+
+The operator subsequently requested Bash for Grok in both views and all
+connected MCP tools for every peer. Grok now has Bash under its `read-only`
+OS sandbox and may write disposable scratch files in its own workspace. All
+connected MCP tools are exposed in Codex, Claude, Grok, and Agy lanes. The
+operator explicitly asked us not to check MCP pricing. The reviewer prompt
+forbids external actions, but MCP tools are not mechanically restricted.
+
+Live Grok MCP smoke: `/tmp/agent-offload/xcheck-v2-mcp-grok-20260927/` ended
+`done`; `qmd__query` was called through MCP with no approval prompt. The
+first Codex/Agy probe exposed a bad probe prompt and qmd absent from Agy.
+The corrected probe is `/tmp/agent-offload/xcheck-v2-mcp-connected-20260927/`:
+Codex and Agy both called `semble.search` and ended `done` without approvals.
+
+Continuation verification: `/tmp/agent-offload/xcheck-v2-rule-smoke-20260927/`,
+roster `claude-sonnet-5-low` (Codex is the orchestrator, so no Codex peer).
+From sandboxed `codex exec`, run absolute
+`/Users/yarco/.local/bin/xcheck run --base /tmp/agent-offload/xcheck-v2-rule-smoke-20260927 --orch codex --lanes claude:claude-sonnet-5:low --mode headless --skip-capacity --detach`,
+then absolute `xcheck wait` with the same BASE and `--timeout 120`.
+The first launch had no spend because the model appended `.` to both commands;
+the corrected run launched, but the peer copied the entire proof file and was
+`invalid`. Retry with an exact one-line proof prompt in
+`/tmp/agent-offload/xcheck-v2-rule-smoke-2-20260927/`, same roster and commands
+with the new BASE.
+
+Denial matrix, controlled harness test (`--orch other` permits the Codex
+adapter; these are not independent review peers):
+
+- `/tmp/agent-offload/xcheck-v2-denial-stream-20260927/`:
+  `xcheck run --base /tmp/agent-offload/xcheck-v2-denial-stream-20260927 --orch other --lanes codex:gpt-6-sol:high,claude:claude-sonnet-5:high,grok:grok-4.7:low --mode headless --view stream --cap 600`
+- `/tmp/agent-offload/xcheck-v2-denial-tui-20260927/`:
+  `xcheck run --base /tmp/agent-offload/xcheck-v2-denial-tui-20260927 --orch other --lanes codex:gpt-6-sol:high,claude:claude-sonnet-5:high,grok:grok-4.7:low,agy:gemini-3.8-flash-high --mode headless --view tui --cap 600`
+
+The first matrix packet accidentally specified `RESULT_COMPLETE.` with a
+period, making the Codex answers invalid. Fresh packet retries, Codex only:
+`/tmp/agent-offload/xcheck-v2-denial-codex-{stream,tui}-retry-20260927/`;
+for each BASE: `xcheck run --base BASE --orch other --lanes
+codex:gpt-6-sol:high --mode headless --view <view> --cap 300`.
+
+Grok Bash adapter smokes (controlled `--orch other`, one Grok lane each):
+`/tmp/agent-offload/xcheck-v2-grok-bash-{stream,tui}-20260927/`;
+for each BASE: `xcheck run --base BASE --orch other --lanes
+grok:grok-4.7:low --mode headless --view <view> --cap 300`.
 
 Verified live on this machine today: headless stream runs (all 4 harnesses),
 Herdr TUI runs of all six default lanes with ZERO manual input (trust recorded
@@ -59,11 +107,11 @@ automatically, no dialog on any screen), a sandboxed `codex exec` orchestrating
 real headless and Herdr runs through the Codex rule with no escalation,
 pool-lock queueing across runs, crash settlement.
 
-**The installed copy is STALE** (published before commits 042f84c/22b8db1).
-First action: `python3 bin/xcheck install`, then `xcheck doctor` (expect all
-`ok`; if `grok` fails on a flag, see P0-5).
+Claude was below the 10 % quota reserve during the denial matrix, so its
+stream and TUI denial cases remain unverified. Do not force it without the
+operator's say-so. Real quota/auth streams also remain uncaptured.
 
-## P0 — finish before any real use
+## P0 — completed fixes (historical checklist)
 
 1. **`xcheck/validate.py`: accept `*` list bullets on the PROOF line.**
    `_proof` and `_substantive` use `(?:[-+]\s+)?`; `_heading_re` uses
@@ -117,12 +165,13 @@ First action: `python3 bin/xcheck install`, then `xcheck doctor` (expect all
      its lock; watchdog from `run.epoch`.
    - macOS fact: `killpg` returns EPERM for an exited-unreaped leader and for
      groups with an unsignallable member (`files.signal_group` handles it).
-8. **Stale trust entries** (dead per-run paths) in `~/.codex/config.toml`
+8. **Stale trust entries** (old per-run paths) in `~/.codex/config.toml`
    (`[projects."/…/agent-offload/<run>/…"]` blocks, not `/.lanes/`) and in
    `~/.gemini/antigravity-cli/settings.json` `trustedWorkspaces` (44 entries,
    including a bare `/tmp/agent-offload`). They were written by v1 helpers and
-   two manual Enter presses. Ask the operator before editing their configs;
-   keep every `/.lanes/` entry.
+   two manual Enter presses. The operator approved removal; only those
+   entries were removed, and every `/.lanes/` entry was kept. The old per-run
+   directories still existed at cleanup time, contrary to the earlier note.
 
 ## P1 — prove there are no other "dropped safeguard" failures
 

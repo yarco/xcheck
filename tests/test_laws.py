@@ -18,6 +18,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import tomllib
 import unittest
 
 os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = str(pathlib.Path(tempfile.gettempdir()) / "xcheck-hypothesis")
@@ -25,7 +26,7 @@ os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = str(pathlib.Path(tempfile.gettempdi
 from hypothesis import given, settings, strategies as st  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from xcheck import adapters, validate  # noqa: E402
+from xcheck import adapters, trust, validate  # noqa: E402
 
 SETTINGS = settings(database=None, deadline=None, max_examples=200)
 
@@ -75,6 +76,7 @@ class AnswerContractLaws(unittest.TestCase):
         removed. Catches: an always-done validator, and checks that blame the
         wrong part (a missing body reported as a missing heading)."""
         parts, contract = a
+        parts = parts.copy()
         parts[missing] = None
         status, problems = validate.check(render(parts), contract)
         expected = {
@@ -91,6 +93,7 @@ class AnswerContractLaws(unittest.TestCase):
         """Property: altering one character of the proof token is caught.
         Oracle: the contract token. Catches: substring or prefix matching."""
         parts, contract = a
+        parts = parts.copy()
         token = contract.token
         i = data.draw(st.integers(len("MANIFEST_TAIL_TOKEN: "), len(token) - 1))
         swapped = token[:i] + ("0" if token[i] != "0" else "1") + token[i + 1:]
@@ -116,6 +119,7 @@ class AnswerContractLaws(unittest.TestCase):
         whatever precedes it. Catches: letting a complete-looking body override
         the peer's own declaration."""
         parts, contract = a
+        parts = parts.copy()
         parts["marker"] = validate.INVALID
         self.assertEqual(validate.check(render(parts), contract)[0], "invalid")
 
@@ -180,6 +184,42 @@ class GrokReaderLaws(unittest.TestCase):
             events += [{"type": "text", "data": n}, {"type": "usage"}]
         events += [{"type": "tool_call", "toolName": "read_file", "rawInput": {}}, {"type": "end"}]
         self.assertEqual(feed_grok(events), "")
+
+
+@st.composite
+def codex_configs(draw):
+    suffix = draw(st.from_regex(r"[a-z][a-z0-9_-]{0,30}", fullmatch=True))
+    path = "/private/tmp/agent-offload/.lanes/" + suffix
+    quote = draw(st.sampled_from(['"', "'"]))
+    space = draw(st.sampled_from(["", " ", "\t"]))
+    newline = draw(st.sampled_from(["\n", "\r\n"]))
+    header = f"{space}[{space}projects{space}.{space}{quote}{path}{quote}{space}]{space}"
+    state = draw(st.sampled_from([None, "trusted", "untrusted"]))
+    lines = [header]
+    if state is not None:
+        value_quote = draw(st.sampled_from(['"', "'"]))
+        lines.append(f"{space}trust_level{space}={space}{value_quote}{state}{value_quote}")
+    if draw(st.booleans()):
+        lines.append('model = "keep-me"')
+    text = newline.join(lines) + (newline if draw(st.booleans()) else "")
+    return text, path
+
+
+class CodexTrustLaws(unittest.TestCase):
+    @given(codex_configs())
+    @SETTINGS
+    def test_only_the_named_project_trust_changes(self, config):
+        text, path = config
+        expected = tomllib.loads(text)
+        expected["projects"][path]["trust_level"] = "trusted"
+        self.assertEqual(tomllib.loads(trust._codex(text, [path])), expected)
+
+    @given(codex_configs())
+    @SETTINGS
+    def test_repeating_the_same_trust_update_is_byte_identical(self, config):
+        text, path = config
+        once = trust._codex(text, [path])
+        self.assertEqual(trust._codex(once, [path]), once)
 
 
 if __name__ == "__main__":

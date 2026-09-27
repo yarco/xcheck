@@ -39,7 +39,10 @@ def caller() -> dict | None:
         return None
     try:
         layout = _herdr("pane", "layout", "--pane", pane)["layout"]
-    except (HerdrError, KeyError, json.JSONDecodeError):
+    except (HerdrError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(layout, dict) or not all(isinstance(layout.get(k), str) and layout[k]
+                                               for k in ("tab_id", "workspace_id")):
         return None
     area = layout.get("area", {})
     if area.get("width", 0) < MIN_WIDTH or area.get("height", 0) < MIN_HEIGHT:
@@ -83,13 +86,14 @@ def _split(target: str, direction: str, ratio: float, cwd: str) -> str:
 
 def close(ctx: dict, pane: str) -> bool:
     """Close a pane this run created, only if it is still in the caller's tab."""
-    if pane == ctx["pane"]:
+    if pane == ctx.get("pane") or not all(isinstance(ctx.get(k), str) and ctx[k]
+                                          for k in ("pane", "tab", "workspace")):
         return False  # never the orchestrator's own pane
     try:
         info = _herdr("pane", "get", pane)["pane"]
-    except (HerdrError, KeyError):
-        return True  # already gone (or unreadable): nothing this run can close
-    if info.get("tab_id") != ctx["tab"] or info.get("workspace_id") != ctx["workspace"]:
+    except (HerdrError, KeyError, TypeError, json.JSONDecodeError):
+        return False  # already gone (or unreadable): nothing this run can close
+    if not isinstance(info, dict) or info.get("tab_id") != ctx["tab"] or info.get("workspace_id") != ctx["workspace"]:
         return False
     try:
         _herdr("pane", "close", pane)

@@ -67,6 +67,13 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
         raise RunError(f"BASE must live under {ROOT}")
+    if not lanes:
+        raise RunError("select at least one peer lane")
+    if cap <= 0 or (idle is not None and idle <= 0):
+        raise RunError("--cap and --idle must be positive seconds")
+    unknown = force_lanes - {lane.name for lane in lanes}
+    if unknown:
+        raise RunError(f"--force-lane names unselected lanes: {', '.join(sorted(unknown))}")
     contract = validate.preflight(base)
     names = [l.name for l in lanes]
     if len(set(names)) != len(names):
@@ -207,7 +214,7 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
 
-    closed: set[str] = set()
+    attempted_closes: set[str] = set()
     stopping: dict[str, float] = {}
     pending = set(run.lanes)
     while pending:
@@ -239,13 +246,14 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
                 runner = _runner_pid(run, name)
                 if name not in stopping:
                     stopping[name] = time.time()
+                    atomic_write(run.lane_dir(name) / "watchdog", "cap exceeded\n")
                     _signal(runner, signal.SIGTERM)
                 elif time.time() - stopping[name] > 60:
                     _signal(runner, signal.SIGKILL)
-        _close_finished(run, closed)
+        _close_finished(run, attempted_closes)
         if pending:
             time.sleep(1)
-    _close_finished(run, closed, linger=False)
+    _close_finished(run, attempted_closes, linger=False)
     status = render_status(run)
     if interrupted:
         print(status + f"xcheck: supervisor interrupted ({interrupted[0]}); "
@@ -298,6 +306,8 @@ def _settle_dead_runner(run: Run, name: str) -> None:
     if harness and any(re.search(re.escape(str(p)) + r"(?=[/\s'\"]|$)", cmd) for p in (d, workspace(name))):
         if end_group(harness):
             note += "; its harness was still running and was stopped"
+    elif harness and not cmd:
+        note += "; harness identity unverified (exited or process table unreadable)"
     result = run.base / f"RESULT-{name}.md"
     salvaged = fresh_answer(d, workspace(name))
     if not result.exists() and salvaged:
@@ -306,7 +316,8 @@ def _settle_dead_runner(run: Run, name: str) -> None:
         status, problems = validate.check(result.read_text(errors="replace"), run.contract)
         _write_exit(run, name, status, f"{note}; published answer: {'; '.join(problems) or 'valid'}")
     else:
-        _write_exit(run, name, "failed", note)
+        status = "timeout" if (d / "watchdog").exists() else "failed"
+        _write_exit(run, name, status, note)
 
 
 def _signal(pid, sig: int) -> None:
@@ -324,17 +335,22 @@ def _write_exit(run: Run, name: str, status: str, reason: str) -> None:
     }, indent=2))
 
 
-def _close_finished(run: Run, closed: set[str], linger: bool = True) -> None:
+def _close_finished(run: Run, attempted: set[str], linger: bool = True) -> None:
     if run.mode != "herdr":
         return
     for name, pane in run.panes.items():
         path = _exit_path(run, name)
-        if name in closed or not path.exists():
+        if name in attempted or not path.exists():
             continue
         if linger and time.time() - path.stat().st_mtime < LINGER:
             continue
+        record = json.loads(path.read_text())
         if herdr.close(run.herdr, pane):
-            closed.add(name)
+            record.pop("cleanup_pending", None)
+        else:
+            record["cleanup_pending"] = f"cleanup pending: pane {pane} not confirmed closed; verify its tab/workspace before acting"
+        atomic_write(path, json.dumps(record, indent=2))
+        attempted.add(name)
 
 
 # ------------------------------------------------------------------ status
@@ -355,7 +371,8 @@ def render_status(run: Run) -> str:
              f"- mode `{run.mode}` · view `{run.view}` · orchestrator `{run.orch}` · started {run.started}", "",
              "| lane | status | seconds | note |", "|---|---|---|---|"]
     for r in rows:
-        note = (r.get("reason") or "").replace("|", "\\|").replace("\n", " ")
+        note = "; ".join(filter(None, (r.get("reason"), r.get("cleanup_pending"))))
+        note = note.replace("|", "\\|").replace("\n", " ")
         lines.append(f"| {r['lane']} | {r['status']} | {r.get('seconds', '')} | {note} |")
     text = "\n".join(lines) + "\n"
     atomic_write(run.base / "STATUS.md", text)

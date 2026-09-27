@@ -26,7 +26,7 @@ import tty
 from pathlib import Path
 
 from . import validate
-from .files import signal_group
+from .files import end_group, signal_group
 
 STABLE = 3.0
 LOG_LIMIT = 8 * 1024 * 1024
@@ -94,16 +94,19 @@ def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
                 status, reason = "timeout", f"exceeded the {cap}s cap"
                 break
     finally:
-        if pid:
-            code = _end(pid)
-        else:
-            signal_group(leader, signal.SIGTERM)  # leftovers of an app that exited
-        log.close()
-        signal.signal(signal.SIGWINCH, previous)
-        if saved is not None:
-            termios.tcsetattr(0, termios.TCSADRAIN, saved)
-        os.write(1, RESET)
-        os.close(fd)
+        try:
+            if pid:
+                code = _end(pid)
+        finally:
+            # A background child may outlive the TUI leader and inherit the
+            # pool lock. Settle the entire group before the caller releases it.
+            end_group(leader)
+            log.close()
+            signal.signal(signal.SIGWINCH, previous)
+            if saved is not None:
+                termios.tcsetattr(0, termios.TCSADRAIN, saved)
+            os.write(1, RESET)
+            os.close(fd)
     text = answer.read_text(encoding="utf-8", errors="replace") if answer.exists() else ""
     return status, reason, code, text
 

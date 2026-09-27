@@ -56,6 +56,12 @@ class _Stop(Exception):
     pass
 
 
+def _stop_status(run: Run, name: str, stop: _Stop) -> tuple[str, str]:
+    if (run.lane_dir(name) / "watchdog").exists():
+        return "timeout", f"supervisor watchdog stopped runner after cap ({run.cap}s)"
+    return "interrupted", f"runner received {stop}"
+
+
 def _raise_stop(signum, _frame):
     raise _Stop(signal.Signals(signum).name)
 
@@ -67,8 +73,9 @@ def run_lane(base: Path, name: str) -> int:
     except _Stop as stop:  # a signal outside the guarded spans still ends with a record
         run = Run.load(base)
         if not (run.lane_dir(name) / "exit.json").exists():
+            status, reason = _stop_status(run, name, stop)
             atomic_write(run.lane_dir(name) / "exit.json", json.dumps({
-                "lane": name, "status": "interrupted", "reason": f"runner received {stop}",
+                "lane": name, "status": status, "reason": reason,
                 "exit_code": None, "error": None, "ended": now(), "stderr_tail": []}, indent=2))
         return 130
     except Exception as e:  # a runner bug must not look like a silent death
@@ -181,7 +188,7 @@ def _run_lane(base: Path, name: str) -> int:
             if pending:
                 _consume(reader, pending)
         except _Stop as stop:
-            status, reason = "interrupted", f"runner received {stop}"
+            status, reason = _stop_status(run, name, stop)
             _kill(proc)
         code = proc.wait()
         _reap_group(proc.pid)  # MCP servers, language servers, other leftovers of the lane
@@ -227,7 +234,8 @@ def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log:
         status, reason, code, text = tui.run(spec.argv, lane_env(spec), work, answer, screen,
                                              idle, run.cap, spawned)
     except _Stop as stop:
-        status, reason, code = "interrupted", f"runner received {stop}", None
+        status, reason = _stop_status(run, name, stop)
+        code = None
         text = answer.read_text(encoding="utf-8", errors="replace") if answer.exists() else ""
     finally:
         held.release()
