@@ -1,6 +1,6 @@
 # X-Check v2 — build tracker
 
-## Design cross-check (v1 protocol, Herdr wall) — launched 2026-09-27
+## Design cross-check (v1 protocol, Herdr wall) — 2026-09-27, closed
 
 - BASE: `/tmp/agent-offload/xcheck-v2-design-20260927`
 - Target: v1 at 596877f2dd57e832dad4b06186599853bf2efe3b + uncommitted.diff (staged working tree)
@@ -16,4 +16,10 @@
 
 - Done: adapters (4 harnesses, flags verified by `xcheck doctor` + real smoke), lane runner, headless + Herdr placement, validation, capacity (v1 helper minus runtime hook), status, `wait`, tests (25, fake harness + real stream fixtures).
 - Real headless smoke: codex/claude/grok/agy all `done` on a 3-line packet.
-- Pending: Herdr-mode live smoke (after the v1 design run frees the tab); fold in the design cross-check's findings; swap folders (`Multi-Agent Cross-Check Protocol/` → `x-check-old/`, this repo → `Multi-Agent Cross-Check Protocol/`); update vault AGENTS.md pointer.
+- Done since: design cross-check returned (5/5 `done`, adjudicated in its BASE `CONSENSUS.md`), findings folded in, Herdr-mode live smoke passed, Agy read reach re-measured, folders swapped (v1 → `../x-check-old/`, runtime re-installed under `~/.agents/xcheck-runtimes/x-check-old/`), vault AGENTS.md repointed.
+
+## Open (operator decisions)
+
+- Web in peers: default `packet` or `live`.
+- Herdr wall: rendered event stream (current) or real vendor TUIs.
+- Codex orchestrator support in v2 (today: `../x-check-old/`).

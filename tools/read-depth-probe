@@ -29,7 +29,7 @@ import re
 import secrets
 import sys
 
-V1 = pathlib.Path(__file__).resolve().parent.parent.parent / "Multi-Agent Cross-Check Protocol"
+V1 = pathlib.Path(__file__).resolve().parent.parent.parent / "x-check-old"
 FILLER = [
     "Multi-Agent Cross-Check Protocol.md", "bin/herdr-host", "tests/test_herdr_host.py",
     "bin/xcheck-launch", "tests/test_agent_capacity.py", "bin/agent-capacity", "Herdr Host.md",
