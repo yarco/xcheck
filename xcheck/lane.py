@@ -43,13 +43,17 @@ TAIL_LINES = 40
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE")  # an opencode orchestrator's session; any config override breaks the free tier
 SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
-               "GROK_SANDBOX"}  # the operator's default profile; the adapter picks the lane's
+               "GROK_SANDBOX",  # the operator's default profile; the adapter picks the lane's
+               "OLDPWD"}
 
 
-def lane_env(spec: adapters.Launch) -> dict[str, str]:
+def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_NAMES
            and not k.endswith("_API_KEY")}  # no lane uses API keys; any would bill
+    # The inherited PWD names the orchestrator's directory, and opencode roots
+    # its file tools and shell there instead of at its real cwd.
+    env["PWD"] = str(work)
     env.update(spec.env_set)
     return env
 
@@ -158,7 +162,7 @@ def _run_lane(base: Path, name: str) -> int:
         return _run_tui(run, name, lane, d, work, message, log, started, reader, held, idle)
 
     spec = adapters.launch(lane, work, message, final, log, run.web)
-    env = lane_env(spec)
+    env = lane_env(spec, work)
     status, reason, code = None, "", None
     stdin = open(spec.stdin, "rb") if spec.stdin else subprocess.DEVNULL
     with open(stream_path, "ab") as stream, open(err_path, "ab") as err:
@@ -248,7 +252,7 @@ def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log:
         atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": pid}))
 
     try:
-        status, reason, code, text = tui.run(spec.argv, lane_env(spec), work, answer, screen,
+        status, reason, code, text = tui.run(spec.argv, lane_env(spec, work), work, answer, screen,
                                              idle, run.cap, spawned)
     except _Stop as stop:
         status, reason = _stop_status(stop, run.cap)

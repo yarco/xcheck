@@ -66,7 +66,7 @@ The orchestrator's harness is removed automatically. A lane name is its provenan
 
 Opt-in only (`--add`; `adapters.OPT_IN`, pins checked by `doctor`): `agy:<third-party-selector>` (expensive, and correlated with the Sonnet lane), and `opencode:muse-spark-1.3-contributor-free` (Meta's Muse Spark 1.3 through OpenCode Zen's free tier). The Muse Contributor terms let Meta train on the prompts and on every file the lane reads, so add it only to a packet the operator is content to share: never client code, credentials, personal or unreleased material. Opencode lanes take Zen free models only (the `-free` suffix); paid Zen balance has no meter. Never: `agy:gpt-oss-120b-medium`; `agy models` lists it, but its agent loop aborts with no answer.
 
-Gemini Pro and Flash are different evidence: keep Pro even when Flash also ends `done`. `done` certifies the output contract, not review quality. Same-family lanes (two Claude-family lanes, or `agy-<third-party-model>` under a Claude orchestrator) are correlated. Returns diminish after about three strong, independent peers; add a lane for a distinct capability or failure hypothesis, not for volume. The roster is fixed at launch; add a reviewer in a fresh BASE.
+Gemini Pro and Flash are different evidence: Flash is the ratifying lane (it tends to agree with the packet's claims, false ones included) and Pro is the one that disagrees, so keep Pro even when Flash also ends `done`. `done` certifies the output contract, not review quality. Same-family lanes (two Claude-family lanes, or `agy-<third-party-model>` under a Claude orchestrator) are correlated. Returns diminish after about three strong, independent peers; add a lane for a distinct capability or failure hypothesis, not for volume. The roster is fixed at launch; add a reviewer in a fresh BASE.
 
 ## Packet
 
@@ -111,7 +111,7 @@ Final line, alone: RESULT_COMPLETE
 If you cannot do the review, make the final line RESULT_INVALID instead.
 ```
 
-The markers are literal lines: no period, code fence, quote or explanation after `RESULT_COMPLETE` / `RESULT_INVALID`. PROOF is `6) PROOF: <token>` or `6) PROOF` with the token alone on the next line (bold, bullets or backticks around either are fine); anything else after `PROOF:` is compared as the token and fails, and so does pasting the whole proof file. An answer also needs review text beyond the heading, PROOF and marker. `tests/test_laws.py` states the whole grammar as properties.
+The markers are literal lines: no period, code fence, quote or explanation after `RESULT_COMPLETE` / `RESULT_INVALID`. PROOF is `6) PROOF: <token>`, or a bare `6) PROOF` heading followed by the token alone or by a `PROOF: <token>` line (bold, bullets or backticks around either are fine); anything else after `PROOF:` is compared as the token and fails, and so does pasting the whole proof file. An answer also needs review text beyond the heading, PROOF and marker. `tests/test_laws.py` states the whole grammar as properties.
 
 **What every lane is told** (`run.MESSAGE`): the owner convened the review; read `PACKET.md` then `PROMPT.md` (PROMPT decides format); work from the staged directory; connected MCP tools are available, external actions (sending messages, changing records) are not; nobody answers questions mid-review. Codex, Claude and Agy use tools that read (plus web in live mode); Grok and opencode may also run Bash and write disposable scratch inside their own workspace, never the staged files. Stream lanes print the answer as their final message; app lanes write only `ANSWER.md`, in one complete write.
 
@@ -179,7 +179,7 @@ Runner and supervisor liveness is an exclusive lock on their own `alive` file, r
 
 **Herdr** (0.9.1). `pane layout --pane <id>` gives tab size; `pane split --pane <id> --direction right|down --ratio <share kept> --cwd <dir> --no-focus` returns `.result.pane.pane_id`; `pane run <id> <command>` types into the pane's shell (typeahead is buffered, so no readiness wait is needed); a pane closes when its process exits.
 
-**Lane environment.** The orchestrator exports its session identity into every child shell (`CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, `CLAUDE_EFFORT`, `CLAUDE_PLUGIN_*`, `CODEX_COMPANION_*`, `CODEX_SANDBOX*`, `OPENCODE*`, `HERDR_*`). A peer that inherits them becomes a nested session of the orchestrator, runs at its effort, or can drive the operator's Herdr. The runner removes them, `GROK_SANDBOX`, and every `*_API_KEY` (lanes use subscription auth; a key would bill instead). Harmless preferences such as `GROK_TELEMETRY_*` pass through. Re-verify: `env` in the orchestrator's shell, then the fake-harness env test.
+**Lane environment.** The orchestrator exports its session identity into every child shell (`CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, `CLAUDE_EFFORT`, `CLAUDE_PLUGIN_*`, `CODEX_COMPANION_*`, `CODEX_SANDBOX*`, `OPENCODE*`, `HERDR_*`). A peer that inherits them becomes a nested session of the orchestrator, runs at its effort, or can drive the operator's Herdr. The runner removes them, `GROK_SANDBOX`, `OLDPWD`, and every `*_API_KEY` (lanes use subscription auth; a key would bill instead), and sets `PWD` to the lane workspace: opencode roots its file tools and shell at `PWD`, not at its real working directory, so an inherited `PWD` points it at the orchestrator's directory. Harmless preferences such as `GROK_TELEMETRY_*` pass through. Re-verify: `env` in the orchestrator's shell, then the fake-harness env test.
 
 **Operator rules reach peers.** Codex lanes load `~/.codex/AGENTS.md`; Grok loads `~/.agents/rules` through `extra_rule_dirs` (a `GROK_CONFIG` overlay does not clear it). Relocating `CODEX_HOME` / `GROK_HOME` / Agy's home to isolate them would split the auth files and risk rotated credentials, so the lane message states the review task directly and scopes those rules to it. Re-verify by asking a low-effort lane to quote the global instructions it received.
 
@@ -212,12 +212,13 @@ Runner and supervisor liveness is an exclusive lock on their own `alive` file, r
 - A Herdr failure after a split but before `pane run` leaves a pane with an idle shell; close it by hand. (A failed `exec` makes zsh exit, so that pane closes itself.) Either way the lane is settled `failed: lane runner never started` after 90 s.
 - `--cap` ends a lane; there is no late harvest. Rerun in a fresh BASE.
 - If a runner died and `ps` is unavailable, `wait` cannot confirm the orphan's identity and leaves it alone, noting that in the reason; its pool stays held until the orphan exits. Never kill a recorded PID on a guess.
+- A full roster starts many MCP servers in the same second, which can exceed Keenable's 10 requests/s limit (HTTP 429); the lane that loses the race lacks that server for its session and keeps its built-in web tools.
 - Claude's app view sends its first turn before MCP servers finish connecting; a slow server (qmd under load took 25 s) can be missing from a short review. The stream view waits for connections.
-- Real quota and auth error streams have not been captured; invalid-model fixtures prove parser shape only. Keep the next real one as a fixture.
+- Codex's quota error is captured (`tests/fixtures/codex-quota.jsonl`). Claude, Grok, Agy and opencode quota errors, and every auth error stream, are not; their invalid-model fixtures prove parser shape only. Keep the next real one as a fixture.
 
 ## Deliberately absent
 
-Legacy (archived read-only in `../x-check-old/`, never a launcher) solved problems this design does not have. Do not re-add these without a failure that happened within scope:
+Legacy (archived read-only in `../x-check-legacy/`, never a launcher) solved problems this design does not have. Do not re-add these without a failure that happened within scope:
 
 | Legacy mechanism | Why it is not needed |
 |---|---|
@@ -252,7 +253,7 @@ Proposals already rejected, with the reason:
 1. Re-read `STATUS.json` and every `RESULT-*.md`, `invalid` ones included, right before merging. A truncated draft is a lead only; never manufacture a peer's final position from it.
 2. Check each concrete claim's **premises** against the real tree before its reasoning. The ratifying lane fails at the premise: it can reject a correct fix because it misread code it was shown. Absence-of-code, wrong-path and packet-claim findings are packet suspects: open the real file first.
 3. Never tally reviewers. Agreement counts only when premises were derived independently; same-family lanes are correlated. Volume is not quality, and a small delta is no reason to drop the expensive lane.
-4. Judge each repair separately from its diagnosis: a correct diagnosis does not make its repair correct. The verification must be able to fail while the defect is present; two checks that read the same state are one signal. For stored state, test that omission preserves the last value unless the contract explicitly calls for deletion.
+4. Judge each repair separately from its diagnosis: a correct diagnosis does not make its repair correct. The verification must be able to fail while the defect is present; two checks that read the same state are one signal. When no independent check exists, record the limitation or ask the operator to check; never claim completeness. For stored state, test that omission preserves the last value unless the contract explicitly calls for deletion.
 5. Write `CONSENSUS.md`: one decision line; a confirmed / rejected / uncertain table with lane provenance; for each confirmed finding the selected repair, its verification, and why the host chose it when it differs from the peer's; lanes with no usable answer, never counted as disagreement. If no peer produced substantive evidence, say the review is unverified and why; relaunching an unchanged packet is not progress.
 6. Review applied fixes in a fresh round scoped to the delta and the contracts it touches, with the decision lineage staged. Stop when no admitted finding remains.
 

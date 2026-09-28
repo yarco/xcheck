@@ -72,6 +72,7 @@ def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
                     log.truncate(0)
                     log.seek(0)
                 log.write(data)
+                log.flush()  # on disk now: a killed runner leaves its last screen
                 last = time.time()
             if interactive and 0 in ready:
                 data = os.read(0, 4096)

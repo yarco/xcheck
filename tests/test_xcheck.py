@@ -88,6 +88,9 @@ class Readers(unittest.TestCase):
 
     def test_errors_are_structured(self):
         self.assertIn("not supported", read_fixture("codex", "codex-error.jsonl").error)
+        quota = read_fixture("codex", "codex-quota.jsonl")  # a real exhausted 5 h window
+        self.assertIn("hit your usage limit", quota.error)
+        self.assertEqual(quota.text, "")
         claude = read_fixture("claude", "claude-error.jsonl")
         self.assertIn("issue with the selected model", claude.error)
         self.assertEqual(claude.text, "")  # the error message is not an answer
@@ -933,7 +936,9 @@ class EndToEnd(unittest.TestCase):
                 "ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "HERDR_PANE_ID": "w1:p1",
                 "CODEX_COMPANION_SESSION_ID": "c", "GROK_SANDBOX": "ws"}
         keep = {"GROK_TELEMETRY_ENABLED": "0"}
-        env = {**os.environ, **leak, **keep, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
+        # The orchestrator's directory: opencode roots its tools at PWD, not at its cwd.
+        stale = {"PWD": str(Path.home()), "OLDPWD": str(Path.home())}
+        env = {**os.environ, **leak, **keep, **stale, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
                "CODEX_CONFIG": str(self.root / "codex-config.toml"),
                "AGY_SETTINGS": str(self.root / "agy-settings.json")}
@@ -946,6 +951,10 @@ class EndToEnd(unittest.TestCase):
             seen = json.loads(dump.with_suffix(f".{kind}.json").read_text())
             self.assertFalse(set(leak) & set(seen), f"{kind} saw {set(leak) & set(seen)}")
             self.assertEqual(seen.get("GROK_TELEMETRY_ENABLED"), "0")
+            lane = next(l for l in lanes.split(",") if l.startswith(kind + ":"))
+            work = self.root / ".lanes" / adapters.parse_lane(lane).name
+            self.assertEqual(seen.get("PWD"), str(work), kind)
+            self.assertNotIn("OLDPWD", seen, kind)
 
     def second_base(self):
         other = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
@@ -1080,6 +1089,21 @@ class EndToEnd(unittest.TestCase):
         rows = self.run_tui("error", extra=("--idle", "3"))
         self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
         self.assertTrue(any("hit your limit" in l for l in rows["claude-opus-5-5-high"]["stderr_tail"]))
+
+    def test_a_killed_app_runner_leaves_its_screen_on_disk(self):
+        # screen.log is the diagnosis for a runner that died: nothing may sit in a buffer.
+        self.assertEqual(self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
+                                     "--view", "tui", "--skip-capacity", "--lanes", "grok:grok-4.7:xhigh",
+                                     "--detach", mode="hang").returncode, 0)
+        d = self.base / "lanes" / "grok-4.7-xhigh"
+        for _ in range(50):
+            if (d / "pids.json").exists() and json.loads((d / "pids.json").read_text()).get("harness"):
+                break
+            time.sleep(0.1)
+        time.sleep(1)  # the fake app has drawn its first screen
+        os.kill(json.loads((d / "pids.json").read_text())["runner"], signal.SIGKILL)
+        self.assertIn(b"working on the review", (d / "screen.log").read_bytes())
+        self.assertEqual(self.xcheck("wait", "--base", str(self.base), mode="hang").returncode, 0)
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()

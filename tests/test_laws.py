@@ -49,6 +49,7 @@ def answer(draw):
     proof = draw(st.sampled_from([
         f"6) PROOF: {token}", f"6) PROOF\n{token}", f"6) PROOF: `{token}`", f"**6) PROOF:** {token}",
         f"- 6) PROOF: {token}", f"* **6) PROOF:** {token}", f"* 6) PROOF: {token}",
+        f"## 6) PROOF\n\nPROOF: {token}", f"6) PROOF\n**PROOF:** {token}",
     ]))
     parts = {"heading": heading, "body": body, "proof": proof, "marker": validate.COMPLETE}
     return parts, validate.Contract(keyword, "evidence/manifest-tail.txt", token)

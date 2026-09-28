@@ -79,9 +79,12 @@ def _heading_re(keyword: str) -> re.Pattern:
     )
 
 
+PROOF_LINE = re.compile(r"^\s*(?:[-+*]\s+)?(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+)?PROOF(?:[*_]+)?\s*(?::\s*(.*))?$", re.I)
+
+
 def _proof(lines: list[str]) -> str | None:
     for i, line in enumerate(lines):
-        m = re.match(r"^\s*(?:[-+*]\s+)?(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+)?PROOF(?:[*_]+)?\s*(?::\s*(.*))?$", line, re.I)
+        m = PROOF_LINE.match(line)
         if not m:
             continue
         value = (m.group(1) or "").strip()
@@ -89,6 +92,8 @@ def _proof(lines: list[str]) -> str | None:
         # Treat a formatting-only capture like the two-line PROOF form.
         if not value or not value.strip("`*_ "):
             value = next((l.strip() for l in lines[i + 1:] if l.strip()), "")
+            if PROOF_LINE.match(value):
+                continue  # a bare PROOF heading over a `PROOF: <token>` line: that line decides
         return value.strip("`*_ ").strip()
     return None
 
