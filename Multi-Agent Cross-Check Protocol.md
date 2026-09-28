@@ -207,10 +207,12 @@ Runner and supervisor liveness is an exclusive lock on their own `alive` file, r
 
 - Connected MCP tools run without per-call review. The ban on external actions and packet-mode web limits is an instruction, not a tool boundary; `--web packet` is not a security boundary for untrusted material.
 - Grok can write anywhere in tmp, and opencode anywhere in `/private/var/folders`, including another lane's scratch; their own-workspace limit is an instruction.
+- Grok's and opencode's OS sandboxes stop MCP servers that must write elsewhere (uv-launched semble fails its handshake), so those lanes see fewer MCP tools. The same sandbox keeps the Grok app from saving `-m` as the operator's default model ("Couldn't save preferred model: Operation not permitted" is expected).
 - A static account-verification splash can hit the 180 s app idle; the last screen is kept and the lane ends `timeout`.
 - A Herdr failure after a split but before `pane run` leaves a pane with an idle shell; close it by hand. (A failed `exec` makes zsh exit, so that pane closes itself.) Either way the lane is settled `failed: lane runner never started` after 90 s.
 - `--cap` ends a lane; there is no late harvest. Rerun in a fresh BASE.
 - If a runner died and `ps` is unavailable, `wait` cannot confirm the orphan's identity and leaves it alone, noting that in the reason; its pool stays held until the orphan exits. Never kill a recorded PID on a guess.
+- Claude's app view sends its first turn before MCP servers finish connecting; a slow server (qmd under load took 25 s) can be missing from a short review. The stream view waits for connections.
 - Real quota and auth error streams have not been captured; invalid-model fixtures prove parser shape only. Keep the next real one as a fixture.
 
 ## Deliberately absent
