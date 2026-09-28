@@ -438,7 +438,7 @@ class Capacity(unittest.TestCase):
         self.assertEqual(c.codex_windows(self.fixture("codex-rate-limits.json")),
                          {"primary 300m": 0.0, "secondary 10080m": 60.0})
         self.assertEqual(c.claude_windows(self.fixture("claude-usage.json"), "opus"),
-                         {"five_hour": 67.0, "seven_day": 61.0})  # no opus window reported
+                         {"session 0": 20.0, "weekly_all 1": 55.0})  # limits[] wins over flat keys
         self.assertEqual(c.grok_windows(self.fixture("grok-credits.json")), {"weekly credits": 80.0})
         report = self.fixture("agy-usage.json")
         self.assertEqual(report["num_turns"], 0)  # /usage is free
@@ -446,6 +446,32 @@ class Capacity(unittest.TestCase):
         third = c.agy_windows(report["command"]["data"], "claude-sonnet-4-6")
         self.assertEqual(set(gemini), {"gemini-5h", "gemini-weekly"})
         self.assertEqual(set(third), {"3p-5h", "3p-weekly"})
+
+    def test_claude_scoped_cap_binds_only_its_model_family(self):
+        from xcheck import capacity as c
+        flat = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 10}, "seven_day_opus": None}
+        caps = [{"kind": "session", "percent": 10}, {"kind": "weekly_all", "percent": 10},
+                {"kind": "weekly_scoped", "percent": 95, "scope": {"model": {"display_name": "Opus"}}}]
+        payload = {**flat, "limits": caps}
+        self.assertEqual(c.judge(c.claude_windows(payload, "opus"), 10).status, "reserve-low")
+        self.assertEqual(c.judge(c.claude_windows(payload, "sonnet"), 10).status, "eligible")
+        unknown = {**flat, "limits": [*caps[:2], {"kind": "weekly_scoped", "percent": 95, "scope": {"id": "x"}}]}
+        self.assertEqual(c.judge(c.claude_windows(unknown, "sonnet"), 10).status, "reserve-low")
+        self.assertEqual(c.claude_windows(flat, "opus"), {"five_hour": 90.0, "seven_day": 90.0})
+
+    def test_a_signal_during_a_probe_is_not_an_unreadable_meter(self):
+        from xcheck import capacity as c, lane
+        def stopped(_lane):
+            raise lane._Stop("SIGTERM")
+        with patch.dict(c.METERS, {"grok": stopped}), self.assertRaises(lane._Stop):
+            c.read(Lane("grok", "grok-4.7", "low"))
+
+    def test_capacity_command_and_run_count_pool_sharing_alike(self):
+        from xcheck import capacity as c
+        roster = adapters.DEFAULT_ROSTER
+        flash = Lane("agy", "gemini-3.8-flash-high")
+        self.assertEqual(c.sharing(flash, roster), 2)
+        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 15)
 
     def test_tightest_window_must_exceed_the_reserve(self):
         from xcheck.capacity import judge

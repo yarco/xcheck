@@ -57,6 +57,11 @@ class LoginRequired(Exception):
     pass
 
 
+def sharing(lane: Lane, roster) -> int:
+    """Lanes of one roster drawing on this lane's pool (the Agy reserve grows with it)."""
+    return sum(1 for other in roster if other.pool == lane.pool)
+
+
 def reserve_for(lane: Lane, same_pool: int) -> float:
     return min(90.0, 5.0 + 5.0 * same_pool) if lane.kind == "agy" else RESERVE
 
@@ -171,6 +176,19 @@ def _claude(lane: Lane) -> dict[str, float]:
 
 
 def claude_windows(payload: dict, bucket: str | None) -> dict[str, float]:
+    """`limits[]` is the current meter (session, weekly_all, and weekly_scoped
+    per-model caps, `percent` used); the flat keys are read only without it.
+    A scoped cap attributed to the other model family is left out; one that
+    cannot be attributed counts (fail closed)."""
+    limits = payload.get("limits")
+    if isinstance(limits, list) and limits:
+        windows = {}
+        for i, cap in enumerate(limits):
+            scope = json.dumps(cap.get("scope")).lower()
+            if any(f in scope for f in ("opus", "sonnet") if f != bucket) and not (bucket and bucket in scope):
+                continue
+            windows[f"{cap.get('kind')} {i}"] = 100.0 - float(cap["percent"])
+        return windows
     names = ["five_hour", "seven_day"] + ([f"seven_day_{bucket}"] if bucket else [])
     return {n: 100.0 - float(payload[n]["utilization"]) for n in names if isinstance(payload.get(n), dict)}
 

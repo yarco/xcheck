@@ -190,6 +190,8 @@ def claude_mcp_allow() -> list[str]:
         return []
     names = [*(data.get("mcpServers") or {}), *(data.get("claudeAiMcpEverConnected") or [])]
     return sorted({"mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", n) for n in names})
+
+
 CLAUDE_ENV = {"DISABLE_AUTOUPDATER": "1"}
 
 # Kinds whose headless (print) mode cannot be trusted with tools: Agy ends the
@@ -256,7 +258,7 @@ HELP_COMMANDS = {
                "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
                "--permission-prompts", "--include-partial-messages", "--debug-file"]),
     "grok": (["grok", "--help"], ["--prompt-file", "--model", "--reasoning-effort", "--cwd",
-             "--tools", "--deny", "--no-subagents", "--no-plan", "--sandbox",
+             "--tools", "--no-subagents", "--no-plan", "--sandbox",
              "--always-approve", "--output-format", "streaming-json", "--disable-web-search",
              "--debug-file"]),
     "agy": (["agy", "--help"], ["--sandbox", "--dangerously-skip-permissions", "--mode",

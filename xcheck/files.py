@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .adapters import Lane
+from .validate import Contract
 
 # Runs, pool locks and liveness files live here; tests point it elsewhere so
 # they never contend with a real run for a quota pool.
@@ -24,7 +25,6 @@ def workspace(lane: str) -> Path:
     folders by exact path (Codex, Agy) are told once, never asked again. The
     lane's pool lock makes it exclusive; the runner restages it each run."""
     return Path(os.path.realpath(ROOT)) / ".lanes" / lane
-from .validate import Contract
 
 
 def atomic_write(path: Path, text: str) -> None:

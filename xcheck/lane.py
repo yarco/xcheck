@@ -54,7 +54,7 @@ def lane_env(spec: adapters.Launch) -> dict[str, str]:
     return env
 
 
-class _Stop(Exception):
+class _Stop(BaseException):  # a signal, never mistaken for an ordinary failure
     pass
 
 
@@ -149,8 +149,7 @@ def _run_lane(base: Path, name: str) -> int:
     # Capacity is read here, immediately before spending and outside any
     # orchestrator sandbox when the runner lives in a Herdr pane.
     if run.capacity and name not in run.forced:
-        same_pool = sum(1 for l in run.lanes.values() if l.pool == lane.pool)
-        reading = capacity.read(lane, same_pool)
+        reading = capacity.read(lane, capacity.sharing(lane, run.lanes.values()))
         note = f"{reading.status}: {reading.note}"
         print(f"xcheck lane {name}: capacity {note}", flush=True)
         if not reading.ok:
