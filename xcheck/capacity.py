@@ -84,9 +84,10 @@ def judge(windows: dict[str, float], reserve: float) -> Reading:
     """Eligible only when the tightest window has more than `reserve` % left."""
     if not windows:
         return Reading("capacity-unknown", "meter reported no quota window")
+    for name, left in windows.items():
+        if not 0 <= left <= 100:
+            return Reading("capacity-unknown", f"{name} reports {left}% left")
     name, left = min(windows.items(), key=lambda item: item[1])
-    if not 0 <= left <= 100:
-        return Reading("capacity-unknown", f"{name} reports {left}% left")
     status = "eligible" if left > reserve else "reserve-low"
     return Reading(status, f"{name} {left:.0f}% left; reserve {reserve:g}%")
 
@@ -225,12 +226,13 @@ def _grok(lane: Lane) -> dict[str, float]:
 def grok_windows(payload: dict) -> dict[str, float]:
     """The account meter and the Grok Build product meter; either can bind."""
     config = payload["config"]
-    used = [float(p["usagePercent"]) for p in config.get("productUsage") or []
-            if isinstance(p, dict) and p.get("product") == "GrokBuild"]
-    if config.get("creditUsagePercent") is not None:
-        used.append(float(config["creditUsagePercent"]))
     period = str((config.get("currentPeriod") or {}).get("type", "")).removeprefix("USAGE_PERIOD_TYPE_").lower()
-    return {f"{period or 'period'} credits": 100.0 - max(used)} if used else {}
+    windows = {f"{period or 'period'} GrokBuild {i}": 100.0 - float(p["usagePercent"])
+               for i, p in enumerate(config.get("productUsage") or [])
+               if isinstance(p, dict) and p.get("product") == "GrokBuild"}
+    if config.get("creditUsagePercent") is not None:
+        windows[f"{period or 'period'} credits"] = 100.0 - float(config["creditUsagePercent"])
+    return windows  # keep every window until judge validates it, then takes the minimum
 
 
 # ------------------------------------------------------------------ agy
@@ -254,15 +256,13 @@ def _agy(lane: Lane) -> dict[str, float]:
 def agy_windows(data: dict, model: str) -> dict[str, float]:
     """The lane's family (Gemini or third-party) has a 5 h and a weekly bucket.
     A disabled 5 h bucket (its fraction is meaningless while the weekly one is
-    exhausted) is left out; a missing weekly bucket is an error."""
+    exhausted) is left out; a missing bucket is an error."""
     family = "gemini" if model.startswith("gemini-") else "3p"
     buckets = {b["id"]: b for g in data["groups"] for b in g.get("buckets") or []}
     windows = {}
     for name in (f"{family}-5h", f"{family}-weekly"):
-        b = buckets.get(name)
-        if b is None and name.endswith("weekly"):
-            raise KeyError(name)
-        if b and not b.get("disabled"):
+        b = buckets[name]
+        if not b.get("disabled"):
             windows[name] = 100.0 * float(b["remaining_fraction"])
     return windows
 

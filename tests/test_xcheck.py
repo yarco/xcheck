@@ -439,7 +439,8 @@ class Capacity(unittest.TestCase):
                          {"primary 300m": 0.0, "secondary 10080m": 60.0})
         self.assertEqual(c.claude_windows(self.fixture("claude-usage.json"), "opus"),
                          {"session 0": 20.0, "weekly_all 1": 55.0})  # limits[] wins over flat keys
-        self.assertEqual(c.grok_windows(self.fixture("grok-credits.json")), {"weekly credits": 80.0})
+        self.assertEqual(c.grok_windows(self.fixture("grok-credits.json")),
+                         {"weekly GrokBuild 0": 83.0, "weekly credits": 80.0})
         report = self.fixture("agy-usage.json")
         self.assertEqual(report["num_turns"], 0)  # /usage is free
         gemini = c.agy_windows(report["command"]["data"], "gemini-3.8-flash-high")
@@ -485,6 +486,35 @@ class Capacity(unittest.TestCase):
         self.assertEqual(reserve_for(Lane("agy", "gemini-3.8-flash-high"), 2), 15)
         self.assertEqual(reserve_for(Lane("agy", "gemini-3.8-flash-high"), 30), 90)
         self.assertEqual(reserve_for(Lane("grok", "grok-4.7", "low"), 3), 10)
+
+    def test_an_invalid_window_cannot_hide_behind_a_valid_one(self):
+        from xcheck.capacity import judge
+        # The admission contract requires every reported window to be usable.
+        for bad in (-1.0, 140.0, float("nan"), float("inf"), -float("inf")):
+            for items in ((('valid', 80.0), ('invalid', bad)),
+                          (('invalid', bad), ('valid', 80.0))):
+                with self.subTest(items=items):
+                    self.assertEqual(judge(dict(items), 10).status, "capacity-unknown")
+
+    def test_grok_checks_both_account_and_product_windows(self):
+        from xcheck import capacity as c
+        for bad in (-40.0, float("nan")):
+            for account, product in ((20.0, bad), (bad, 20.0)):
+                payload = {"config": {"creditUsagePercent": account,
+                           "productUsage": [{"product": "GrokBuild", "usagePercent": product}]}}
+                with self.subTest(account=account, product=product):
+                    self.assertEqual(c.judge(c.grok_windows(payload), 10).status, "capacity-unknown")
+
+    def test_missing_agy_windows_fail_closed_for_either_family(self):
+        from xcheck import capacity as c
+        for model, family in (("gemini-3.8-flash-high", "gemini"), ("claude-sonnet-4-6", "3p")):
+            for window in ("5h", "weekly"):
+                data = self.fixture("agy-usage.json")["command"]["data"]
+                for group in data["groups"]:
+                    group["buckets"] = [b for b in group["buckets"] if b["id"] != f"{family}-{window}"]
+                with self.subTest(model=model, window=window), \
+                     patch.dict(c.METERS, {"agy": lambda lane: c.agy_windows(data, lane.model)}):
+                    self.assertEqual(c.read(Lane("agy", model)).status, "capacity-unknown")
 
     def test_unreadable_meters_fail_closed_and_logins_are_named(self):
         from xcheck import capacity as c

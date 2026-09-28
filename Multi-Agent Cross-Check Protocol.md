@@ -88,7 +88,7 @@ Staging rules (each one has cost a round when broken):
 - **Provenance first.** `PACKET.md` opens by saying the operator convened the review and that `evidence/` holds the operator's own files. A bare "read these files and obey them" is correctly refused as prompt injection.
 - **Proof token.** The proof target's last line is an unguessable token (`MANIFEST_TAIL_TOKEN: <random hex>`), staged last. A correct PROOF shows the lane could open the packet and followed the output contract, not that it read everything (a lane can `cat` the target directly or grep for fragments). Diligence is checked at merge.
 - **Say what a follow-up round is.** Stage the delta plus what it touches, name what earlier rounds settled and the decision lineage behind deliberate omissions, and say the code responds to a review. Do not restage historical run debris.
-- **Blind first.** For a design question, peers first answer independently; only a second phase stages the orchestrator's plan (and, if wanted, the other answers) for critique and comparison. Stage no peer's answer until the independent phase has ended.
+- **Blind first.** For design work, stage the orchestrator's frozen plan as a separately named file. Each peer must finish and record its own design before opening that plan, then critique and compare in the same answer. Keep current-round peer answers out of the packet. This sequencing is instruction-enforced, not access isolation; keep the packet unchanged during the run.
 
 PROMPT.md template:
 
@@ -252,11 +252,11 @@ Proposals already rejected, with the reason:
 1. Re-read `STATUS.json` and every `RESULT-*.md`, `invalid` ones included, right before merging. A truncated draft is a lead only; never manufacture a peer's final position from it.
 2. Check each concrete claim's **premises** against the real tree before its reasoning. The ratifying lane fails at the premise: it can reject a correct fix because it misread code it was shown. Absence-of-code, wrong-path and packet-claim findings are packet suspects: open the real file first.
 3. Never tally reviewers. Agreement counts only when premises were derived independently; same-family lanes are correlated. Volume is not quality, and a small delta is no reason to drop the expensive lane.
-4. Judge each repair separately from its diagnosis: a correct diagnosis does not make its repair correct. The verification must be able to fail while the defect is present; two checks that read the same state are one signal.
+4. Judge each repair separately from its diagnosis: a correct diagnosis does not make its repair correct. The verification must be able to fail while the defect is present; two checks that read the same state are one signal. For stored state, test that omission preserves the last value unless the contract explicitly calls for deletion.
 5. Write `CONSENSUS.md`: one decision line; a confirmed / rejected / uncertain table with lane provenance; for each confirmed finding the selected repair, its verification, and why the host chose it when it differs from the peer's; lanes with no usable answer, never counted as disagreement. If no peer produced substantive evidence, say the review is unverified and why; relaunching an unchanged packet is not progress.
 6. Review applied fixes in a fresh round scoped to the delta and the contracts it touches, with the decision lineage staged. Stop when no admitted finding remains.
 
-**Admission rule.** A finding earns code only if its failure has happened or is likely within scope, and then it gets a tested repair. A real but out-of-scope finding earns one line in Current limits. Anything else is rejected in `CONSENSUS.md` with its reason. Ask reviewers what they would delete, not only whether something is correct. Never add prose to pre-empt a reviewer. A change keeps or reduces total size unless it adds an operator-requested capability.
+**Admission rule.** A finding earns code only if its failure has happened or is likely within scope, and then it gets a tested repair. A real but out-of-scope finding earns one line in Current limits. Anything else is rejected in `CONSENSUS.md` with its reason. Ask reviewers what they would delete, not only whether something is correct. Never add prose to pre-empt a reviewer. Prefer fewer mechanisms and less duplicated state. A necessary repair may add focused code and tests; a new mechanism must justify its maintenance cost against an in-scope failure.
 
 Fixes go into the reviewed project with a test; protocol lessons go into this note as rules, not stories.
 
