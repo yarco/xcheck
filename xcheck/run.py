@@ -155,15 +155,20 @@ def detach(argv: list[str], base: Path) -> int:
     """Start `run` as a detached supervisor; return once it has launched."""
     base = base.resolve()
     log = base / "supervisor.log"
+    # A reused BASE already has run.json; only one this child writes proves a launch.
+    reused = (base / "run.json").exists()
+    offset = log.stat().st_size if log.exists() else 0
     with open(log, "ab") as out:
         p = subprocess.Popen([sys.executable, "-I", str(BIN), *argv], stdout=out, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True)
     deadline = time.time() + 30
     while time.time() < deadline:
         if p.poll() is not None:  # refused before launch
-            sys.stderr.write(log.read_text(errors="replace"))
+            with open(log, "rb") as f:
+                f.seek(offset)
+                sys.stderr.write(f.read().decode(errors="replace"))
             return p.returncode or 2
-        if (base / "run.json").exists():
+        if not reused and (base / "run.json").exists():
             print(f"xcheck: supervisor pid {p.pid} running.\n"
                   f"Collect with: xcheck wait --base {base} --timeout <seconds your tool call can hold>")
             return 0

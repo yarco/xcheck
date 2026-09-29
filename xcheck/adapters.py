@@ -52,7 +52,7 @@ class Lane:
 
 
 DEFAULT_ROSTER = (
-    Lane("codex", "gpt-6-sol", "high"),
+    Lane("codex", "gpt-6.1-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
     Lane("agy", "gemini-3.1-pro-high"),

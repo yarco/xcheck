@@ -55,7 +55,7 @@ Exit codes: 0 every lane settled (read the table); 2 refused before any spend; 3
 
 | Lane | Pool |
 |---|---|
-| `codex-gpt-6-sol-high` | codex |
+| `codex-gpt-6.1-sol-high` | codex |
 | `claude-opus-5-5-high` | claude |
 | `grok-4.7-xhigh` | grok |
 | `agy-gemini-3.1-pro-high` | agy-gemini |
@@ -149,6 +149,7 @@ Each pool has one free meter that runs no inference, read by `xcheck/capacity.py
 
 - Agy's `/usage` is served by its persistent headless `language_server`; the launchd agent `a launchd sidecar agent` keeps one running.
 - Claude `security` exit 36 is a locked login keychain (a remote session): run `keychain-unlock-gui` with the operator at the screen. Never `security unlock-keychain` from an agent shell: control returns before a password can be typed. `security show-keychain-info ~/Library/Keychains/login.keychain-db` checks the state without prompting. Otherwise pass a fresh reading from Claude Code's `/usage`, the lowest window shown, as `XCHECK_CLAUDE_REMAINING=<percent left>` and `XCHECK_CLAUDE_REMAINING_AT=<ISO time>` (at most 5 min old) in the environment the runner inherits, i.e. headless placement; it overrides the keychain, so unset both right after that one launch. Exit 44 means no login.
+- The Claude usage endpoint returns HTTP 429 to every reader when polled too often (CodexBar reads it too). The meter waits out a 429, using `Retry-After` when given and otherwise 2, 4, 8, 16 s, for at most 30 s in total, and then fails closed as `capacity-unknown`. Recheck with `xcheck capacity --lanes claude:claude-opus-5-5:high`; once it reads `eligible`, add the lane in a fresh BASE. `--force-lane` does not apply here: a launched BASE refuses a second `run`.
 - A rejected Grok token may only be stale: running `grok` once refreshes it.
 - A reading is a snapshot. A healthy Agy family can still hit a per-model cap ("Individual quota reached"); that lane fails with the harness's own error and is not retried.
 

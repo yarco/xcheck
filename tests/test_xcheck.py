@@ -41,11 +41,11 @@ def read_fixture(kind: str, name: str, final: Path | None = None) -> adapters.Re
 
 class LaneNames(unittest.TestCase):
     def test_provenance_names(self):
-        self.assertEqual(Lane("codex", "gpt-6-sol", "high").name, "codex-gpt-6-sol-high")
+        self.assertEqual(Lane("codex", "gpt-6.1-sol", "high").name, "codex-gpt-6.1-sol-high")
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").name, "grok-4.7-xhigh")
         self.assertEqual(Lane("claude", "claude-opus-5-5", "high").name, "claude-opus-5-5-high")
         self.assertEqual(Lane("agy", "gemini-3.1-pro-high").name, "agy-gemini-3.1-pro-high")
-        self.assertEqual(Lane("codex", "gpt-6-sol-high", "high").name, "codex-gpt-6-sol-high")
+        self.assertEqual(Lane("codex", "gpt-6.1-sol-high", "high").name, "codex-gpt-6.1-sol-high")
 
     def test_pools(self):
         self.assertEqual(Lane("agy", "gemini-3.8-flash-high").pool, "agy-gemini")
@@ -53,12 +53,12 @@ class LaneNames(unittest.TestCase):
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").pool, "grok")
 
     def test_parse_lane(self):
-        self.assertEqual(adapters.parse_lane("codex:gpt-6-sol:high"), Lane("codex", "gpt-6-sol", "high"))
+        self.assertEqual(adapters.parse_lane("codex:gpt-6.1-sol:high"), Lane("codex", "gpt-6.1-sol", "high"))
         self.assertEqual(adapters.parse_lane("opencode:muse-spark-1.3-contributor-free"),
                          Lane("opencode", "muse-spark-1.3-contributor-free"))
         self.assertEqual(adapters.parse_lane("opencode:nemotron-3-ultra-free:high").name,
                          "opencode-nemotron-3-ultra-free-high")
-        for bad in ("codex:gpt-6-sol", "agy:gemini-3.1-pro-high:high", "nope:x:y", "codex",
+        for bad in ("codex:gpt-6.1-sol", "agy:gemini-3.1-pro-high:high", "nope:x:y", "codex",
                     "opencode:muse-spark-1.3"):  # paid Zen: no meter, so refused
             with self.assertRaises(ValueError):
                 adapters.parse_lane(bad)
@@ -100,7 +100,7 @@ class Readers(unittest.TestCase):
 class CodexLane(unittest.TestCase):
     def test_web_is_an_explicit_config_value_and_exec_has_no_search_flag(self):
         for web, value in ((False, 'web_search="disabled"'), (True, 'web_search="live"')):
-            argv = adapters.launch(Lane("codex", "gpt-6-sol", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), web).argv
+            argv = adapters.launch(Lane("codex", "gpt-6.1-sol", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), web).argv
             self.assertIn(value, argv)
             self.assertIn("check_for_update_on_startup=false", argv)
             self.assertNotIn("--search", argv)
@@ -109,7 +109,7 @@ class CodexLane(unittest.TestCase):
 class ReviewsAreNotPersisted(unittest.TestCase):
     def test_codex_and_claude_lanes_keep_no_session(self):
         # Grok and Agy have no such switch; their session stores keep a copy.
-        codex = adapters.launch(Lane("codex", "gpt-6-sol", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), False)
+        codex = adapters.launch(Lane("codex", "gpt-6.1-sol", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), False)
         claude = adapters.launch(Lane("claude", "claude-opus-5-5", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), False)
         self.assertIn("--ephemeral", codex.argv)
         self.assertIn("--no-session-persistence", claude.argv)
@@ -206,7 +206,7 @@ class GrokLane(unittest.TestCase):
         self.assertIn("Connected MCP tools are available", grok)
 
     def test_connected_mcp_is_available_to_stream_and_app_peers(self):
-        for kind, model, effort in (("codex", "gpt-6-sol", "low"),
+        for kind, model, effort in (("codex", "gpt-6.1-sol", "low"),
                                     ("claude", "claude-sonnet-5", "low"),
                                     ("grok", "grok-4.7", "low")):
             lane = Lane(kind, model, effort)
@@ -489,6 +489,35 @@ class Capacity(unittest.TestCase):
             raise lane._Stop("SIGTERM")
         with patch.dict(c.METERS, {"grok": stopped}), self.assertRaises(lane._Stop):
             c.read(Lane("grok", "grok-4.7", "low"))
+
+    def claude_throttled(self, responses):
+        """Read the Claude meter while `_get` plays `responses` (a Retry-After, or None, per 429; then a payload)."""
+        import urllib.error
+        from xcheck import capacity as c
+        calls, sleeps = iter(responses), []
+        def get(*_):
+            r = next(calls)
+            if isinstance(r, dict):
+                return r
+            raise urllib.error.HTTPError("u", 429, "Too Many Requests", {"Retry-After": r} if r else {}, None)
+        login = Mock(returncode=0, stdout=json.dumps({"claudeAiOauth": {"accessToken": "t"}}))
+        with patch.dict(os.environ, {c.CLAUDE_MANUAL[0]: "", c.CLAUDE_MANUAL[1]: ""}), \
+                patch.object(c.subprocess, "run", return_value=login), patch.object(c, "_get", get), \
+                patch.object(c.time, "sleep", sleeps.append):
+            return c.read(Lane("claude", "claude-opus-5-5", "high")), sleeps
+
+    def test_claude_meter_backs_off_through_a_brief_throttle(self):
+        payload = {"limits": [{"kind": "session", "percent": 10}]}
+        reading, sleeps = self.claude_throttled([None, None, "5", payload])
+        self.assertEqual(reading.status, "eligible", reading)
+        self.assertEqual(sleeps, [2.0, 4.0, 5.0])
+
+    def test_claude_meter_fails_closed_past_the_throttle_budget(self):
+        reading, sleeps = self.claude_throttled([None] * 10)
+        self.assertEqual(reading.status, "capacity-unknown")
+        self.assertEqual(sleeps, [2.0, 4.0, 8.0, 16.0])  # the next 32 s would pass 30 s
+        reading, sleeps = self.claude_throttled(["120"])
+        self.assertEqual((reading.status, sleeps), ("capacity-unknown", []))
 
     def test_capacity_command_and_run_count_pool_sharing_alike(self):
         from xcheck import capacity as c
@@ -819,7 +848,7 @@ class EndToEnd(unittest.TestCase):
                               capture_output=True, text=True, timeout=timeout)
 
     def run_lanes(self, mode="ok", extra=()):
-        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,opencode:muse-spark-1.3-contributor-free"  # stream view
+        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,opencode:muse-spark-1.3-contributor-free"  # stream view
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--skip-capacity", *extra, mode=mode)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
@@ -834,7 +863,7 @@ class EndToEnd(unittest.TestCase):
     def test_structured_errors_fail_with_cause(self):
         rows = self.run_lanes("error")
         self.assertEqual({r["status"] for r in rows.values()}, {"failed"})
-        self.assertIn("usage limit", rows["codex-gpt-6-sol-high"]["reason"])
+        self.assertIn("usage limit", rows["codex-gpt-6.1-sol-high"]["reason"])
         self.assertIn("hit your limit", rows["claude-opus-5-5-high"]["reason"])
         self.assertIn("402", rows["grok-4.7-xhigh"]["reason"])
 
@@ -854,20 +883,20 @@ class EndToEnd(unittest.TestCase):
     def test_launch_once(self):
         self.run_lanes()
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("already launched", p.stderr)
 
     def test_a_refused_first_invocation_does_not_burn_the_base(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertFalse((self.base / ".launched").exists())
         self.assertEqual({r["status"] for r in self.run_lanes().values()}, {"done"})
 
     def test_orchestrator_kind_is_never_a_peer(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("must not launch", p.stderr)
 
@@ -884,7 +913,7 @@ class EndToEnd(unittest.TestCase):
             with self.subTest(extra=extra):
                 base = self.second_base()
                 result = self.xcheck("run", "--base", str(base), "--orch", "other", "--mode", "headless",
-                                     "--skip-capacity", "--lanes", "codex:gpt-6-sol:high", *extra)
+                                     "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high", *extra)
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn(reason, result.stderr)
                 self.assertFalse((base / ".launched").exists())
@@ -896,7 +925,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_capacity_is_read_from_each_lanes_meter_before_spending(self):
         # The fake codex/agy answer the real meters (app-server, /usage).
-        lanes = "codex:gpt-6-sol:high,agy:gemini-3.8-flash-high"
+        lanes = "codex:gpt-6.1-sol:high,agy:gemini-3.8-flash-high"
         for reading, expected in (("reserve-low", "skipped"), ("eligible", "done")):
             base = self.second_base()
             p = self.xcheck("run", "--base", str(base), "--orch", "other", "--lanes", lanes,
@@ -909,13 +938,13 @@ class EndToEnd(unittest.TestCase):
 
     def test_grok_orchestrator_is_refused_headless(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "grok", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("Herdr mode", p.stderr)
 
     def test_detach_then_bounded_wait(self):
         common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
-                  "--lanes", "codex:gpt-6-sol:high,grok:grok-4.7:xhigh")
+                  "--lanes", "codex:gpt-6.1-sol:high,grok:grok-4.7:xhigh")
         p = self.xcheck("run", *common, "--detach", mode="slow")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("xcheck wait", p.stdout)
@@ -927,11 +956,22 @@ class EndToEnd(unittest.TestCase):
         rows = json.loads((self.base / "STATUS.json").read_text())["lanes"]
         self.assertEqual({r["status"] for r in rows}, {"done"})
 
+    def test_detach_on_a_launched_base_reports_the_refusal(self):
+        common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
+                  "--lanes", "codex:gpt-6.1-sol:high")
+        self.assertEqual(self.xcheck("run", *common, "--detach", mode="slow").returncode, 0)
+        p = self.xcheck("run", *common, "--detach", mode="slow")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("already launched", p.stderr)
+        self.assertNotIn("running", p.stdout)
+        self.assertNotIn(" lanes (", p.stderr)  # this refusal only, not the first launch's log
+        self.assertEqual(self.xcheck("wait", "--base", str(self.base), mode="slow").returncode, 0)
+
     def test_dead_supervisor_and_runner_orphan_is_stopped_on_reattach(self):
         common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
-                  "--lanes", "codex:gpt-6-sol:high")
+                  "--lanes", "codex:gpt-6.1-sol:high")
         self.assertEqual(self.xcheck("run", *common, "--detach", mode="hang").returncode, 0)
-        pids_file = self.base / "lanes" / "codex-gpt-6-sol-high" / "pids.json"
+        pids_file = self.base / "lanes" / "codex-gpt-6.1-sol-high" / "pids.json"
         for _ in range(50):
             if pids_file.exists() and json.loads(pids_file.read_text()).get("harness"):
                 break
@@ -962,7 +1002,7 @@ class EndToEnd(unittest.TestCase):
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
                "CODEX_CONFIG": str(self.root / "codex-config.toml"),
                "AGY_SETTINGS": str(self.root / "agy-settings.json")}
-        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free"
+        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
                            env=env, capture_output=True, text=True, timeout=60)
@@ -992,13 +1032,13 @@ class EndToEnd(unittest.TestCase):
 
     def test_runs_on_the_same_pool_queue(self):
         other = self.second_base()
-        self.detach(self.base, "codex:gpt-6-sol:high", "slow")
-        self.detach(other, "codex:gpt-6-sol:high", "slow")
-        first = self.lane_exit(self.base, "codex-gpt-6-sol-high")
-        second = self.lane_exit(other, "codex-gpt-6-sol-high")
+        self.detach(self.base, "codex:gpt-6.1-sol:high", "slow")
+        self.detach(other, "codex:gpt-6.1-sol:high", "slow")
+        first = self.lane_exit(self.base, "codex-gpt-6.1-sol-high")
+        second = self.lane_exit(other, "codex-gpt-6.1-sol-high")
         self.assertEqual((first["status"], second["status"]), ("done", "done"))
         self.assertGreaterEqual(second["started"], first["ended"])
-        self.assertIn("waiting for pool codex", (other / "lanes" / "codex-gpt-6-sol-high" / "view.log").read_text())
+        self.assertIn("waiting for pool codex", (other / "lanes" / "codex-gpt-6.1-sol-high" / "view.log").read_text())
 
     def test_disjoint_pools_and_same_run_lanes_run_together(self):
         other = self.second_base()
@@ -1015,8 +1055,8 @@ class EndToEnd(unittest.TestCase):
         # The harness inherits the pool lock: a killed runner must not let a
         # second run spend from the same pool while its harness still can.
         other = self.second_base()
-        self.detach(self.base, "codex:gpt-6-sol:high", "hang")
-        pids_file = self.base / "lanes" / "codex-gpt-6-sol-high" / "pids.json"
+        self.detach(self.base, "codex:gpt-6.1-sol:high", "hang")
+        pids_file = self.base / "lanes" / "codex-gpt-6.1-sol-high" / "pids.json"
         for _ in range(50):
             if pids_file.exists() and json.loads(pids_file.read_text()).get("harness"):
                 break
@@ -1025,31 +1065,31 @@ class EndToEnd(unittest.TestCase):
         os.kill(int((self.base / "supervisor.pid").read_text()), signal.SIGKILL)
         os.kill(pids["runner"], signal.SIGKILL)
         self.addCleanup(lambda: subprocess.run(["kill", "-9", str(pids["harness"])], capture_output=True))
-        self.detach(other, "codex:gpt-6-sol:high", "ok")
+        self.detach(other, "codex:gpt-6.1-sol:high", "ok")
         time.sleep(4)
-        view = other / "lanes" / "codex-gpt-6-sol-high" / "view.log"
+        view = other / "lanes" / "codex-gpt-6.1-sol-high" / "view.log"
         self.assertIn("waiting for pool codex", view.read_text())
-        self.assertFalse((other / "lanes" / "codex-gpt-6-sol-high" / "exit.json").exists())
+        self.assertFalse((other / "lanes" / "codex-gpt-6.1-sol-high" / "exit.json").exists())
         os.kill(pids["harness"], signal.SIGKILL)  # the orphan is gone: the pool frees
-        self.assertEqual(self.lane_exit(other, "codex-gpt-6-sol-high")["status"], "done")
+        self.assertEqual(self.lane_exit(other, "codex-gpt-6.1-sol-high")["status"], "done")
 
     def test_tui_answer_closes_background_group_before_releasing_pool(self):
         from xcheck import pools
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
-                        "--lanes", "codex:gpt-6-sol:high", "--mode", "headless",
+                        "--lanes", "codex:gpt-6.1-sol:high", "--mode", "headless",
                         "--view", "tui", "--skip-capacity", mode="bg-child")
-        work = self.root / ".lanes" / "codex-gpt-6-sol-high"
+        work = self.root / ".lanes" / "codex-gpt-6.1-sol-high"
         child = int((work / "background-child.pid").read_text())
         self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
-        self.assertEqual(self.lane_exit(self.base, "codex-gpt-6-sol-high")["status"], "done")
+        self.assertEqual(self.lane_exit(self.base, "codex-gpt-6.1-sol-high")["status"], "done")
         held = pools.acquire(self.root, "codex", "next-run", time.time() + 1)
         self.assertIsNotNone(held, "a surviving background child kept the quota lock")
         if held:
             held.release()
 
     def run_tui(self, mode, extra=()):
-        lanes = "codex:gpt-6-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free"
+        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free"
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--view", "tui", "--skip-capacity", *extra, mode=mode)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
@@ -1074,13 +1114,13 @@ class EndToEnd(unittest.TestCase):
         self.run_tui("ok")
         codex = (self.root / "codex-config.toml").read_text()
         agy = json.loads((self.root / "agy-settings.json").read_text())
-        work = os.path.realpath(self.root / ".lanes" / "codex-gpt-6-sol-high")
+        work = os.path.realpath(self.root / ".lanes" / "codex-gpt-6.1-sol-high")
         self.assertIn(f'[projects."{work}"]\ntrust_level = "trusted"', codex)
         self.assertIn(os.path.realpath(self.root / ".lanes" / "agy-gemini-3.8-flash-high"), agy["trustedWorkspaces"])
         self.assertIs(agy["showFeedbackSurvey"], False)
         before = (self.root / "codex-config.toml").read_text()
         other = self.second_base()
-        p = self.xcheck("run", "--base", str(other), "--orch", "other", "--lanes", "codex:gpt-6-sol:high",
+        p = self.xcheck("run", "--base", str(other), "--orch", "other", "--lanes", "codex:gpt-6.1-sol:high",
                         "--mode", "headless", "--view", "tui", "--skip-capacity")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual((self.root / "codex-config.toml").read_text(), before)  # idempotent
@@ -1127,7 +1167,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()
-        work = self.root / ".lanes" / "codex-gpt-6-sol-high"
+        work = self.root / ".lanes" / "codex-gpt-6.1-sol-high"
         self.assertEqual(sorted(p.name for p in work.iterdir()), ["PACKET.md", "PROMPT.md", "evidence"])
 
 

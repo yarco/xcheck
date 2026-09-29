@@ -38,6 +38,7 @@ CLAUDE_LOGIN = "env -u ANTHROPIC_API_KEY claude auth login --claudeai"
 # The operator can pass a fresh reading from Claude Code's /usage instead.
 CLAUDE_MANUAL = ("XCHECK_CLAUDE_REMAINING", "XCHECK_CLAUDE_REMAINING_AT")
 CLAUDE_MANUAL_AGE = 300
+CLAUDE_THROTTLE_WAIT = 30.0  # total seconds 429s may delay one reading before it fails closed
 # `-p /usage` is a client-side command only from this release on; an older CLI
 # would send it to a model as a prompt.
 AGY_USAGE_SINCE = (1, 1, 11)
@@ -162,18 +163,32 @@ def _claude(lane: Lane) -> dict[str, float]:
         raise OSError(f"keychain unreadable (security exit {p.returncode}; 36 = locked: run "
                       f"keychain-unlock-gui, or set {CLAUDE_MANUAL[0]} and {CLAUDE_MANUAL[1]})")
     token = json.loads(p.stdout)["claudeAiOauth"]["accessToken"]
-    for attempt in range(3):  # 429 is a throttle shared by every reader of this endpoint
+    # 429 is a throttle shared by every reader of this endpoint (CodexBar polls it too).
+    waited, attempt = 0.0, 0
+    while True:
         try:
             payload = _get("https://api.anthropic.com/api/oauth/usage",
                            {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
                            f"Claude login expired: run {CLAUDE_LOGIN}")
             break
         except urllib.error.HTTPError as e:
-            if e.code != 429 or attempt == 2:
+            if e.code != 429:
                 raise
-            time.sleep(2)
+            pause = throttle_pause(e.headers.get("Retry-After") if e.headers else None, attempt)
+            if waited + pause > CLAUDE_THROTTLE_WAIT:
+                raise
+            time.sleep(pause)
+            waited, attempt = waited + pause, attempt + 1
     bucket = next((b for b in ("opus", "sonnet") if b in lane.model), None)
     return claude_windows(payload, bucket)
+
+
+def throttle_pause(retry_after: str | None, attempt: int) -> float:
+    """Seconds before retrying a 429: the server's Retry-After in seconds, else 2, 4, 8, … s."""
+    try:
+        return max(0.0, float(retry_after))
+    except (TypeError, ValueError):
+        return 2.0 * 2 ** attempt
 
 
 def claude_windows(payload: dict, bucket: str | None) -> dict[str, float]:
