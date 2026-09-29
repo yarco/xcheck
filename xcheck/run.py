@@ -82,7 +82,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
 
     ctx = herdr.caller() if mode in ("auto", "herdr") else None
     if mode == "herdr" and ctx is None:
-        raise RunError("Herdr placement unavailable (HERDR_ENV, pane, tab size, or control)")
+        raise RunError("Herdr placement unavailable (no caller pane: HERDR_PANE_ID or a Codex title with its thread id; tab size; or control)")
     if orch == "grok" and ctx is None:
         # Grok's sandbox covers its whole process tree; headless lanes would
         # inherit it. Herdr panes are spawned by the Herdr server, outside it.

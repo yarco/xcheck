@@ -384,6 +384,26 @@ class HerdrOwnership(unittest.TestCase):
             with patch.object(self.herdr, "_herdr", return_value={"layout": {"area": {"width": 210, "height": 64}}}):
                 self.assertEqual(self.herdr.caller(), {"pane": "caller"})
 
+    def test_a_daemon_attached_codex_is_found_by_the_thread_id_in_its_pane_title(self):
+        # Codex's shared app-server runs tool shells outside the pane: no HERDR_*.
+        thread = "01a0e86e-f3a3-7591-a4c6-b827a74c7aa9"
+        panes = [{"pane_id": "shell", "terminal_title_stripped": "user@host:~/work"},
+                 {"pane_id": "other", "terminal_title_stripped": "Fix CI | main | 01a0e86e-0000-7591-a4c6-b827a..."},
+                 {"pane_id": "codex", "terminal_title_stripped": "Audit CUF | main | 01a0e86e-f3a3-7591-a4c6-b827a..."}]
+
+        def fake(*args, **_):
+            return {"panes": panes} if args[:2] == ("pane", "list") else {"layout": {"area": {"width": 210, "height": 64}}}
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
+        with patch.dict(os.environ, {**env, "CODEX_THREAD_ID": thread}, clear=True), \
+                patch.object(self.herdr, "_herdr", side_effect=fake) as call:
+            self.assertEqual(self.herdr.caller(), {"pane": "codex"})
+            self.assertEqual(call.call_args.args, ("pane", "layout", "--pane", "codex"))
+            panes.append(dict(panes[2], pane_id="twin"))  # never guess between two
+            self.assertIsNone(self.herdr.caller())
+            panes[2:] = [{"pane_id": "codex", "terminal_title_stripped": "Audit CUF | 01a0e86e-f3a3..."}]
+            self.assertIsNone(self.herdr.caller())  # too short to identify a thread
+
     def test_runner_replaces_the_pane_shell_so_the_pane_closes_with_it(self):
         with patch.object(self.herdr, "_herdr", return_value={}) as call:
             self.herdr._start("p2", "lane-a", lambda lane: f"runner {lane}")

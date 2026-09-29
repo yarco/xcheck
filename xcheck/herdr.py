@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 
 MIN_WIDTH, MIN_HEIGHT = 176, 14
 WALL_RATIO = 0.62  # existing (orchestrator) pane keeps 62%
+THREAD_ID_MIN = 20  # Codex elides a title's thread id to 29 characters
 
 
 class HerdrError(Exception):
@@ -33,17 +35,43 @@ def _herdr(*args: str, timeout: float = 15) -> dict:
 
 
 def caller() -> dict | None:
-    """The caller's pane context, or None when Herdr placement is not possible."""
-    pane = os.environ.get("HERDR_PANE_ID")
-    if os.environ.get("HERDR_ENV") != "1" or not pane:
-        return None
+    """The caller's pane context, or None when Herdr placement is not possible.
+
+    A shell in a Herdr pane names its pane in HERDR_PANE_ID. A Codex app
+    attached to Codex's shared app-server daemon runs its tool shells as
+    daemon children, outside the pane, so they carry no HERDR_* at all; the
+    app itself still sits in the pane and writes its thread id into the
+    pane's title (`tui.terminal_title` includes "thread-id"), so the pane is
+    the one whose title holds a prefix of the shell's CODEX_THREAD_ID.
+    """
+    pane = os.environ.get("HERDR_PANE_ID") if os.environ.get("HERDR_ENV") == "1" else None
     try:
+        pane = pane or _codex_pane(os.environ.get("CODEX_THREAD_ID", ""))
+        if not pane:
+            return None
         area = _herdr("pane", "layout", "--pane", pane)["layout"]["area"]
         if area["width"] < MIN_WIDTH or area["height"] < MIN_HEIGHT:
             return None
     except (HerdrError, KeyError, TypeError, json.JSONDecodeError):
         return None
     return {"pane": pane}
+
+
+def _codex_pane(thread: str) -> str | None:
+    """The one pane whose title carries this Codex thread id, else None."""
+    if not thread:
+        return None
+    hits = {p["pane_id"] for p in _herdr("pane", "list")["panes"]
+            if _titles_thread(p.get("terminal_title_stripped") or "", thread)}
+    return hits.pop() if len(hits) == 1 else None
+
+
+def _titles_thread(title: str, thread: str) -> bool:
+    for token in re.split(r"[\s|]+", title):
+        token = token.rstrip(".\u2026")
+        if len(token) >= THREAD_ID_MIN and thread.startswith(token):
+            return True
+    return False
 
 
 def place(ctx: dict, lanes: list[str], cwd: str, command_for, created) -> None:
