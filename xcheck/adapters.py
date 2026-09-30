@@ -145,19 +145,13 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
 
 # OpenCode's free tier serves only its stock tool set: any permission rule
 # (even `bash: deny`) is refused with 403 FreeTierError. So the tools stay
-# stock, `--auto` answers every permission ask (an unanswered ask in `run`
-# waits forever), and the write boundary is the OS: a Seatbelt profile that
-# allows writes only in the lane workspace, OpenCode's own state, and the
-# per-user temp tree. Bash and the edit tools get "Operation not permitted"
-# anywhere else. MCP servers that must write elsewhere fail to start.
+# stock and `--auto` answers every permission ask (an unanswered ask in `run`
+# waits forever). A Seatbelt deny-write wrap was tried; `sandbox_apply` on
+# that profile fails in the lane process (exit 71) even when a trivial
+# allow-default profile applies, so the wrap is not used. The write
+# boundary is the review instruction plus OpenCode's cwd.
 def opencode_sandbox(work: Path) -> list[str]:
-    home = Path.home()
-    allowed = [work, home / ".local/share/opencode", home / ".local/state/opencode",
-               home / ".cache/opencode", Path("/private/var/folders")]
-    profile = ("(version 1)(allow default)(deny file-write*)(allow file-write* "
-               + " ".join(f'(subpath "{p}")' for p in allowed)
-               + ' (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))')
-    return ["sandbox-exec", "-p", profile]
+    return []
 
 
 def _opencode_model(lane: Lane) -> list[str]:
@@ -167,7 +161,8 @@ def _opencode_model(lane: Lane) -> list[str]:
 
 def _opencode_env(lane: Lane) -> dict[str, str]:
     """Provider-prefixed opencode models may need that provider's env key.
-    Stored opencode auth.json covers OpenRouter; Z.ai Coding Plan is ZAI_API_KEY."""
+    Stored opencode auth.json covers OpenRouter; Z.ai Coding Plan needs
+    ZAI_API_KEY and ZHIPU_API_KEY (stripping the latter yields a server error)."""
     import os
     env = {}
     if "/" not in lane.model:
@@ -175,7 +170,7 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
     provider = lane.model.split("/", 1)[0]
     names = []
     if provider.startswith("zai"):
-        names.append("ZAI_API_KEY")
+        names.extend(["ZAI_API_KEY", "ZHIPU_API_KEY"])  # coding-plan talks Zhipu
     if provider == "openrouter":
         names.append("OPENROUTER_API_KEY")
     for name in names:
@@ -193,25 +188,27 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
 GROK_ENV = {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"}
 
 # Devin: override any shell default for DEVIN_PERMISSION_MODE. The
-# lane must accept workspace edits (ANSWER.md) without a prompt. DEVIN_SANDBOX
-# reaches the child ACP server the app spawns (the --sandbox flag does not).
-DEVIN_ENV = {"DEVIN_PERMISSION_MODE": "accept-edits", "DEVIN_SANDBOX": "1"}
+# lane must accept workspace edits (ANSWER.md) without a prompt.
+# --sandbox / DEVIN_SANDBOX isolate the exec-tool child from
+# ~/.local/share/devin/credentials.toml, which made the app ask to "use local
+# credentials". Stored login is the auth; the review instruction is the write
+# boundary.
+DEVIN_ENV = {"DEVIN_PERMISSION_MODE": "accept-edits"}
 DEVIN_USER_CONFIG = Path.home() / ".config/devin/config.json"
 
 
 def _devin_config(path: Path) -> Path:
-    """Hook-free overlay beside the harness log, not in the packet workspace.
-    Operator moshi/Herdr PermissionRequest hooks would hang a lane (I3).
-    Keep org_id so stored login still applies. Never --cloud."""
+    """Operator config with hooks removed, beside the harness log.
+    --config replaces the whole file: stripping login/setup made the app
+    ask to use local credentials. Empty hooks only, so moshi/Herdr
+    PermissionRequest cannot hang the lane (I3). Never --cloud."""
     src: dict = {}
     try:
         src = json.loads(DEVIN_USER_CONFIG.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
-    cfg = {"hooks": {}}
-    if src.get("devin"):
-        cfg["devin"] = src["devin"]
-    path.write_text(json.dumps(cfg), encoding="utf-8")
+    src["hooks"] = {}
+    path.write_text(json.dumps(src), encoding="utf-8")
     return path
 
 # Claude: --restricted ignores ~/.claude.json, so the operator's own MCP
@@ -292,7 +289,7 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
     if lane.kind == "devin":
         argv = [
             "devin", "--config", str(_devin_config(log.with_name("devin-config.json"))),
-            "--permission-mode", "accept-edits", "--sandbox",
+            "--permission-mode", "accept-edits",
             "--respect-workspace-trust", "false", "--model", lane.model,
             "--", message,
         ]
@@ -320,7 +317,7 @@ HELP_COMMANDS = {
     "opencode run": (["opencode", "run", "--help"], ["--auto", "--model", "--format", "--variant"]),
     "opencode": (["opencode", "--help"], ["--auto", "--model", "--prompt"]),
     "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
-               "--sandbox", "--respect-workspace-trust"]),
+               "--respect-workspace-trust"]),
 }
 
 

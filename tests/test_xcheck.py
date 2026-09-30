@@ -158,16 +158,17 @@ class OpencodeLane(unittest.TestCase):
         r.feed({"type": "error", "error": {"name": "APIError", "data": {"message": "free usage exceeded"}}})
         self.assertEqual(r.error, "free usage exceeded")
 
-    def test_stock_tools_auto_approved_inside_an_os_write_sandbox(self):
+    def test_stock_tools_auto_approved_without_a_seatbelt_wrap(self):
         with tempfile.TemporaryDirectory() as tmp:
             work, msg = Path(tmp).resolve(), Path(tmp) / "m.txt"
             msg.write_text("review\n")
             for argv in (adapters.launch(self.LANE, work, msg, work / "f", work / "l", True).argv,
                          adapters.tui(self.LANE, work, "review", work / "l", True).argv):
-                self.assertEqual(argv[:2], ["sandbox-exec", "-p"])
-                self.assertIn(f'(subpath "{work}")', argv[2])
+                self.assertEqual(argv[0], "opencode")
+                self.assertNotIn("sandbox-exec", argv)
                 self.assertIn("--auto", argv)
                 self.assertIn("opencode/muse-spark-1.3-contributor-free", argv)
+                self.assertNotIn("--agent", argv)
         glm = Lane("opencode", "zai-coding-plan/glm-5.3", "high")
         with tempfile.TemporaryDirectory() as tmp:
             work, msg = Path(tmp).resolve(), Path(tmp) / "m.txt"
@@ -176,18 +177,6 @@ class OpencodeLane(unittest.TestCase):
             self.assertIn("zai-coding-plan/glm-5.3", argv)
             self.assertIn("--variant", argv)
             self.assertEqual(argv[argv.index("--variant") + 1], "high")
-            self.assertNotIn("--agent", argv)
-
-    def test_the_sandbox_denies_writes_outside_the_workspace(self):
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(dir=Path.home()) as outside:
-            work = Path(tmp).resolve()
-            profile = adapters.opencode_sandbox(work)
-            inside = subprocess.run([*profile, "touch", str(work / "ok")], capture_output=True)
-            escape = subprocess.run([*profile, "touch", str(Path(outside) / "escape")], capture_output=True)
-            self.assertEqual(inside.returncode, 0, inside.stderr)
-            self.assertNotEqual(escape.returncode, 0)
-            self.assertIn(b"Operation not permitted", escape.stderr)
-            self.assertFalse((Path(outside) / "escape").exists())
 
     def test_opt_in_has_no_protocol_meter(self):
         from xcheck import capacity
@@ -201,18 +190,27 @@ class DevinLane(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp).resolve()
             log = work / "l"
-            argv = adapters.tui(self.LANE, work, "review", log, True).argv
+            user = work / "user-config.json"
+            user.write_text(json.dumps({
+                "devin": {"org_id": "org-test"},
+                "hooks": {"PermissionRequest": [{"hooks": [{"type": "command", "command": "hang"}]}]},
+                "shell": {"setup_complete": True},
+            }))
+            with patch.object(adapters, "DEVIN_USER_CONFIG", user):
+                argv = adapters.tui(self.LANE, work, "review", log, True).argv
             self.assertEqual(argv[0], "devin")
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "accept-edits")
-            self.assertIn("--sandbox", argv)
+            self.assertNotIn("--sandbox", argv)
             self.assertEqual(argv[argv.index("--respect-workspace-trust") + 1], "false")
             self.assertEqual(argv[argv.index("--model") + 1], "swe-2-max")
             self.assertNotIn("--cloud", argv)
             self.assertEqual(argv[-2:], ["--", "review"])
             overlay = log.with_name("devin-config.json")
-            self.assertTrue(overlay.is_file())
             self.assertFalse((work / ".xcheck-devin-config.json").exists())
-            self.assertEqual(json.loads(overlay.read_text()).get("hooks"), {})
+            cfg = json.loads(overlay.read_text())
+            self.assertEqual(cfg["hooks"], {})
+            self.assertEqual(cfg["devin"], {"org_id": "org-test"})
+            self.assertEqual(cfg["shell"], {"setup_complete": True})
             self.assertIn("devin", adapters.APP_ONLY)
 
     def test_opt_in_has_no_protocol_meter(self):
