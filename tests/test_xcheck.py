@@ -186,6 +186,22 @@ class OpencodeLane(unittest.TestCase):
         self.assertEqual(capacity.read(self.LANE).status, "eligible")
 
 
+class LimitBanner(unittest.TestCase):
+    def test_the_real_agy_quota_screen_names_the_cap(self):
+        from xcheck import tui
+        lines = tui._lines((FIX / "agy-quota.screen").read_bytes())
+        self.assertEqual(tui.limit_banner(lines, adapters.APP_LIMIT),
+                         "⚠ Individual quota reached. Please upgrade your subscription to increase "
+                         "your limits. Resets in 62h37m27s.")
+
+    def test_banners_count_only_at_a_line_start_near_the_bottom(self):
+        from xcheck import tui
+        for line in ("You've hit your limit · resets 7pm (America/Los_Angeles)", "  ⎿  You hit your weekly limit."):
+            self.assertIsNotNone(tui.limit_banner(["work", line, "> "], adapters.APP_LIMIT), line)
+        self.assertIsNone(tui.limit_banner(["The banner Individual quota reached means a cap"], adapters.APP_LIMIT))
+        self.assertIsNone(tui.limit_banner(["⚠ Individual quota reached.", *["more work"] * 10], adapters.APP_LIMIT))
+
+
 class DevinLane(unittest.TestCase):
     LANE = Lane("devin", "swe-2-max")
 
@@ -215,6 +231,27 @@ class DevinLane(unittest.TestCase):
             self.assertEqual(cfg["devin"], {"org_id": "org-test"})
             self.assertEqual(cfg["shell"], {"setup_complete": True})
             self.assertIn("devin", adapters.APP_ONLY)
+
+    def test_overlay_pre_approves_what_accept_edits_would_prompt_for(self):
+        # accept-edits prompts for shell, fetch and MCP; a prompt hangs the lane (I3)
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp).resolve()
+            user = work / "user-config.json"
+            user.write_text(json.dumps({"permissions": {"allow": ["Exec(ls)"], "deny": ["Exec(sudo)"]}}))
+            # both overlays land beside the log: read each right after its call
+            with patch.object(adapters, "DEVIN_USER_CONFIG", user):
+                adapters.tui(self.LANE, work, "review", work / "live", True)
+            live = json.loads((work / "devin-config.json").read_text())["permissions"]
+            self.assertEqual(live["allow"][0], "Exec(ls)")
+            for rule in ("exec", "mcp__*", "Fetch(https://*/*)"):
+                self.assertIn(rule, live["allow"])
+            self.assertEqual(live["deny"], ["Exec(sudo)"])
+            with patch.object(adapters, "DEVIN_USER_CONFIG", user):
+                adapters.tui(self.LANE, work, "review", work / "packet", False)
+            packet = json.loads((work / "devin-config.json").read_text())["permissions"]
+            self.assertIn("exec", packet["allow"])
+            self.assertNotIn("Fetch(https://*/*)", packet["allow"])
+            self.assertIn("Fetch(https://*/*)", packet["deny"])
 
     def test_opt_in_has_no_protocol_meter(self):
         from xcheck import capacity
@@ -1202,6 +1239,33 @@ class EndToEnd(unittest.TestCase):
         rows = self.run_tui("error", extra=("--idle", "3"))
         self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
         self.assertTrue(any("hit your limit" in l for l in rows["claude-opus-5-5-high"]["stderr_tail"]))
+
+    def test_an_app_drawing_only_empty_frames_times_out(self):
+        # a blocked dialog that keeps emitting sync-update frames is idle, not busy
+        t0 = time.time()
+        rows = self.run_tui("noop-frames", extra=("--idle", "3"))
+        self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
+        self.assertLess(time.time() - t0, 30)  # the frames run for 60 s
+
+    def test_wait_and_status_refuse_a_base_never_launched(self):
+        for cmd in ("wait", "status"):
+            p = self.xcheck(cmd, "--base", str(self.base))
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertIn("was never launched", p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+
+    def test_an_app_stopped_on_a_limit_banner_fails_with_it(self):
+        t0 = time.time()
+        rows = self.run_tui("limit")  # default 180 s idle
+        self.assertEqual({r["status"] for r in rows.values()}, {"failed"}, rows)
+        self.assertLess(time.time() - t0, 60)
+        for r in rows.values():
+            self.assertIn("Individual quota reached", r["reason"])
+            self.assertIn("Resets in 62h37m27s", r["reason"])
+
+    def test_a_quoted_limit_banner_does_not_end_a_working_app(self):
+        rows = self.run_tui("limit-echo")
+        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
 
     def test_a_killed_app_runner_leaves_its_screen_on_disk(self):
         # screen.log is the diagnosis for a runner that died: nothing may sit in a buffer.

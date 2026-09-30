@@ -1,0 +1,28 @@
+Code analysis:[m[K
+[K
+  • [94ms = sorted(xs)[m — sorts correctly[K
+  • [94mn = len(s)[m — length[K
+  • [94mmid = n // 2[m — middle index[K
+  • Odd case: [94ms[mid][m — correct (e.g. n=3, mid=1, returns element at index[K
+  1 ✓)[K
+  • Even case: [94m(s[mid] + s[mid + 1]) / 2[m — [1mBUG[m: for even n, the two[K
+  middle elements are at indices [94mmid-1[m and [94mmid[m, not [94mmid[m and [94mmid+1[m. E.g.[K
+  n=4, mid=2; the midpoints are indices 1 and 2, but the code uses[K
+  indices 2 and 3.[K
+[K
+  Let me verify: for [94m[1, 2, 3, 4][m, correct median = 2.5. n=4, mid=2. Code[K
+  returns [94m(s[2]+s[3])/2 = (3+4)/2 = 3.5[m. That's wrong.[K
+[K
+[32m●[m [33;1mBash[37;22m(python3 -c ")[m [37m(ctrl+o to expand)[m[K
+[K
+[31m⚠ Individual quota reached. Please upgrade your subscription to increase[m[K
+[31myour limits. Resets in 62h37m27s.[m[K
+[90mError ID: 5f2c7f6a-1811-5ab7-b39e-eef1cc0a3311-15[m[K
+[K
+[90m────────────────────────────────────────────────────────────────────────────[m
+[94m>[m[K
+[K
+[K
+[K
+[90m────────────────────────────────────────────────────────────────────────────[m
+				[1K [32maccept-edits[39;2m · Claude Sonnet 4.6 (Thinking)[m[2A[2C[?25h[?2026l

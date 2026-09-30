@@ -192,7 +192,10 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
 GROK_ENV = {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"}
 
 # Devin: override any shell default for DEVIN_PERMISSION_MODE. The
-# lane must accept workspace edits (ANSWER.md) without a prompt.
+# lane must accept workspace edits (ANSWER.md) without a prompt. accept-edits
+# still prompts for every shell command, web fetch and MCP call, and a prompt
+# hangs the app (I3), so the overlay allows those tools by rule; edits outside
+# the workspace keep prompting. Packet mode denies fetches instead.
 # --sandbox / DEVIN_SANDBOX isolate the exec-tool child from
 # ~/.local/share/devin/credentials.toml, which made the app ask to "use local
 # credentials". Stored login is the auth; the review instruction is the write
@@ -201,7 +204,11 @@ DEVIN_ENV = {"DEVIN_PERMISSION_MODE": "accept-edits"}
 DEVIN_USER_CONFIG = Path.home() / ".config/devin/config.json"
 
 
-def _devin_config(path: Path) -> Path:
+DEVIN_ALLOW = ["exec", "mcp__*"]
+DEVIN_FETCH = ["Fetch(https://*/*)", "Fetch(http://*/*)"]
+
+
+def _devin_config(path: Path, web: bool) -> Path:
     """Operator config with hooks removed, beside the harness log.
     --config replaces the whole file: stripping login/setup made the app
     ask to use local credentials. Empty hooks only, so moshi/Herdr
@@ -212,6 +219,10 @@ def _devin_config(path: Path) -> Path:
     except (OSError, ValueError):
         pass
     src["hooks"] = {}
+    perms = src.setdefault("permissions", {})
+    perms["allow"] = [*perms.get("allow", []), *DEVIN_ALLOW, *(DEVIN_FETCH if web else [])]
+    if not web:
+        perms["deny"] = [*perms.get("deny", []), *DEVIN_FETCH]
     path.write_text(json.dumps(src), encoding="utf-8")
     return path
 
@@ -246,6 +257,14 @@ CLAUDE_ENV = {"DISABLE_AUTOUPDATER": "1"}
 # Devin `-p` prints plain text; the stream reader only parses JSON, so the
 # answer is ANSWER.md from the app, like Agy.
 APP_ONLY = {"agy", "devin"}
+
+# Terminal limit banners an app draws and then sits on, each seen on a real
+# screen: Agy "⚠ Individual quota reached. … Resets in 62h37m38s." (a per-model
+# cap its family meter does not show), Claude "You've hit your limit · resets
+# 7pm (America/Los_Angeles)", Codex "You hit your weekly limit." tui.py counts
+# one only at a line start near the bottom of a screen that stopped drawing,
+# so a peer that quotes a banner and keeps working is never ended.
+APP_LIMIT = re.compile(r"^\W*(?:Individual quota reached|You(?:['’]ve)? hit your (?:weekly )?limit)\b")
 
 
 def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
@@ -294,7 +313,7 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
         return Launch(argv, None, env_set=_opencode_env(lane))
     if lane.kind == "devin":
         argv = [
-            "devin", "--config", str(_devin_config(log.with_name("devin-config.json"))),
+            "devin", "--config", str(_devin_config(log.with_name("devin-config.json"), web)),
             "--permission-mode", "accept-edits",
             "--respect-workspace-trust", "false", "--model", lane.model,
             "--", message,

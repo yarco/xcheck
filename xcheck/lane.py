@@ -253,7 +253,7 @@ def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log:
 
     try:
         status, reason, code, text = tui.run(spec.argv, lane_env(spec, work), work, answer, screen,
-                                             idle, run.cap, spawned)
+                                             idle, run.cap, spawned, adapters.APP_LIMIT)
     except _Stop as stop:
         status, reason = _stop_status(stop, run.cap)
         code = None

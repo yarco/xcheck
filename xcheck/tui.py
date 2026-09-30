@@ -3,8 +3,8 @@
 The app's output goes to the runner's terminal unchanged (in Herdr, the pane),
 so the operator sees the real TUI; keystrokes from that terminal go to the app,
 so the operator can also type into it. The runner stays the owning process: it
-holds the pool lock, sees every byte (idle clock), and ends the app when the
-answer is published.
+holds the pool lock, sees every byte (only drawn text resets the idle clock),
+and ends the app when the answer is published.
 
 The lane answers by writing ANSWER.md. It counts as published when its last
 non-empty line is RESULT_COMPLETE or RESULT_INVALID and it has not changed for
@@ -29,14 +29,19 @@ from . import validate
 from .files import end_group, signal_group
 
 STABLE = 3.0
+LIMIT_SETTLE = 15.0  # seconds without drawing before a limit banner ends the lane
+LIMIT_LINES = 10  # the banner must be among the screen's last lines
 LOG_LIMIT = 8 * 1024 * 1024
 ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\r")
 RESET = b"\x1b[?1049l\x1b[?25h\x1b[0m\r\n"
 
 
 def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
-        idle: int, cap: int, on_spawn) -> tuple[str | None, str, int | None, str]:
-    """Returns (status or None when the answer decides, reason, exit code, answer text)."""
+        idle: int, cap: int, on_spawn, limit: re.Pattern | None = None,
+        ) -> tuple[str | None, str, int | None, str]:
+    """Returns (status or None when the answer decides, reason, exit code, answer text).
+    An app that stops drawing with a `limit` banner on its last screen ends
+    `failed` after LIMIT_SETTLE seconds instead of waiting out `idle`."""
     pid, fd = pty.fork()
     if pid == 0:  # child: session leader with the pty as its terminal
         try:
@@ -56,6 +61,8 @@ def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
     status, reason, code = None, "", None
     started = last = time.time()
     seen, seen_at = None, 0.0
+    carry = b""
+    recent, checked = b"", False
     log = open(screen_log, "ab")
     try:
         while True:
@@ -73,7 +80,10 @@ def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
                     log.seek(0)
                 log.write(data)
                 log.flush()  # on disk now: a killed runner leaves its last screen
-                last = time.time()
+                recent = (recent + data)[-65536:]
+                text, carry = _visible(carry + data)
+                if text:
+                    last, checked = time.time(), False
             if interactive and 0 in ready:
                 data = os.read(0, 4096)
                 if data:
@@ -88,6 +98,12 @@ def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
                 code, pid = os.waitstatus_to_exitcode(wstatus), 0
                 break
             now = time.time()
+            if limit and not checked and now - last > LIMIT_SETTLE:
+                checked = True
+                banner = limit_banner(_lines(recent), limit)
+                if banner:
+                    status, reason = "failed", f"the app stopped on a limit screen: {banner}"
+                    break
             if now - last > idle:
                 status, reason = "timeout", f"the app printed nothing for {idle}s"
                 break
@@ -120,8 +136,34 @@ def screen_tail(screen_log: Path, lines: int = 20) -> list[str]:
             raw = f.read()
     except OSError:
         return []
+    return _lines(raw)[-lines:]
+
+
+def _lines(raw: bytes) -> list[str]:
     text = ANSI.sub(b"", raw).decode("utf-8", errors="replace")
-    return [l.rstrip() for l in text.splitlines() if l.strip()][-lines:]
+    return [l.rstrip() for l in text.splitlines() if l.strip()]
+
+
+def limit_banner(lines: list[str], limit: re.Pattern) -> str | None:
+    """The limit banner among the last LIMIT_LINES lines, with its wrapped
+    continuation (a next line that starts lowercase), or None."""
+    tail = lines[-LIMIT_LINES:]
+    for i, line in enumerate(tail):
+        if limit.match(line.strip()):
+            more = tail[i + 1].strip() if i + 1 < len(tail) else ""
+            return f"{line.strip()} {more}" if more[:1].islower() else line.strip()
+    return None
+
+
+def _visible(buf: bytes) -> tuple[bytes, bytes]:
+    """(text an app drew, unfinished escape sequence to prepend to the next read).
+    Only drawn text is activity: an app blocked on a dialog can keep emitting
+    empty synchronized-update frames and cursor toggles forever."""
+    carry = b""
+    i = buf.rfind(b"\x1b")
+    if i >= 0 and len(buf) - i < 64 and not ANSI.match(buf, i):
+        buf, carry = buf[:i], buf[i:]
+    return bytes(c for c in ANSI.sub(b"", buf) if c > 32), carry
 
 
 def _signature(path: Path):

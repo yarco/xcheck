@@ -22,7 +22,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from xcheck import adapters, lane, run, validate  # noqa: E402
-from xcheck.files import Run  # noqa: E402
 
 
 def main() -> int:
@@ -81,7 +80,7 @@ def main() -> int:
         if a.cmd == "wait":
             return run.wait(a.base, a.timeout)
         if a.cmd == "status":
-            print(run.render_status(Run.load(a.base.resolve())))
+            print(run.render_status(run.launched(a.base.resolve())))
             return 0
         if a.cmd == "capacity":
             from xcheck import capacity

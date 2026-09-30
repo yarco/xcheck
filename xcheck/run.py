@@ -187,9 +187,16 @@ def _runner_argv(base: Path, name: str) -> list[str]:
 # ------------------------------------------------------------------ wait
 
 
+def launched(base: Path) -> Run:
+    """The run in BASE; refuses a BASE that `run` never launched."""
+    if not (base / "run.json").is_file():
+        raise RunError(f"{base} was never launched (no run.json); start it with `xcheck run`")
+    return Run.load(base)
+
+
 def wait(base: Path, timeout: int | None) -> int:
     base = base.resolve()
-    run = Run.load(base)
+    run = launched(base)
     until = time.time() + timeout if timeout else None
     while True:
         if (base / ".done").exists():

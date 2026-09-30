@@ -2,7 +2,7 @@
 """Fake codex/claude/grok/agy/opencode/devin: speaks each CLI's real stream shape.
 
 The kind is argv[0]'s basename. FAKE_MODE selects the behaviour:
-ok | invalid | declined | error | hang | silent-exit.
+ok | invalid | declined | error | hang | silent-exit | noop-frames | limit | limit-echo.
 """
 
 import json
@@ -91,6 +91,20 @@ if tui:
             while True:
                 time.sleep(1)
         (target / "background-child.pid").write_text(str(child))
+        (target / "ANSWER.md").write_text(answer_ok)
+    elif mode == "noop-frames":  # devin blocked on a permission dialog: empty frames, no text
+        for _ in range(300):
+            sys.stdout.write("\x1b[?2026h\x1b[?25l\x1b[?2026l")
+            sys.stdout.flush()
+            time.sleep(0.2)
+    elif mode == "limit":  # the real Agy per-model cap screen, then nothing
+        sys.stdout.buffer.write((Path(__file__).resolve().parent.parent / "fixtures" / "agy-quota.screen").read_bytes())
+        sys.stdout.flush()
+    elif mode == "limit-echo":  # a peer quoting the banner while it keeps working
+        print("\u26a0 Individual quota reached. Please upgrade your subscription to increase\r", flush=True)
+        for i in range(20):
+            print(f"thinking {i}s\r", flush=True)
+            time.sleep(1)
         (target / "ANSWER.md").write_text(answer_ok)
     elif mode != "hang":
         (target / "ANSWER.md").write_text(answer or "")
