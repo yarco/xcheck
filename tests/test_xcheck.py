@@ -61,10 +61,16 @@ class LaneNames(unittest.TestCase):
         self.assertEqual(adapters.parse_lane("opencode:nemotron-3-ultra-free:high").name,
                          "opencode-nemotron-3-ultra-free-high")
         self.assertEqual(adapters.parse_lane("devin:swe-2-max"), Lane("devin", "swe-2-max"))
+        glm = adapters.parse_lane("opencode:zai-coding-plan/glm-5.3:high")
+        self.assertEqual(glm.model, "zai-coding-plan/glm-5.3")
+        self.assertEqual(glm.effort, "high")
+        self.assertEqual(glm.name, "opencode-zai-coding-plan-glm-5.3-high")
+        self.assertEqual(glm.pool, "opencode-zai-coding-plan")
+        bunny = adapters.parse_lane("opencode:openrouter/stealth/space-bunny-alpha")
+        self.assertEqual(bunny.name, "opencode-openrouter-stealth-space-bunny-alpha")
+        self.assertEqual(bunny.pool, "opencode-openrouter")
         for bad in ("codex:gpt-6.1-sol", "agy:gemini-3.1-pro-high:high", "nope:x:y", "codex",
-                    "opencode:muse-spark-1.3",  # paid Zen: no meter, so refused
-                    "devin:swe-2-max:high",  # selector carries effort
-                    "devin:gpt-6-sol-high"):  # paid Devin: no meter, so refused
+                    "devin:swe-2-max:high"):  # selector carries effort
             with self.assertRaises(ValueError):
                 adapters.parse_lane(bad)
 
@@ -162,7 +168,15 @@ class OpencodeLane(unittest.TestCase):
                 self.assertIn(f'(subpath "{work}")', argv[2])
                 self.assertIn("--auto", argv)
                 self.assertIn("opencode/muse-spark-1.3-contributor-free", argv)
-                self.assertNotIn("--agent", argv)  # any non-stock agent or rule loses the free tier
+        glm = Lane("opencode", "zai-coding-plan/glm-5.3", "high")
+        with tempfile.TemporaryDirectory() as tmp:
+            work, msg = Path(tmp).resolve(), Path(tmp) / "m.txt"
+            msg.write_text("review\n")
+            argv = adapters.launch(glm, work, msg, work / "f", work / "l", True).argv
+            self.assertIn("zai-coding-plan/glm-5.3", argv)
+            self.assertIn("--variant", argv)
+            self.assertEqual(argv[argv.index("--variant") + 1], "high")
+            self.assertNotIn("--agent", argv)
 
     def test_the_sandbox_denies_writes_outside_the_workspace(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(dir=Path.home()) as outside:
@@ -175,7 +189,7 @@ class OpencodeLane(unittest.TestCase):
             self.assertIn(b"Operation not permitted", escape.stderr)
             self.assertFalse((Path(outside) / "escape").exists())
 
-    def test_free_models_have_no_quota_to_protect(self):
+    def test_opt_in_has_no_protocol_meter(self):
         from xcheck import capacity
         self.assertEqual(capacity.read(self.LANE).status, "eligible")
 
@@ -201,7 +215,7 @@ class DevinLane(unittest.TestCase):
             self.assertEqual(json.loads(overlay.read_text()).get("hooks"), {})
             self.assertIn("devin", adapters.APP_ONLY)
 
-    def test_swe2_is_listed_free_so_has_no_quota_to_protect(self):
+    def test_opt_in_has_no_protocol_meter(self):
         from xcheck import capacity
         self.assertEqual(capacity.read(self.LANE).status, "eligible")
 

@@ -31,7 +31,7 @@ class Lane:
     @property
     def name(self) -> str:
         """Provenance name: harness + exact model (+ effort when it is a flag)."""
-        model = self.model
+        model = self.model.replace("/", "-")
         base = model if model.startswith(self.kind) else f"{self.kind}-{model}"
         if self.effort and not base.endswith(f"-{self.effort}"):
             base = f"{base}-{self.effort}"
@@ -41,6 +41,8 @@ class Lane:
     def pool(self) -> str:
         if self.kind == "agy":
             return "agy-gemini" if self.model.startswith(AGY_GEMINI_PREFIX) else "agy-3p"
+        if self.kind == "opencode" and "/" in self.model:
+            return f"opencode-{self.model.split('/', 1)[0]}"
         return self.kind
 
     def to_json(self) -> dict:
@@ -60,9 +62,8 @@ DEFAULT_ROSTER = (
     Lane("agy", "claude-sonnet-4-6"),
 )
 
-# Supported but never default. Muse Contributor Free lets Meta train on the
-# prompts and every file the lane reads: add it only for packets the operator
-# is content to share (`run --add`).
+# Supported but never default (`run --add`). Pins are the operator's current
+# extras; they can be dropped from a roster without changing the protocol.
 OPT_IN = (
     Lane("agy", "claude-opus-4-6-thinking"),
     Lane("opencode", "muse-spark-1.3-contributor-free"),
@@ -71,23 +72,19 @@ OPT_IN = (
 
 
 def parse_lane(spec: str) -> Lane:
-    """`kind:model[:effort]` → Lane. Agy and Devin take no effort."""
+    """`kind:model[:effort]` → Lane. Agy and Devin take no effort.
+    Opencode models may be `provider/model` (a slash is part of the model)."""
     parts = spec.split(":")
     if len(parts) not in (2, 3) or parts[0] not in KINDS or not parts[1]:
         raise ValueError(f"lane spec must be kind:model[:effort], kind in {KINDS}: {spec!r}")
     kind, model = parts[0], parts[1]
     effort = parts[2] if len(parts) == 3 else ""
+    ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*" if kind == "opencode" else r"[A-Za-z0-9][A-Za-z0-9._-]*"
     for part in (model, effort):
-        if part and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part):
+        if part and not re.fullmatch(ident if part is model else r"[A-Za-z0-9][A-Za-z0-9._-]*", part):
             raise ValueError(f"model and effort must be plain identifiers: {part!r}")
     if kind in ("agy", "devin") and effort:
         raise ValueError(f"{kind} selectors carry their own effort; drop ':{effort}'")
-    if kind == "opencode" and not model.endswith("-free"):
-        # No meter exists for paid Zen balance, and capacity fails closed.
-        raise ValueError(f"opencode lanes run OpenCode Zen free models only: {spec!r}")
-    if kind == "devin" and not model.startswith("swe-2"):
-        # SWE-2 is listed Free; paid Devin models have no meter, so fail closed.
-        raise ValueError(f"devin lanes run SWE-2 (listed Free) only: {spec!r}")
     if kind not in ("agy", "opencode", "devin") and not effort:
         raise ValueError(f"{kind} lane needs an explicit effort: {spec!r}")
     return Lane(kind, model, effort)
@@ -142,7 +139,7 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
     if lane.kind == "opencode":
         argv = [*opencode_sandbox(work), "opencode", "run", "--auto", *_opencode_model(lane),
                 "--format", "json", message.read_text(encoding="utf-8").strip()]
-        return Launch(argv, None)
+        return Launch(argv, None, env_set=_opencode_env(lane))
     raise ValueError(f"{lane.kind} has no headless form; it runs as its app (tui)")
 
 
@@ -164,7 +161,28 @@ def opencode_sandbox(work: Path) -> list[str]:
 
 
 def _opencode_model(lane: Lane) -> list[str]:
-    return ["-m", f"opencode/{lane.model}", *(["--variant", lane.effort] if lane.effort else [])]
+    model = lane.model if "/" in lane.model else f"opencode/{lane.model}"
+    return ["-m", model, *(["--variant", lane.effort] if lane.effort else [])]
+
+
+def _opencode_env(lane: Lane) -> dict[str, str]:
+    """Provider-prefixed opencode models may need that provider's env key.
+    Stored opencode auth.json covers OpenRouter; Z.ai Coding Plan is ZAI_API_KEY."""
+    import os
+    env = {}
+    if "/" not in lane.model:
+        return env
+    provider = lane.model.split("/", 1)[0]
+    names = []
+    if provider.startswith("zai"):
+        names.append("ZAI_API_KEY")
+    if provider == "openrouter":
+        names.append("OPENROUTER_API_KEY")
+    for name in names:
+        v = os.environ.get(name)
+        if v:
+            env[name] = v
+    return env
 
 
 # Grok: `read-only` reads everywhere and kernel-denies writes outside ~/.grok and
@@ -270,7 +288,7 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
     if lane.kind == "opencode":
         argv = [*opencode_sandbox(work), "opencode", str(work), "--auto", *_opencode_model(lane),
                 "--prompt", message]
-        return Launch(argv, None)
+        return Launch(argv, None, env_set=_opencode_env(lane))
     if lane.kind == "devin":
         argv = [
             "devin", "--config", str(_devin_config(log.with_name("devin-config.json"))),

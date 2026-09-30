@@ -6,8 +6,8 @@ Each pool has one free meter that runs no inference:
   claude  Anthropic OAuth usage endpoint, token from the login keychain
   grok    Grok CLI billing, credits view (the TUI's "weekly limit left")
   agy     `agy -p /usage --output-format json` (a client-side command: zero turns)
-  opencode Zen free models (no meter)
-  devin   SWE-2, listed Free (no meter)
+  opencode opt-in (no protocol meter)
+  devin   opt-in (no protocol meter)
 
 A lane spends only when every window it draws on has more than the reserve
 left: 10 %, or 5 + 5n % for the n lanes of one run sharing an Agy family
@@ -71,10 +71,8 @@ def reserve_for(lane: Lane, same_pool: int) -> float:
 
 def read(lane: Lane, same_pool: int = 1) -> Reading:
     """The lane's pool reading against its reserve. Never raises."""
-    if lane.kind == "opencode":  # parse_lane admits Zen free models only
-        return Reading("eligible", "free Zen model: no quota to protect; a free-usage limit is the lane's error")
-    if lane.kind == "devin":  # parse_lane admits SWE-2 (listed Free) only
-        return Reading("eligible", "SWE-2 is listed Free: no quota to protect; a quota error is the lane's error")
+    if lane.kind in ("opencode", "devin"):
+        return Reading("eligible", f"{lane.kind} opt-in: no protocol meter; a quota error is the lane's error")
     reserve = reserve_for(lane, same_pool)
     try:
         windows = METERS[lane.kind](lane)
