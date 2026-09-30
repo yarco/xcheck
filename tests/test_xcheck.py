@@ -177,6 +177,9 @@ class OpencodeLane(unittest.TestCase):
             self.assertIn("zai-coding-plan/glm-5.3", argv)
             self.assertIn("--variant", argv)
             self.assertEqual(argv[argv.index("--variant") + 1], "high")
+            # The app has no --variant: an explicit effort is refused, never dropped.
+            with self.assertRaisesRegex(ValueError, "--variant is `opencode run` only"):
+                adapters.tui(glm, work, "review", work / "l", True)
 
     def test_opt_in_has_no_protocol_meter(self):
         from xcheck import capacity
@@ -936,6 +939,13 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertFalse((self.base / ".launched").exists())
         self.assertEqual({r["status"] for r in self.run_lanes().values()}, {"done"})
+
+    def test_opencode_effort_in_the_app_view_is_refused_before_launch(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
+                        "--view", "tui", "--skip-capacity", "--lanes", "opencode:zai-coding-plan/glm-5.3:high")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("--variant is `opencode run` only", p.stderr)
+        self.assertFalse((self.base / ".launched").exists())
 
     def test_orchestrator_kind_is_never_a_peer(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",

@@ -154,6 +154,10 @@ def opencode_sandbox(work: Path) -> list[str]:
     return []
 
 
+# `--variant` exists only on `opencode run`; the app has no effort flag.
+OPENCODE_APP_EFFORT = "opencode's app takes no effort (--variant is `opencode run` only); drop ':{effort}' or use --mode headless"
+
+
 def _opencode_model(lane: Lane) -> list[str]:
     model = lane.model if "/" in lane.model else f"opencode/{lane.model}"
     return ["-m", model, *(["--variant", lane.effort] if lane.effort else [])]
@@ -283,6 +287,8 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
         ]
         return Launch(argv, None)
     if lane.kind == "opencode":
+        if lane.effort:
+            raise ValueError(OPENCODE_APP_EFFORT.format(effort=lane.effort))
         argv = [*opencode_sandbox(work), "opencode", str(work), "--auto", *_opencode_model(lane),
                 "--prompt", message]
         return Launch(argv, None, env_set=_opencode_env(lane))
