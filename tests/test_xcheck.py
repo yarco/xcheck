@@ -1009,6 +1009,18 @@ class EndToEnd(unittest.TestCase):
                 self.assertFalse((base / ".launched").exists())
                 self.assertFalse((base / "lanes").exists())
 
+    def test_a_base_outside_the_root_is_refused_before_anything_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "outside base"
+            shutil.copytree(self.base, base)
+            p = self.xcheck("run", "--base", str(base), "--orch", "other", "--mode", "headless",
+                            "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("BASE must live under", p.stderr)
+            self.assertIn("outside base", p.stderr)
+            self.assertFalse((base / ".launched").exists())
+            self.assertFalse((base / "run.json").exists())
+
     def test_echoed_quota_words_in_an_answer_are_not_a_quota_death(self):
         rows = self.run_lanes("echo402")
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)

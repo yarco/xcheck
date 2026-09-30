@@ -65,7 +65,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
           view: str = "auto") -> int:
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
-        raise RunError(f"BASE must live under {ROOT}")
+        raise RunError(f"BASE must live under {ROOT} (got {base}); stage it as {ROOT}/<slug>")
     if not lanes:
         raise RunError("select at least one peer lane")
     if cap <= 0 or (idle is not None and idle <= 0):
