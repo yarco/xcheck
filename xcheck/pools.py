@@ -41,18 +41,19 @@ class Held:
 
 
 def acquire(root: Path, pool: str, run_id: str, deadline: float, on_wait=None) -> Held | None:
-    """Block until this run may spend from `pool`; None once `deadline` passes.
-    Waiting for the gate and for the pool both count against `deadline`."""
+    """Block until this run may spend from `pool`; None once `deadline` (on
+    time.monotonic(), which stops while the Mac sleeps) passes. Waiting for the
+    gate and for the pool both count against `deadline`."""
     d = root / ".pools" / pool
     d.mkdir(parents=True, exist_ok=True)
     busy = open(d / "busy", "a+")
     announced = False
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             pause = GATE_POLL
             with open(d / "gate", "a+") as gate:
                 if _try(gate, fcntl.LOCK_EX):
-                    if time.time() >= deadline:  # never admit after the deadline
+                    if time.monotonic() >= deadline:  # never admit after the deadline
                         break
                     owner = _read(d / "owner")
                     free = _try(busy, fcntl.LOCK_EX)
@@ -68,7 +69,7 @@ def acquire(root: Path, pool: str, run_id: str, deadline: float, on_wait=None) -
                         on_wait(owner)
                         announced = True
                     pause = POLL
-            time.sleep(max(0.0, min(pause, deadline - time.time())))
+            time.sleep(max(0.0, min(pause, deadline - time.monotonic())))
     except BaseException:
         busy.close()
         raise

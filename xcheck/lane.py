@@ -36,12 +36,16 @@ TAIL_LINES = 40
 # The orchestrator's own session identity must not reach a peer: a child
 # `claude` seeing CLAUDECODE / CLAUDE_CODE_SESSION_ID / the messaging socket is
 # a nested session of the orchestrator, CLAUDE_EFFORT is the orchestrator's
-# effort, and HERDR_* would let a peer drive the operator's Herdr session.
+# effort, and a peer that reaches the operator's Herdr could read or type into
+# any pane. Scrubbing HERDR_* is not enough: the herdr CLI falls back to its
+# default socket, so the lane points HERDR_SOCKET_PATH at a path that cannot
+# exist and every herdr call inside a lane finds no server.
 # Provider API keys are removed too: every lane runs on subscription auth, and
 # a key in the environment would bill it instead. User preferences such as
 # GROK_TELEMETRY_* stay.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE")  # an opencode orchestrator's session; any config override breaks the free tier
+NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
 SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
                "GROK_SANDBOX",  # the operator's default profile; the adapter picks the lane's
                "OLDPWD"}
@@ -54,6 +58,10 @@ def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
     # The inherited PWD names the orchestrator's directory, and opencode roots
     # its file tools and shell there instead of at its real cwd.
     env["PWD"] = str(work)
+    env["HERDR_SOCKET_PATH"] = NO_HERDR
+    # Codex and Devin run each shell command through the operator's zsh rc files,
+    # which load API keys from the Keychain; ~/.zshrc skips that when this is set.
+    env["XCHECK_LANE"] = "1"
     env.update(spec.env_set)
     return env
 
@@ -138,15 +146,20 @@ def _run_lane(base: Path, name: str) -> int:
     # lane as live from its first instant.
     atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": None}))
 
+    missing = adapters.missing_keys(lane)
+    if missing:
+        return _finish(run, name, started, "skipped",
+                       f"auth-required: {', '.join(missing)} is empty in the environment xcheck ran in",
+                       None, reader, err_path)
     # One run at a time spends from a pool; wait here (no orchestrator turns).
-    held = pools.acquire(ROOT, lane.pool, str(run.base), started + run.cap,
+    held = pools.acquire(ROOT, lane.pool, str(run.base), time.monotonic() + run.cap,
                          on_wait=lambda owner: print(
                              f"xcheck lane {name}: waiting for pool {lane.pool} "
                              f"(held by {Path(owner).name or 'another run'})", flush=True))
     if held is None:
         return _finish(run, name, started, "skipped",
                        f"pool {lane.pool} stayed busy for {run.cap}s", None, reader, err_path)
-    started = time.time()  # idle and cap clocks start when spending can
+    started = time.time()  # when spending can start; exit.json records wall time
     _stage(run, work)  # only now: the pool lock makes this workspace ours
     (d / "staged").touch()
 
@@ -178,7 +191,9 @@ def _run_lane(base: Path, name: str) -> int:
         print(f"xcheck lane {name}: {' '.join(spec.argv[:3])} … (pid {proc.pid})", flush=True)
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
-        last = time.time()
+        # Intervals use the monotonic clock: it stops while the Mac sleeps, so a
+        # closed lid neither idles nor spends a lane's budget.
+        last = spend_from = time.monotonic()
         pending = b""
         try:
             while True:
@@ -189,7 +204,7 @@ def _run_lane(base: Path, name: str) -> int:
                     if not chunk:
                         sel.unregister(key.fileobj)
                         break
-                    last = time.time()
+                    last = time.monotonic()
                     stream.write(chunk)
                     stream.flush()
                     pending += chunk
@@ -198,10 +213,10 @@ def _run_lane(base: Path, name: str) -> int:
                         _consume(reader, raw)
                 if not sel.get_map() and proc.poll() is not None:
                     break
-                t = time.time()
+                t = time.monotonic()
                 if t - last > idle:
                     status, reason = "timeout", f"no output for {idle}s"
-                elif t - started > run.cap:
+                elif t - spend_from > run.cap:
                     status, reason = "timeout", f"exceeded the {run.cap}s cap"
                 if status:
                     _kill(proc)
@@ -229,10 +244,20 @@ def _run_lane(base: Path, name: str) -> int:
     return _finish(run, name, started, status, reason, code, reader, err_path)
 
 
+def _writable_retry(func, path, exc) -> None:
+    """rmtree hook: a peer's scratch may leave read-only directories (Go module
+    caches do). rmtree never follows symlinks, so the parent is inside the
+    workspace; make it writable and retry once."""
+    if not isinstance(exc, PermissionError):
+        raise exc
+    os.chmod(os.path.dirname(path), 0o700)
+    func(path)
+
+
 def _stage(run: Run, work: Path) -> None:
     """Fresh copy of the packet in the lane's stable workspace."""
     if work.exists():
-        shutil.rmtree(work)
+        shutil.rmtree(work, onexc=_writable_retry)
     work.mkdir(parents=True)
     for f in ("PACKET.md", "PROMPT.md"):
         shutil.copy2(run.base / f, work / f)

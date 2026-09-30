@@ -59,7 +59,7 @@ def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
     _sync_size(fd)
     previous = signal.signal(signal.SIGWINCH, lambda *_: _sync_size(fd))
     status, reason, code = None, "", None
-    started = last = time.time()
+    started = last = time.monotonic()
     seen, seen_at = None, 0.0
     carry = b""
     recent, checked = b"", False
@@ -83,21 +83,21 @@ def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
                 recent = (recent + data)[-65536:]
                 text, carry = _visible(carry + data)
                 if text:
-                    last, checked = time.time(), False
+                    last, checked = time.monotonic(), False
             if interactive and 0 in ready:
                 data = os.read(0, 4096)
                 if data:
                     os.write(fd, data)
             sig = _signature(answer)
             if sig != seen:
-                seen, seen_at = sig, time.time()
-            elif sig and time.time() - seen_at >= STABLE and _complete(answer):
+                seen, seen_at = sig, time.monotonic()
+            elif sig and time.monotonic() - seen_at >= STABLE and _complete(answer):
                 break
             done, wstatus = os.waitpid(pid, os.WNOHANG)
             if done:
                 code, pid = os.waitstatus_to_exitcode(wstatus), 0
                 break
-            now = time.time()
+            now = time.monotonic()
             if limit and not checked and now - last > LIMIT_SETTLE:
                 checked = True
                 banner = limit_banner(_lines(recent), limit)
@@ -199,8 +199,8 @@ def _end(pid: int) -> int | None:
             return os.waitstatus_to_exitcode(wstatus)
         if not signal_group(pid, sig):
             break
-        deadline = time.time() + wait
-        while time.time() < deadline:
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
             done, wstatus = os.waitpid(pid, os.WNOHANG)
             if done:
                 return os.waitstatus_to_exitcode(wstatus)

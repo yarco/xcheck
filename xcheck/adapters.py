@@ -163,6 +163,16 @@ def _opencode_model(lane: Lane) -> list[str]:
     return ["-m", model, *(["--variant", lane.effort] if lane.effort else [])]
 
 
+def missing_keys(lane: Lane) -> list[str]:
+    """Provider keys this lane cannot run without that are empty here. Without
+    one, `opencode run` fails with a bare "Unexpected server error"; a launchd
+    session exports ZAI_API_KEY empty."""
+    import os
+    if lane.kind == "opencode" and lane.model.split("/", 1)[0].startswith("zai") and "/" in lane.model:
+        return [n for n in ("ZAI_API_KEY",) if not os.environ.get(n)]
+    return []
+
+
 def _opencode_env(lane: Lane) -> dict[str, str]:
     """Provider-prefixed opencode models may need that provider's env key.
     Stored opencode auth.json covers OpenRouter; Z.ai Coding Plan needs

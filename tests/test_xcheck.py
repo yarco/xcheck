@@ -202,6 +202,26 @@ class LimitBanner(unittest.TestCase):
         self.assertIsNone(tui.limit_banner(["⚠ Individual quota reached.", *["more work"] * 10], adapters.APP_LIMIT))
 
 
+class SleepingMac(unittest.TestCase):
+    def test_a_wall_clock_jump_neither_idles_nor_caps_an_app(self):
+        # Closing the lid moves wall time, not the monotonic clock the runner measures by.
+        from xcheck import tui
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            app = ("import time, pathlib\n"
+                   "for i in range(8):\n    print('working', i, flush=True); time.sleep(0.25)\n"
+                   "pathlib.Path('ANSWER.md').write_text('### 1) VERDICT\\nok\\nRESULT_COMPLETE\\n')\n"
+                   "time.sleep(30)\n")
+            real, t0 = time.time, time.time()
+            jumped = lambda: real() + (86400 if real() - t0 > 1 else 0)
+            with patch("time.time", jumped):
+                status, reason, _, text = tui.run([sys.executable, "-c", app], dict(os.environ), work,
+                                                  work / "ANSWER.md", work / "screen.log",
+                                                  idle=5, cap=60, on_spawn=lambda pid: None)
+            self.assertIsNone(status, reason)
+            self.assertTrue(text.endswith("RESULT_COMPLETE\n"))
+
+
 class DevinLane(unittest.TestCase):
     LANE = Lane("devin", "swe-2-max")
 
@@ -382,7 +402,7 @@ class PoolAdmission(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def take(self, pool, run_id, seconds=0.2):
-        held = self.pools.acquire(self.root, pool, run_id, time.time() + seconds)
+        held = self.pools.acquire(self.root, pool, run_id, time.monotonic() + seconds)
         if held:
             self.addCleanup(held.release)
         return held
@@ -396,7 +416,7 @@ class PoolAdmission(unittest.TestCase):
         results = []
         def enter():
             try:
-                results.append(self.pools.acquire(self.root, "codex", "A", time.time() + 0.1))
+                results.append(self.pools.acquire(self.root, "codex", "A", time.monotonic() + 0.1))
             except BaseException as exc:
                 results.append(exc)
         with (directory / "gate").open("a+") as gate:
@@ -425,10 +445,10 @@ class PoolAdmission(unittest.TestCase):
         with (directory / "gate").open("a+") as gate:
             fcntl.flock(gate, fcntl.LOCK_EX)
             threading.Timer(0.2, fcntl.flock, (gate, fcntl.LOCK_UN)).start()
-            t0 = time.time()
+            t0 = time.monotonic()
             held = self.pools.acquire(self.root, "codex", "A", t0 + 5, on_wait=waits.append)
         self.addCleanup(held.release)
-        self.assertLess(time.time() - t0, 1)
+        self.assertLess(time.monotonic() - t0, 1)
         self.assertEqual(waits, [])
 
     def test_same_run_shares_but_every_holder_must_release_for_another_run(self):
@@ -919,8 +939,8 @@ class EndToEnd(unittest.TestCase):
             (self.bin / k).symlink_to(REPO / "tests" / "fake" / "harness")
         stage(self.base)
 
-    def xcheck(self, *args, mode="ok", timeout=60, capacity=None):
-        env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
+    def xcheck(self, *args, mode="ok", timeout=60, capacity=None, env_extra=None):
+        env = {**os.environ, **(env_extra or {}), "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
                "XCHECK_ROOT": str(self.root),
                "CODEX_CONFIG": str(self.root / "codex-config.toml"),
                "AGY_SETTINGS": str(self.root / "agy-settings.json")}
@@ -1008,6 +1028,15 @@ class EndToEnd(unittest.TestCase):
                 self.assertIn(reason, result.stderr)
                 self.assertFalse((base / ".launched").exists())
                 self.assertFalse((base / "lanes").exists())
+
+    def test_a_zai_lane_without_its_key_is_skipped_by_name_before_spending(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
+                        "--lanes", "opencode:zai-coding-plan/glm-5.3", env_extra={"ZAI_API_KEY": ""})
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
+        self.assertEqual(row["status"], "skipped", row)
+        self.assertIn("ZAI_API_KEY is empty", row["reason"])
+        self.assertFalse((self.root / ".lanes" / "opencode-zai-coding-plan-glm-5.3").exists())
 
     def test_a_base_outside_the_root_is_refused_before_anything_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1098,9 +1127,11 @@ class EndToEnd(unittest.TestCase):
                 "ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "HERDR_PANE_ID": "w1:p1",
                 "CODEX_COMPANION_SESSION_ID": "c", "GROK_SANDBOX": "ws"}
         keep = {"GROK_TELEMETRY_ENABLED": "0"}
+        # herdr falls back to its default socket when HERDR_* is gone: the lane names a dead one
+        live_socket = {"HERDR_SOCKET_PATH": str(Path.home() / ".config/herdr/herdr.sock")}
         # The orchestrator's directory: opencode roots its tools at PWD, not at its cwd.
         stale = {"PWD": str(Path.home()), "OLDPWD": str(Path.home())}
-        env = {**os.environ, **leak, **keep, **stale, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
+        env = {**os.environ, **leak, **keep, **stale, **live_socket, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
                "CODEX_CONFIG": str(self.root / "codex-config.toml"),
                "AGY_SETTINGS": str(self.root / "agy-settings.json")}
@@ -1113,6 +1144,8 @@ class EndToEnd(unittest.TestCase):
             seen = json.loads(dump.with_suffix(f".{kind}.json").read_text())
             self.assertFalse(set(leak) & set(seen), f"{kind} saw {set(leak) & set(seen)}")
             self.assertEqual(seen.get("GROK_TELEMETRY_ENABLED"), "0")
+            self.assertEqual(seen.get("HERDR_SOCKET_PATH"), "/nonexistent/xcheck-lanes-have-no-herdr.sock", kind)
+            self.assertEqual(seen.get("XCHECK_LANE"), "1", kind)  # ~/.zshrc then loads no secrets
             lane = next(l for l in lanes.split(",") if l.startswith(kind + ":"))
             work = self.root / ".lanes" / adapters.parse_lane(lane).name
             self.assertEqual(seen.get("PWD"), str(work), kind)
@@ -1185,7 +1218,7 @@ class EndToEnd(unittest.TestCase):
         self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         self.assertEqual(self.lane_exit(self.base, "codex-gpt-6.1-sol-high")["status"], "done")
-        held = pools.acquire(self.root, "codex", "next-run", time.time() + 1)
+        held = pools.acquire(self.root, "codex", "next-run", time.monotonic() + 1)
         self.assertIsNotNone(held, "a surviving background child kept the quota lock")
         if held:
             held.release()
@@ -1293,6 +1326,34 @@ class EndToEnd(unittest.TestCase):
         os.kill(json.loads((d / "pids.json").read_text())["runner"], signal.SIGKILL)
         self.assertIn(b"working on the review", (d / "screen.log").read_bytes())
         self.assertEqual(self.xcheck("wait", "--base", str(self.base), mode="hang").returncode, 0)
+
+    def test_leftovers_of_an_earlier_run_never_reach_the_next(self):
+        # a stale complete answer, and scratch a peer left read-only (Go module caches do)
+        work = self.root / ".lanes" / "grok-4.7-xhigh"
+        (work / "cache" / "mod").mkdir(parents=True)
+        (work / "cache" / "mod" / "f.go").write_text("x")
+        (work / "ANSWER.md").write_text(f"### 1) VERDICT\nstale\n6) PROOF: {TOKEN}\nRESULT_COMPLETE\n")
+        for d in (work / "cache" / "mod", work / "cache"):
+            d.chmod(0o555)
+        self.addCleanup(lambda: [d.chmod(0o755) for d in (work / "cache", work / "cache" / "mod") if d.exists()])
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless", "--view", "tui",
+                        "--skip-capacity", "--idle", "3", "--lanes", "grok:grok-4.7:xhigh", mode="hang")
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
+        self.assertEqual(row["status"], "timeout", row)  # the app wrote nothing; the stale answer is gone
+        self.assertFalse((self.base / "RESULT-grok-4.7-xhigh.md").exists())
+
+    def test_awkward_evidence_names_reach_the_workspace(self):
+        names = ["line\nbreak.py", "sp ace/ü (1)'s.txt", "-dash.md", *[f"many/f{i}.txt" for i in range(1500)]]
+        for n in names:
+            (self.base / "evidence" / n).parent.mkdir(parents=True, exist_ok=True)
+            (self.base / "evidence" / n).write_text(n)
+        os.utime(self.base / "evidence" / "manifest-tail.txt")  # staged last
+        rows = self.run_lanes()
+        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
+        work = self.root / ".lanes" / "codex-gpt-6.1-sol-high" / "evidence"
+        for n in names:
+            self.assertEqual((work / n).read_text(), n)
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()
