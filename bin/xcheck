@@ -37,7 +37,7 @@ def main() -> int:
     r.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster minus --orch")
     r.add_argument("--add", action="append", default=[], metavar="LANE",
                    help="append an opt-in lane (kind:model[:effort]) to the roster, e.g. "
-                        "opencode:muse-spark-1.3-contributor-free")
+                        "opencode:muse-spark-1.3-contributor-free or devin:swe-2-max")
     r.add_argument("--mode", default="auto", choices=["auto", "headless", "herdr"])
     r.add_argument("--view", default="auto", choices=["auto", "tui", "stream"],
                    help="tui: each harness's own interactive app (default in Herdr); "

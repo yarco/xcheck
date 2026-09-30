@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-KINDS = ("codex", "claude", "grok", "agy", "opencode")
+KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin")
 
 # Quota pool per kind; Agy has two independently metered families.
 AGY_GEMINI_PREFIX = "gemini-"
@@ -26,7 +26,7 @@ AGY_GEMINI_PREFIX = "gemini-"
 class Lane:
     kind: str
     model: str
-    effort: str = ""  # empty for agy (the selector carries it); optional opencode --variant
+    effort: str = ""  # empty for agy/devin (the selector carries it); optional opencode --variant
 
     @property
     def name(self) -> str:
@@ -66,11 +66,12 @@ DEFAULT_ROSTER = (
 OPT_IN = (
     Lane("agy", "claude-opus-4-6-thinking"),
     Lane("opencode", "muse-spark-1.3-contributor-free"),
+    Lane("devin", "swe-2-max"),
 )
 
 
 def parse_lane(spec: str) -> Lane:
-    """`kind:model[:effort]` → Lane. Agy takes no effort."""
+    """`kind:model[:effort]` → Lane. Agy and Devin take no effort."""
     parts = spec.split(":")
     if len(parts) not in (2, 3) or parts[0] not in KINDS or not parts[1]:
         raise ValueError(f"lane spec must be kind:model[:effort], kind in {KINDS}: {spec!r}")
@@ -79,12 +80,15 @@ def parse_lane(spec: str) -> Lane:
     for part in (model, effort):
         if part and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part):
             raise ValueError(f"model and effort must be plain identifiers: {part!r}")
-    if kind == "agy" and effort:
-        raise ValueError(f"agy selectors carry their own effort; drop ':{effort}'")
+    if kind in ("agy", "devin") and effort:
+        raise ValueError(f"{kind} selectors carry their own effort; drop ':{effort}'")
     if kind == "opencode" and not model.endswith("-free"):
         # No meter exists for paid Zen balance, and capacity fails closed.
         raise ValueError(f"opencode lanes run OpenCode Zen free models only: {spec!r}")
-    if kind not in ("agy", "opencode") and not effort:
+    if kind == "devin" and not model.startswith("swe-2"):
+        # SWE-2 is listed Free; paid Devin models have no meter, so fail closed.
+        raise ValueError(f"devin lanes run SWE-2 (listed Free) only: {spec!r}")
+    if kind not in ("agy", "opencode", "devin") and not effort:
         raise ValueError(f"{kind} lane needs an explicit effort: {spec!r}")
     return Lane(kind, model, effort)
 
@@ -170,6 +174,28 @@ def _opencode_model(lane: Lane) -> list[str]:
 # `--no-auto-update` is in `grok --help`).
 GROK_ENV = {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"}
 
+# Devin: override any shell default for DEVIN_PERMISSION_MODE. The
+# lane must accept workspace edits (ANSWER.md) without a prompt. DEVIN_SANDBOX
+# reaches the child ACP server the app spawns (the --sandbox flag does not).
+DEVIN_ENV = {"DEVIN_PERMISSION_MODE": "accept-edits", "DEVIN_SANDBOX": "1"}
+DEVIN_USER_CONFIG = Path.home() / ".config/devin/config.json"
+
+
+def _devin_config(path: Path) -> Path:
+    """Hook-free overlay beside the harness log, not in the packet workspace.
+    Operator moshi/Herdr PermissionRequest hooks would hang a lane (I3).
+    Keep org_id so stored login still applies. Never --cloud."""
+    src: dict = {}
+    try:
+        src = json.loads(DEVIN_USER_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    cfg = {"hooks": {}}
+    if src.get("devin"):
+        cfg["devin"] = src["devin"]
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    return path
+
 # Claude: --restricted ignores ~/.claude.json, so the operator's own MCP
 # servers load only through --mcp-config (account connectors load either way).
 # `mcp__*` is not an allow pattern Claude honours; each server is allowed by
@@ -198,7 +224,9 @@ CLAUDE_ENV = {"DISABLE_AUTOUPDATER": "1"}
 # whole turn, answer included, the moment print mode soft-denies a tool
 # confirmation (a sandbox-blocked command, a write). Its app with
 # --dangerously-skip-permissions never asks, so Agy always runs as its app.
-APP_ONLY = {"agy"}
+# Devin `-p` prints plain text; the stream reader only parses JSON, so the
+# answer is ANSWER.md from the app, like Agy.
+APP_ONLY = {"agy", "devin"}
 
 
 def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
@@ -243,6 +271,14 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
         argv = [*opencode_sandbox(work), "opencode", str(work), "--auto", *_opencode_model(lane),
                 "--prompt", message]
         return Launch(argv, None)
+    if lane.kind == "devin":
+        argv = [
+            "devin", "--config", str(_devin_config(log.with_name("devin-config.json"))),
+            "--permission-mode", "accept-edits", "--sandbox",
+            "--respect-workspace-trust", "false", "--model", lane.model,
+            "--", message,
+        ]
+        return Launch(argv, None, env_set={**DEVIN_ENV, "DEVIN_MODEL": lane.model})
     raise ValueError(f"unknown kind {lane.kind}")
 
 
@@ -265,6 +301,8 @@ HELP_COMMANDS = {
             "--model", "--log-file", "--prompt-interactive"]),
     "opencode run": (["opencode", "run", "--help"], ["--auto", "--model", "--format", "--variant"]),
     "opencode": (["opencode", "--help"], ["--auto", "--model", "--prompt"]),
+    "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
+               "--sandbox", "--respect-workspace-trust"]),
 }
 
 

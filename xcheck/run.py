@@ -138,7 +138,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
 
 
 def _message(view: str, web: bool, kind: str) -> str:
-    shell = kind in ("grok", "opencode")
+    shell = kind in ("grok", "opencode", "devin")
     scope = SHELL_SCOPE if shell else (
         "use only tools that read (files, commands that change nothing"
         + (", web search" if web else "") + ").")
@@ -372,7 +372,8 @@ def doctor() -> int:
         print(f"{'FAIL' if missing else 'ok  '} {kind}: " + (f"missing {missing}" if missing else f"{len(flags)} flags present"))
         bad += bool(missing)
     for kind, cmd in (("grok", ["grok", "models"]), ("agy", ["agy", "models"]),
-                      ("opencode", ["opencode", "models", "opencode"])):
+                      ("opencode", ["opencode", "models", "opencode"]),
+                      ("devin", ["devin", "models", "list"])):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             listing = out.stdout + out.stderr

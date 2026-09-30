@@ -1,4 +1,5 @@
 # Test-only dependency (tests/test_laws.py). bin/ and xcheck/ are stdlib-only.
-# Imported unguarded, so a checkout without it fails by name:
-#     python3 -m pip install -r requirements-test.txt
+# Imported unguarded, so a checkout without it fails by name. Supplied by the
+# runner command, never installed globally or into a venv:
+#     uv run --with 'hypothesis>=6.100' python3 -m unittest discover -s tests
 hypothesis>=6.100

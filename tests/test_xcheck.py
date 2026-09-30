@@ -45,12 +45,14 @@ class LaneNames(unittest.TestCase):
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").name, "grok-4.7-xhigh")
         self.assertEqual(Lane("claude", "claude-opus-5-5", "high").name, "claude-opus-5-5-high")
         self.assertEqual(Lane("agy", "gemini-3.1-pro-high").name, "agy-gemini-3.1-pro-high")
+        self.assertEqual(Lane("devin", "swe-2-max").name, "devin-swe-2-max")
         self.assertEqual(Lane("codex", "gpt-6.1-sol-high", "high").name, "codex-gpt-6.1-sol-high")
 
     def test_pools(self):
         self.assertEqual(Lane("agy", "gemini-3.8-flash-high").pool, "agy-gemini")
         self.assertEqual(Lane("agy", "claude-sonnet-4-6").pool, "agy-3p")
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").pool, "grok")
+        self.assertEqual(Lane("devin", "swe-2-max").pool, "devin")
 
     def test_parse_lane(self):
         self.assertEqual(adapters.parse_lane("codex:gpt-6.1-sol:high"), Lane("codex", "gpt-6.1-sol", "high"))
@@ -58,8 +60,11 @@ class LaneNames(unittest.TestCase):
                          Lane("opencode", "muse-spark-1.3-contributor-free"))
         self.assertEqual(adapters.parse_lane("opencode:nemotron-3-ultra-free:high").name,
                          "opencode-nemotron-3-ultra-free-high")
+        self.assertEqual(adapters.parse_lane("devin:swe-2-max"), Lane("devin", "swe-2-max"))
         for bad in ("codex:gpt-6.1-sol", "agy:gemini-3.1-pro-high:high", "nope:x:y", "codex",
-                    "opencode:muse-spark-1.3"):  # paid Zen: no meter, so refused
+                    "opencode:muse-spark-1.3",  # paid Zen: no meter, so refused
+                    "devin:swe-2-max:high",  # selector carries effort
+                    "devin:gpt-6-sol-high"):  # paid Devin: no meter, so refused
             with self.assertRaises(ValueError):
                 adapters.parse_lane(bad)
 
@@ -171,6 +176,32 @@ class OpencodeLane(unittest.TestCase):
             self.assertFalse((Path(outside) / "escape").exists())
 
     def test_free_models_have_no_quota_to_protect(self):
+        from xcheck import capacity
+        self.assertEqual(capacity.read(self.LANE).status, "eligible")
+
+
+class DevinLane(unittest.TestCase):
+    LANE = Lane("devin", "swe-2-max")
+
+    def test_app_only_accepts_edits_inside_sandbox_never_cloud(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp).resolve()
+            log = work / "l"
+            argv = adapters.tui(self.LANE, work, "review", log, True).argv
+            self.assertEqual(argv[0], "devin")
+            self.assertEqual(argv[argv.index("--permission-mode") + 1], "accept-edits")
+            self.assertIn("--sandbox", argv)
+            self.assertEqual(argv[argv.index("--respect-workspace-trust") + 1], "false")
+            self.assertEqual(argv[argv.index("--model") + 1], "swe-2-max")
+            self.assertNotIn("--cloud", argv)
+            self.assertEqual(argv[-2:], ["--", "review"])
+            overlay = log.with_name("devin-config.json")
+            self.assertTrue(overlay.is_file())
+            self.assertFalse((work / ".xcheck-devin-config.json").exists())
+            self.assertEqual(json.loads(overlay.read_text()).get("hooks"), {})
+            self.assertIn("devin", adapters.APP_ONLY)
+
+    def test_swe2_is_listed_free_so_has_no_quota_to_protect(self):
         from xcheck import capacity
         self.assertEqual(capacity.read(self.LANE).status, "eligible")
 
@@ -1002,7 +1033,7 @@ class EndToEnd(unittest.TestCase):
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
                "CODEX_CONFIG": str(self.root / "codex-config.toml"),
                "AGY_SETTINGS": str(self.root / "agy-settings.json")}
-        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free"
+        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free,devin:swe-2-max"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
                            env=env, capture_output=True, text=True, timeout=60)

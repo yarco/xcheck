@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fake codex/claude/grok/agy/opencode: speaks each CLI's real stream shape.
+"""Fake codex/claude/grok/agy/opencode/devin: speaks each CLI's real stream shape.
 
 The kind is argv[0]'s basename. FAKE_MODE selects the behaviour:
 ok | invalid | declined | error | hang | silent-exit.
@@ -68,7 +68,8 @@ if os.environ.get("FAKE_ENV_DUMP"):
 # Interactive (TUI) invocations: the app writes ANSWER.md in its cwd, then idles
 # like a real TUI waiting for the next prompt.
 tui = {"claude": "-p" not in argv, "codex": "exec" not in argv,
-       "grok": "--prompt-file" not in argv, "agy": "-i" in argv, "opencode": "run" not in argv}[kind]
+       "grok": "--prompt-file" not in argv, "agy": "-i" in argv, "opencode": "run" not in argv,
+       "devin": "-p" not in argv and "--print" not in argv}[kind]
 if tui:
     print(f"\x1b[2J\x1b[H\x1b[1mfake {kind} TUI\x1b[0m\r\nworking on the review…\r", flush=True)
     target = Path(argv[argv.index("-C") + 1]) if kind == "codex" else Path.cwd()
