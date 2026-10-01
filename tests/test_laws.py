@@ -232,5 +232,41 @@ class CodexTrustLaws(unittest.TestCase):
         self.assertEqual(trust._codex(updated, [path]), updated)
 
 
+
+
+
+class FreeLaneLaws(unittest.TestCase):
+    @given(st.from_regex(r"[a-z][a-z0-9._-]*", fullmatch=True),
+           st.from_regex(r"[a-z][a-z0-9._-]*", fullmatch=True),
+           st.sampled_from(["", "low", "high", "max"]))
+    @SETTINGS
+    def test_free_identity_survives_parse_and_launch(self, vendor, name, effort):
+        """A free model id reaches argv unchanged. Oracle: constructed model id;
+        catches paid-id truncation or free being emitted as a variant."""
+        model = f"openrouter/{vendor}/{name}:free"
+        spec = f"opencode:{model}" + (f":{effort}" if effort else "")
+        lane = adapters.parse_lane(spec)
+        self.assertEqual(lane.model, model)
+        self.assertEqual(lane.effort, effort)
+        args = adapters._opencode_model(lane)
+        self.assertEqual(args[args.index("-m") + 1], model)
+        self.assertNotIn(":", lane.name)
+        self.assertNotIn("/", lane.name)
+
+    @given(st.floats(min_value=0, exclude_min=True, allow_nan=False, allow_infinity=False))
+    @SETTINGS
+    def test_any_nonzero_cost_removes_a_candidate(self, charge):
+        """Any paid cost component removes a zero-price candidate. Oracle:
+        the injected nonzero charge; catches checking only input/output."""
+        from xcheck import models
+        item = {"id": "new-model", "supported_parameters": ["tools"],
+                "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+                "pricing": {"prompt": "0", "completion": "0"}}
+        self.assertEqual(len(models.priced_candidates({"data": [item]}, "https://vendor.test/models")), 1)
+        for component in ["prompt", "completion", "input_cache_read", "input_cache_write", "request", "image"]:
+            changed = {**item, "pricing": {**item["pricing"], component: charge}}
+            self.assertEqual(models.priced_candidates({"data": [changed]}, "https://vendor.test/models"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ meter: a reading is trusted or the lane does not spend.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import select
@@ -27,6 +28,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +43,7 @@ CLAUDE_LOGIN = "env -u ANTHROPIC_API_KEY claude auth login --claudeai"
 CLAUDE_MANUAL = ("XCHECK_CLAUDE_REMAINING", "XCHECK_CLAUDE_REMAINING_AT")
 CLAUDE_MANUAL_AGE = 300
 CLAUDE_THROTTLE_WAIT = 30.0  # total seconds 429s may delay one reading before it fails closed
+CLAUDE_EXPIRY_MARGIN = 60.0  # probe budget plus modest clock skew; never spend on near-expiry auth
 # `-p /usage` is a client-side command only from this release on; an older CLI
 # would send it to a model as a prompt.
 AGY_USAGE_SINCE = (1, 1, 11)
@@ -164,21 +167,35 @@ def _claude(lane: Lane) -> dict[str, float]:
     if p.returncode != 0:
         raise OSError(f"keychain unreadable (security exit {p.returncode}; 36 = locked: run "
                       f"keychain-unlock-gui, or set {CLAUDE_MANUAL[0]} and {CLAUDE_MANUAL[1]})")
-    token = json.loads(p.stdout)["claudeAiOauth"]["accessToken"]
+    credentials = json.loads(p.stdout)["claudeAiOauth"]
+    expires = credentials.get("expiresAt")
+    if "expiresAt" in credentials:
+        if isinstance(expires, bool) or not isinstance(expires, (int, float)) or not math.isfinite(expires) or expires <= 0:
+            raise ValueError("Claude credential expiry is invalid")
+        if expires <= (time.time() + CLAUDE_EXPIRY_MARGIN) * 1000:
+            raise LoginRequired(f"Claude OAuth token expired or expires within {CLAUDE_EXPIRY_MARGIN:g}s: "
+                                f"open claude to refresh it, or run {CLAUDE_LOGIN}")
+    token = credentials["accessToken"]
     # 429 is a throttle shared by every reader of this endpoint (CodexBar polls it too).
     waited, attempt = 0.0, 0
+    deadline = time.monotonic() + CLAUDE_THROTTLE_WAIT
     while True:
+        remaining = min(CLAUDE_THROTTLE_WAIT - waited, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("Claude usage endpoint throttle budget exhausted; recheck xcheck capacity")
         try:
             payload = _get("https://api.anthropic.com/api/oauth/usage",
                            {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
-                           f"Claude login expired: run {CLAUDE_LOGIN}")
+                           f"Claude login expired: run {CLAUDE_LOGIN}", timeout=min(TIMEOUT, remaining))
             break
         except urllib.error.HTTPError as e:
             if e.code != 429:
                 raise
             pause = throttle_pause(e.headers.get("Retry-After") if e.headers else None, attempt)
-            if waited + pause > CLAUDE_THROTTLE_WAIT:
-                raise
+            e.close()
+            if attempt >= 4 or pause > min(remaining, deadline - time.monotonic()):
+                raise TimeoutError(f"Claude usage endpoint throttled (HTTP 429); retry in {pause:.0f}s; "
+                                   "recheck xcheck capacity before a fresh run") from None
             time.sleep(pause)
             waited, attempt = waited + pause, attempt + 1
     bucket = next((b for b in ("opus", "sonnet") if b in lane.model), None)
@@ -186,11 +203,16 @@ def _claude(lane: Lane) -> dict[str, float]:
 
 
 def throttle_pause(retry_after: str | None, attempt: int) -> float:
-    """Seconds before retrying a 429: the server's Retry-After in seconds, else 2, 4, 8, … s."""
+    """A positive finite Retry-After (seconds or HTTP date), else 2, 4, 8, … s.
+    Zero/negative/nonfinite values must not create a tight, unbounded loop."""
     try:
-        return max(0.0, float(retry_after))
+        delay = float(retry_after)
     except (TypeError, ValueError):
-        return 2.0 * 2 ** attempt
+        try:
+            delay = parsedate_to_datetime(retry_after).timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            delay = 0
+    return delay if math.isfinite(delay) and delay > 0 else 2.0 * 2 ** attempt
 
 
 def claude_windows(payload: dict, bucket: str | None) -> dict[str, float]:
@@ -287,10 +309,10 @@ def agy_windows(data: dict, model: str) -> dict[str, float]:
 # ------------------------------------------------------------------ shared
 
 
-def _get(url: str, headers: dict, rejected: str) -> dict:
+def _get(url: str, headers: dict, rejected: str, *, timeout: float = TIMEOUT) -> dict:
     req = urllib.request.Request(url, headers={**headers, "User-Agent": "xcheck-capacity/2"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):

@@ -94,7 +94,7 @@ def install() -> Path:
         "# The target is a read-only copy under ~/.local that Codex's sandbox cannot\n"
         "# write; never point this rule at the vault source.\n"
         + "".join(f'prefix_rule(pattern=["{LINK}", "{cmd}"], decision="allow")\n'
-                  for cmd in ("run", "wait", "status", "doctor", "capacity"))
+                  for cmd in ("run", "wait", "status", "doctor", "capacity", "models"))
     )
     return dest
 

@@ -31,7 +31,7 @@ class Lane:
     @property
     def name(self) -> str:
         """Provenance name: harness + exact model (+ effort when it is a flag)."""
-        model = self.model.replace("/", "-")
+        model = self.model.replace("/", "-").replace(":", "-")
         base = model if model.startswith(self.kind) else f"{self.kind}-{model}"
         if self.effort and not base.endswith(f"-{self.effort}"):
             base = f"{base}-{self.effort}"
@@ -42,7 +42,8 @@ class Lane:
         if self.kind == "agy":
             return "agy-gemini" if self.model.startswith(AGY_GEMINI_PREFIX) else "agy-3p"
         if self.kind == "opencode" and "/" in self.model:
-            return f"opencode-{self.model.split('/', 1)[0]}"
+            provider = self.model.split('/', 1)[0]
+            return "opencode" if provider == "opencode" else f"opencode-{provider}"
         return self.kind
 
     def to_json(self) -> dict:
@@ -64,9 +65,9 @@ DEFAULT_ROSTER = (
 
 # Supported but never default (`run --add`). Pins are the operator's current
 # extras; they can be dropped from a roster without changing the protocol.
+# OpenCode extras are discovered with `xcheck models`, not pinned here.
 OPT_IN = (
     Lane("agy", "claude-opus-4-6-thinking"),
-    Lane("opencode", "muse-spark-1.3-contributor-free"),
     Lane("devin", "swe-2-max"),
 )
 
@@ -75,11 +76,15 @@ def parse_lane(spec: str) -> Lane:
     """`kind:model[:effort]` → Lane. Agy and Devin take no effort.
     Opencode models may be `provider/model` (a slash is part of the model)."""
     parts = spec.split(":")
+    # OpenRouter's :free is part of the model, never an effort. Preserve it
+    # before interpreting the optional final variant (including :free:high).
+    if parts[0] == "opencode" and len(parts) >= 3 and parts[2] == "free":
+        parts = [parts[0], parts[1] + ":free", *parts[3:]]
     if len(parts) not in (2, 3) or parts[0] not in KINDS or not parts[1]:
         raise ValueError(f"lane spec must be kind:model[:effort], kind in {KINDS}: {spec!r}")
     kind, model = parts[0], parts[1]
     effort = parts[2] if len(parts) == 3 else ""
-    ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*" if kind == "opencode" else r"[A-Za-z0-9][A-Za-z0-9._-]*"
+    ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind == "opencode" else r"[A-Za-z0-9][A-Za-z0-9._-]*"
     for part in (model, effort):
         if part and not re.fullmatch(ident if part is model else r"[A-Za-z0-9][A-Za-z0-9._-]*", part):
             raise ValueError(f"model and effort must be plain identifiers: {part!r}")

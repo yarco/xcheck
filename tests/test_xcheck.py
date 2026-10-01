@@ -598,7 +598,7 @@ class Capacity(unittest.TestCase):
         import urllib.error
         from xcheck import capacity as c
         calls, sleeps = iter(responses), []
-        def get(*_):
+        def get(*_, **kwargs):
             r = next(calls)
             if isinstance(r, dict):
                 return r
@@ -714,7 +714,7 @@ class Installation(unittest.TestCase):
                     lines = [line for line in rules.read_text().splitlines() if line.startswith("prefix_rule")]
                     self.assertEqual(lines, [
                         f'prefix_rule(pattern=["{link}", "{cmd}"], decision="allow")'
-                        for cmd in ("run", "wait", "status", "doctor", "capacity")
+                        for cmd in ("run", "wait", "status", "doctor", "capacity", "models")
                     ])
                     self.assertEqual(rules.read_text().count("Written by `xcheck install`"), 1)
                 finally:
