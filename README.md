@@ -17,8 +17,9 @@ xcheck doctor        # verify the installed copy, flags, and model pins
 
 `install` also writes `~/.codex/rules/xcheck.rules`, which lets a Codex
 orchestrator run the installed `xcheck` (`run`, `wait`, `status`, `activity`,
-`cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt, and records
-the lane workspaces as trusted. Lane shells run through your zsh rc files; if
+`cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt. At launch,
+`xcheck` records Codex and Agy lane workspaces as trusted. Lane shells run
+through your zsh rc files; if
 yours load secrets, they must skip that load when the lane guard variable is
 set, or keys will reach peers with shell access (the protocol note covers the
 re-verification).
@@ -45,3 +46,7 @@ Optional long acceptance (185 s):
 ```bash
 uv run --with 'hypothesis>=6.100' python3 -m unittest discover -s tests -p acceptance_runtime.py
 ```
+
+## License
+
+[MIT](LICENSE).

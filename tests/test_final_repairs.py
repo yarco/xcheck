@@ -18,7 +18,42 @@ from xcheck import adapters, files, pools, run, validate
 GOOD = f"1) VERDICT: The reviewed contract holds.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n"
 
 
+class FixturePrivacy(unittest.TestCase):
+    def test_captured_identifiers_are_synthetic(self):
+        import re
+        import uuid
+        for path in support.FIX.rglob('*'):
+            if not path.is_file():
+                continue
+            text = path.read_text()
+            with self.subTest(fixture=str(path.relative_to(support.FIX))):
+                self.assertNotRegex(text, r'(?:-Users-[^-]+-Library-CloudStorage|/Users/[^/]+/Library/CloudStorage)')
+                for identifier in re.findall(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', text):
+                    self.assertEqual(uuid.UUID(identifier).version, 5)
+                for identifier in re.findall(r'\b(?:msg|toolu|req|ses|prt)_(?:fixture_[0-9a-f]{24}|[A-Za-z0-9]{10,})\b', text):
+                    self.assertRegex(identifier, r'^(?:msg|toolu|req|ses|prt)_fixture_[0-9a-f]{24}$')
+                for signature in re.findall(r'"signature"\s*:\s*"([^"\n]*)"', text):
+                    self.assertEqual(signature, 'fixture-signature')
+
+
 class FinalReaderRepairs(unittest.TestCase):
+    def test_activity_failure_cannot_discard_a_native_final_answer(self):
+        from xcheck import lane
+        from unittest.mock import Mock
+        for error in (OSError("store unavailable"), AttributeError("unexpected metadata shape")):
+            with self.subTest(error=type(error).__name__):
+                reader = adapters.Reader('codex')
+                progress = Mock()
+                progress.observe.side_effect = error
+                lane._consume(reader, json.dumps(dict(type='item.completed',
+                              item=dict(type='agent_message', text=GOOD))).encode(), progress)
+                lane._consume(reader, json.dumps(dict(type='turn.completed')).encode(), progress)
+                self.assertEqual(progress.observe.call_count, 2)
+                self.assertEqual(reader.text, GOOD)
+                self.assertIsNone(reader.error)
+                self.assertTrue(reader.completed)
+                self.assertEqual(validate.check(reader.text, support.CONTRACT)[0], 'done')
+
     def test_codex_native_answer_survives_empty_whitespace_and_partial_o_file(self):
         for partial in ('', ' \n\t', 'PARTIAL answer'):
             with self.subTest(partial=partial), support.tempfile.TemporaryDirectory() as tmp:
