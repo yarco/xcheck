@@ -221,7 +221,9 @@ def claude_windows(payload: dict, bucket: str | None) -> dict[str, float]:
     A scoped cap attributed to the other model family is left out; one that
     cannot be attributed counts (fail closed)."""
     limits = payload.get("limits")
-    if isinstance(limits, list) and limits:
+    if "limits" in payload:
+        if not isinstance(limits, list):
+            raise ValueError(f"claude usage limits malformed (not a list): {limits!r}")
         windows = {}
         for i, cap in enumerate(limits):
             scope = json.dumps(cap.get("scope")).lower()

@@ -24,6 +24,20 @@ class HerdrError(Exception):
     pass
 
 
+class HerdrPlacementError(HerdrError):
+    """A lane's Herdr launch failed after its pane existed.
+
+    `launched` is False when the runner was definitely never submitted (the
+    rename before `pane run` was rejected) and None when delivery is
+    uncertain (`pane run` itself failed after — or during — submission).
+    """
+
+    def __init__(self, lane: str, launched: bool | None, message: str):
+        super().__init__(message)
+        self.lane = lane
+        self.launched = launched
+
+
 def _herdr(*args: str, timeout: float = 15) -> dict:
     try:
         p = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=timeout)
@@ -95,8 +109,14 @@ def place(ctx: dict, lanes: list[str], cwd: str, command_for, created) -> None:
 
 
 def _start(pane: str, lane: str, command_for) -> None:
-    _herdr("pane", "rename", pane, f"xcheck:{lane}")
-    _herdr("pane", "run", pane, "exec " + command_for(lane))
+    try:
+        _herdr("pane", "rename", pane, f"xcheck:{lane}")
+    except HerdrError as e:
+        raise HerdrPlacementError(lane, False, f"pane rename rejected for {lane}: {e}") from e
+    try:
+        _herdr("pane", "run", pane, "exec " + command_for(lane))
+    except HerdrError as e:
+        raise HerdrPlacementError(lane, None, f"pane run failed for {lane} (delivery uncertain): {e}") from e
 
 
 def _split(target: str, direction: str, ratio: float, cwd: str) -> str:

@@ -332,7 +332,12 @@ def _consume(reader: adapters.Reader, raw: bytes, progress=None) -> None:
         return
     if isinstance(obj, dict):
         if progress:
-            progress.observe(obj)
+            # Progress metadata is diagnostic only: an unexpected event shape
+            # or a failing store must never end a healthy lane.
+            try:
+                progress.observe(obj)
+            except Exception:
+                pass
         view = reader.feed(obj)
         if view:
             print(view, flush=True)

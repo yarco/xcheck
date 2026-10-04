@@ -145,11 +145,22 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
             herdr.place(ctx, list(run.lanes), str(base),
                         lambda n: herdr.shell_command(_runner_argv(base, n)), created)
         except herdr.HerdrError as e:
-            print(f"herdr placement failed: {e}", flush=True)
+            settle_placement_failure(run, e)
         for name in run.lanes:
             if name not in run.panes:
                 _write_exit(run, name, "failed", "Herdr placement failed before this lane started")
     return _wait(run, children)
+
+
+def settle_placement_failure(run, exc: herdr.HerdrError) -> None:
+    """A lane whose pane exists but whose runner was definitely never
+    submitted has no runner to write its exit.json; settle it here. An
+    uncertain `pane run` outcome stays pending — the pane id stays recorded
+    in run.panes for diagnosis either way."""
+    print(f"herdr placement failed: {exc}", flush=True)
+    if isinstance(exc, herdr.HerdrPlacementError) and exc.launched is False:
+        _write_exit(run, exc.lane, "failed",
+                    f"Herdr placement failed before this lane started: {exc}")
 
 
 def _message(view: str, web: bool, kind: str) -> str:

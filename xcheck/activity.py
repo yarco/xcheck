@@ -93,5 +93,5 @@ def opencode_native(run, name, session):
             elif kind == 'reasoning' and 'last_reasoning' not in result:
                 result['last_reasoning'] = dict(characters=len(part.get('text', '')), updated_at=now(updated / 1000), time=part.get('time'))
         return result
-    except (OSError, sqlite3.Error, ValueError, TypeError):
+    except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError, KeyError):
         return dict(unavailable='native progress store unavailable or its schema changed')

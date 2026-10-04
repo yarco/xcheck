@@ -523,6 +523,56 @@ class HerdrOwnership(unittest.TestCase):
         self.assertEqual(call.call_args_list[-1].args, ("pane", "run", "p2", "exec runner lane-a"))
         self.assertFalse(hasattr(self.herdr, "close"))  # nothing closes a pane by id
 
+    def test_a_rejected_rename_settles_the_lane_as_definitely_unlaunched(self):
+        from xcheck import run as runmod
+        calls = []
+
+        def fake(*args, **_):
+            calls.append(args)
+            if args[:2] == ("pane", "rename"):
+                raise self.herdr.HerdrError("pane rename denied")
+            return {"pane": {"pane_id": "p9"}}
+
+        recorded = {}
+        with patch.object(self.herdr, "_herdr", side_effect=fake):
+            with self.assertRaises(self.herdr.HerdrPlacementError) as cm:
+                self.herdr.place({"pane": "host"}, ["lane-a"], "/tmp/x",
+                                 lambda lane: f"runner {lane}",
+                                 lambda lane, pane: recorded.update({lane: pane}))
+        self.assertEqual((cm.exception.lane, cm.exception.launched), ("lane-a", False))
+        self.assertEqual(recorded, {"lane-a": "p9"})  # pane id stays recorded for diagnosis
+        self.assertFalse(any(c[:2] == ("pane", "run") for c in calls))  # never submitted
+
+        # No runner exists to write exit.json, so the supervisor settles it.
+        written = {}
+
+        class FakeRun:
+            panes = dict(recorded)
+
+            def save(self):
+                pass
+
+        def fake_write(run, name, status, reason):
+            written.update(name=name, status=status, reason=reason)
+
+        with patch.object(runmod, "_write_exit", side_effect=fake_write):
+            runmod.settle_placement_failure(FakeRun(), cm.exception)
+        self.assertEqual(written["name"], "lane-a")
+        self.assertEqual(written["status"], "failed")
+        self.assertIn("before this lane started", written["reason"])
+
+    def test_a_failed_pane_run_names_the_lane_but_stays_uncertain(self):
+        def fake(*args, **_):
+            if args[:2] == ("pane", "run"):
+                raise self.herdr.HerdrError("pane run timeout")
+            return {"pane": {"pane_id": "p9"}}
+
+        with patch.object(self.herdr, "_herdr", side_effect=fake):
+            with self.assertRaises(self.herdr.HerdrPlacementError) as cm:
+                self.herdr.place({"pane": "host"}, ["lane-a"], "/tmp/x",
+                                 lambda lane: f"runner {lane}", lambda *a: None)
+        self.assertEqual((cm.exception.lane, cm.exception.launched), ("lane-a", None))
+
 
 class SignalGroup(unittest.TestCase):
     def test_an_exited_unreaped_leader_is_not_an_error(self):
@@ -595,6 +645,19 @@ class Capacity(unittest.TestCase):
         unknown = {**flat, "limits": [*caps[:2], {"kind": "weekly_scoped", "percent": 95, "scope": {"id": "x"}}]}
         self.assertEqual(c.judge(c.claude_windows(unknown, "sonnet"), 10).status, "reserve-low")
         self.assertEqual(c.claude_windows(flat, "opus"), {"five_hour": 90.0, "seven_day": 90.0})
+
+    def test_present_but_unusable_claude_limits_never_fall_back_to_flat(self):
+        from xcheck import capacity as c
+        flat = {"five_hour": {"utilization": 0}, "seven_day": {"utilization": 0}}
+        # A present-but-malformed authoritative field must fail closed, never
+        # fall through to the legacy flat keys.
+        for bad in (None, "junk", {}):
+            with self.subTest(limits=bad):
+                with self.assertRaises(ValueError):
+                    c.claude_windows({**flat, "limits": bad}, "opus")
+        self.assertEqual(c.claude_windows({**flat, "limits": []}, "opus"), {})  # no window → unknown
+        # Absent limits keep the documented legacy read.
+        self.assertEqual(c.claude_windows(flat, "opus"), {"five_hour": 100.0, "seven_day": 100.0})
 
     def test_a_signal_during_a_probe_is_not_an_unreadable_meter(self):
         from xcheck import capacity as c, lane
@@ -1127,10 +1190,14 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "failed")
-        self.assertIn("harness was still running and was stopped", row["reason"])
-        time.sleep(0.5)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pids["harness"], 0)
+        stopped = "harness was still running and was stopped" in row["reason"]
+        # ps can be unavailable in sandboxed runners; identity then stays
+        # unverified and the orphan is preserved, not killed.
+        self.assertTrue(stopped or "harness identity unverified" in row["reason"], row)
+        if stopped:
+            time.sleep(0.5)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pids["harness"], 0)
 
     def test_orchestrator_identity_and_api_keys_never_reach_a_peer(self):
         dump = self.bin / "env"

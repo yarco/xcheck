@@ -15,6 +15,14 @@ bin/xcheck install   # publishes the read-only, content-addressed copy to ~/.loc
 xcheck doctor        # verify the installed copy, flags, and model pins
 ```
 
+`install` also writes `~/.codex/rules/xcheck.rules`, which lets a Codex
+orchestrator run the installed `xcheck` (`run`, `wait`, `status`, `activity`,
+`cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt, and records
+the lane workspaces as trusted. Lane shells run through your zsh rc files; if
+yours load secrets, they must skip that load when the lane guard variable is
+set, or keys will reach peers with shell access (the protocol note covers the
+re-verification).
+
 Requires Python 3.12+ (stdlib only at runtime) plus the harness CLIs you plan to use as peers. Hypothesis is needed for the test suite only.
 
 ## Run
@@ -28,7 +36,7 @@ Stage `BASE/PACKET.md`, `BASE/PROMPT.md`, and `BASE/evidence/` before launching.
 ## Tests
 
 ```bash
-uv run --with 'hypothesis>=6.100' python3 -m unittest discover -s tests   # ~2 min
+uv run --with 'hypothesis>=6.100' python3 -m unittest discover -s tests   # a few minutes
 git diff --check
 ```
 
