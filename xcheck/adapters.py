@@ -60,15 +60,19 @@ DEFAULT_ROSTER = (
     Lane("grok", "grok-4.7", "xhigh"),
     Lane("agy", "gemini-3.1-pro-high"),
     Lane("agy", "gemini-3.8-flash-high"),
-    Lane("agy", "claude-sonnet-4-6"),
 )
 
 # Supported but never default (`run --add`). Pins are the operator's current
 # extras; they can be dropped from a roster without changing the protocol.
-# OpenCode extras are discovered with `xcheck models`, not pinned here.
+# The opencode pins are zero-price offers confirmed by `xcheck models`; keep
+# discovering other offers with it rather than pinning more. A vanished free
+# offer fails doctor until the pin is refreshed.
 OPT_IN = (
-    Lane("agy", "claude-opus-4-6-thinking"),
     Lane("devin", "swe-2-max"),
+    Lane("opencode", "opencode/space-bunny-free"),
+    # Contributor tier permits logging/training; mind what its packets hold.
+    Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),
+    Lane("opencode", "openrouter/qwen/qwen3.8-27b:free"),
 )
 
 
@@ -118,14 +122,13 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
     if lane.kind == "claude":
         tools = "Read,WebSearch,WebFetch" if web else "Read"
         argv = [
-            "claude", "-p", "--restricted", *claude_mcp(), "--permission-mode", "dontAsk",
+            "claude", "-p", "--restricted", *claude_mcp(web), "--permission-mode", "dontAsk",
             # With -p, anything that would prompt is denied instead of waiting.
             "--permission-prompts", "none",
-            "--tools", tools, "--allowedTools", ",".join([tools, *claude_mcp_allow()]), "--add-dir", str(work),
+            "--tools", tools, "--allowedTools", ",".join([tools, *claude_mcp_allow(web)]), "--add-dir", str(work),
             "--no-session-persistence", "--model", lane.model, "--effort", lane.effort,
             "--debug-file", str(log),
-            # Partial messages keep the stream moving during a long silent
-            # think, so the idle clock measures real inactivity.
+            # Partial messages expose native output during a long think.
             "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         ]
         return Launch(argv, message, env_set=CLAUDE_ENV)
@@ -143,7 +146,7 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
         return Launch(argv, None, env_set=GROK_ENV)
     if lane.kind == "opencode":
         argv = [*opencode_sandbox(work), "opencode", "run", "--auto", *_opencode_model(lane),
-                "--format", "json", message.read_text(encoding="utf-8").strip()]
+                "--dir", str(work), "--format", "json", message.read_text(encoding="utf-8").strip()]
         return Launch(argv, None, env_set=_opencode_env(lane))
     raise ValueError(f"{lane.kind} has no headless form; it runs as its app (tui)")
 
@@ -241,26 +244,41 @@ def _devin_config(path: Path, web: bool) -> Path:
     path.write_text(json.dumps(src), encoding="utf-8")
     return path
 
-# Claude: --restricted ignores ~/.claude.json, so the operator's own MCP
-# servers load only through --mcp-config (account connectors load either way).
+# Claude reviews register only local readers and the two keyless retrieval
+# endpoints. --allowedTools pre-approves calls; it is not a tool allowlist.
+# --strict-mcp-config excludes other registrations, and --disallowedTools
+# removes account connectors even if the native client loads them separately.
 # `mcp__*` is not an allow pattern Claude honours; each server is allowed by
 # name, `mcp__<server>`, with non-identifier characters as `_`
 # ("claude.ai Gmail" -> mcp__claude_ai_Gmail). bypassPermissions is refused
 # in restricted mode.
 CLAUDE_JSON = Path.home() / ".claude.json"
+CLAUDE_LOCAL_MCP = {"semble", "fff", "qmd", "pond"}
+CLAUDE_FREE_MCP = {
+    "keenable-free": "https://api.keenable.ai/mcp",
+    "you-free": "https://api.you.com/mcp?profile=free&tools=you-search",
+}
 
 
-def claude_mcp() -> list[str]:
-    return ["--mcp-config", str(CLAUDE_JSON)] if CLAUDE_JSON.is_file() else []
-
-
-def claude_mcp_allow() -> list[str]:
+def _claude_review_servers(web: bool) -> dict:
     try:
         data = json.loads(CLAUDE_JSON.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
-    names = [*(data.get("mcpServers") or {}), *(data.get("claudeAiMcpEverConnected") or [])]
-    return sorted({"mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", n) for n in names})
+        return {}
+    return {name: server for name, server in (data.get("mcpServers") or {}).items()
+            if isinstance(server, dict) and (name in CLAUDE_LOCAL_MCP or (
+                web and name in CLAUDE_FREE_MCP and server.get("type") == "http"
+                and server.get("url") == CLAUDE_FREE_MCP[name] and not server.get("headers")))}
+
+
+def claude_mcp(web: bool = True) -> list[str]:
+    # Pass only the selected MCP definitions, never the operator's full config.
+    return ["--strict-mcp-config", "--mcp-config", json.dumps({"mcpServers": _claude_review_servers(web)}),
+            "--disallowedTools", "mcp__claude_ai_*"]
+
+
+def claude_mcp_allow(web: bool = True) -> list[str]:
+    return sorted("mcp__" + name for name in _claude_review_servers(web))
 
 
 CLAUDE_ENV = {"DISABLE_AUTOUPDATER": "1"}
@@ -277,8 +295,8 @@ APP_ONLY = {"agy", "devin"}
 # screen: Agy "⚠ Individual quota reached. … Resets in 62h37m38s." (a per-model
 # cap its family meter does not show), Claude "You've hit your limit · resets
 # 7pm (America/Los_Angeles)", Codex "You hit your weekly limit." tui.py counts
-# one only at a line start near the bottom of a screen that stopped drawing,
-# so a peer that quotes a banner and keeps working is never ended.
+# them for diagnosis only. Quoted banners and silent work are indistinguishable
+# from a stopped app without a native failure signal.
 APP_LIMIT = re.compile(r"^\W*(?:Individual quota reached|You(?:['’]ve)? hit your (?:weekly )?limit)\b")
 
 
@@ -289,8 +307,8 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
     if lane.kind == "claude":
         tools = "Read,Write,WebSearch,WebFetch" if web else "Read,Write"
         argv = [
-            "claude", "--restricted", *claude_mcp(), "--permission-mode", "dontAsk",
-            "--tools", tools, "--allowedTools", ",".join([tools, *claude_mcp_allow()]), "--add-dir", str(work),
+            "claude", "--restricted", *claude_mcp(web), "--permission-mode", "dontAsk",
+            "--tools", tools, "--allowedTools", ",".join([tools, *claude_mcp_allow(web)]), "--add-dir", str(work),
             "--model", lane.model, "--effort", lane.effort, "--debug-file", str(log), message,
         ]
         return Launch(argv, None, env_set=CLAUDE_ENV)
@@ -347,14 +365,15 @@ HELP_COMMANDS = {
               "--config", "--search"]),
     "claude": (["claude", "--help"], ["--print", "--restricted", "--mcp-config", "--permission-mode", "--tools", "--allowedTools", "--add-dir",
                "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
-               "--permission-prompts", "--include-partial-messages", "--debug-file"]),
+               "--permission-prompts", "--include-partial-messages", "--debug-file",
+               "--strict-mcp-config", "--disallowedTools"]),
     "grok": (["grok", "--help"], ["--prompt-file", "--model", "--reasoning-effort", "--cwd",
              "--tools", "--no-subagents", "--no-plan", "--sandbox",
              "--always-approve", "--output-format", "streaming-json", "--disable-web-search",
              "--debug-file"]),
     "agy": (["agy", "--help"], ["--sandbox", "--dangerously-skip-permissions", "--mode",
             "--model", "--log-file", "--prompt-interactive"]),
-    "opencode run": (["opencode", "run", "--help"], ["--auto", "--model", "--format", "--variant"]),
+    "opencode run": (["opencode", "run", "--help"], ["--auto", "--model", "--format", "--variant", "--dir"]),
     "opencode": (["opencode", "--help"], ["--auto", "--model", "--prompt"]),
     "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
                "--respect-workspace-trust"]),
@@ -373,32 +392,53 @@ class Reader:
     error: str | None = None
     _buf: list[str] = field(default_factory=list)
     _last: str = ""  # grok: the last complete assistant message
+    completed: bool = False
+    _notice: str | None = None  # Codex error notifications can be reconnect progress
+    diagnostics: list[dict] = field(default_factory=list)
+    _mcp_calls: dict[str, dict] = field(default_factory=dict)
+
+    def notes(self) -> list[str]:
+        notes = []
+        for d in self.diagnostics:
+            if d["kind"] == "mcp_startup":
+                notes.append(f"MCP startup {d['server']}: {d['status']}")
+            else:
+                outcome = d["outcome"]
+                label = "POLICY VIOLATION" if outcome == "succeeded" else "MCP policy warning"
+                notes.append(f"{label}: unapproved tool {d['tool']} {outcome}; "
+                             f"{'execution unconfirmed; ' if outcome == 'attempted' else ''}billing unknown")
+        return notes
 
     def feed(self, obj: dict) -> str | None:
         """Consume one stream object; return a short human line for the view."""
         return getattr(self, f"_{self.kind}")(obj)
 
     def finish(self, final_file: Path) -> None:
-        if self.kind == "codex" and final_file.is_file():
+        if self.kind == "codex" and not self.text.strip() and final_file.is_file():
             self.text = final_file.read_text(encoding="utf-8", errors="replace")
         elif self.kind == "grok":
             self.text = "".join(self._buf) or self._last
         elif self.kind == "opencode":
             self.text = "\n".join(self._buf)
+        if self.kind == "codex" and not self.text.strip() and not self.error:
+            self.error = self._notice
 
-    # -- codex: JSONL items; the -o file holds the final message.
+    # -- codex: native agent_message takes precedence over the -o fallback.
     def _codex(self, o: dict) -> str | None:
         t = o.get("type")
         item = o.get("item") or {}
+        if t == "turn.completed":
+            self.completed = True
         if t == "error":
-            self.error = o.get("message")
-            return f"! {self.error}"
+            self._notice = o.get("message")
+            return f"! {self._notice}"
         if t == "turn.failed":
-            self.error = (o.get("error") or {}).get("message") or "turn.failed"
+            self.error = (o.get("error") or {}).get("message") or self._notice or "turn.failed"
             return f"! turn failed: {self.error}"
         if t == "item.started" and item.get("type") == "command_execution":
             return f"$ {item.get('command', '')}"
         if t == "item.completed" and item.get("type") == "agent_message":
+            self.text = item.get("text", "")
             return _clip(item.get("text", ""))
         if t == "item.completed" and item.get("type") in ("reasoning", "web_search"):
             return f"· {item.get('type')}"
@@ -407,7 +447,16 @@ class Reader:
     # -- claude: stream-json; the `result` event carries the final text.
     def _claude(self, o: dict) -> str | None:
         t = o.get("type")
+        if t == "system" and o.get("subtype") == "init":
+            for server in o.get("mcp_servers") or []:
+                if server.get("status") in ("failed", "needs-auth"):
+                    self.diagnostics.append(dict(kind="mcp_startup", server=server.get("name"), status=server["status"]))
+        if t == "user":
+            for block in (o.get("message") or {}).get("content") or []:
+                if block.get("type") == "tool_result" and block.get("tool_use_id") in self._mcp_calls:
+                    self._mcp_calls[block["tool_use_id"]]["outcome"] = "error" if block.get("is_error") else "succeeded"
         if t == "result":
+            self.completed = True
             # On is_error the `result` field is the error message, not an answer
             # (and `subtype` can still read "success").
             if o.get("is_error"):
@@ -419,6 +468,12 @@ class Reader:
             out = []
             for block in (o.get("message") or {}).get("content") or []:
                 if block.get("type") == "tool_use":
+                    name = block.get("name", "")
+                    if name.startswith("mcp__") and name.split("__", 2)[1] not in CLAUDE_LOCAL_MCP | CLAUDE_FREE_MCP.keys():
+                        diagnostic = dict(kind="mcp_policy", tool=name, outcome="attempted", billing="unknown")
+                        self.diagnostics.append(diagnostic)
+                        if isinstance(block.get("id"), str):
+                            self._mcp_calls[block["id"]] = diagnostic
                     out.append(f"> {block.get('name')} {_clip(json.dumps(block.get('input')), 100)}")
                 elif block.get("type") == "text":
                     out.append(_clip(block.get("text", "")))
@@ -446,13 +501,20 @@ class Reader:
             self.error = o.get("message")
             return f"! {self.error}"
         if t == "end":
-            return f"· end {o.get('stopReason')}"
+            reason = o.get("stopReason")
+            if reason == "end_turn":
+                self.completed = True
+            else:
+                self.error = f"Grok ended without completing the review: {reason or 'missing stopReason'}"
+            return f"· end {reason}"
         return None
 
     # -- opencode: `run --format json` parts. The answer is the text after the
     # last tool call, so narration between tool calls is never the answer.
     def _opencode(self, o: dict) -> str | None:
         t, part = o.get("type"), o.get("part") or {}
+        if t == "step_finish" and part.get("reason") in ("stop", "length"):
+            self.completed = True
         if t == "text":
             self._buf.append(part.get("text", ""))
             return _clip(part.get("text", ""))

@@ -74,6 +74,13 @@ class LaneNames(unittest.TestCase):
             with self.assertRaises(ValueError):
                 adapters.parse_lane(bad)
 
+    def test_opt_in_pins_parse_from_their_selectors(self):
+        for lane in adapters.OPT_IN:
+            spec = f"{lane.kind}:{lane.model}" + (f":{lane.effort}" if lane.effort else "")
+            self.assertEqual(adapters.parse_lane(spec), lane, spec)
+        names = [l.name for l in adapters.OPT_IN]
+        self.assertEqual(len(set(names)), len(names), names)
+
 
 class Readers(unittest.TestCase):
     """Real streams captured from the installed CLIs."""
@@ -211,6 +218,7 @@ class SleepingMac(unittest.TestCase):
             app = ("import time, pathlib\n"
                    "for i in range(8):\n    print('working', i, flush=True); time.sleep(0.25)\n"
                    "pathlib.Path('ANSWER.md').write_text('### 1) VERDICT\\nok\\nRESULT_COMPLETE\\n')\n"
+                   "pathlib.Path('ANSWER.ready').write_text('ANSWER_READY\\n')\n"
                    "time.sleep(30)\n")
             real, t0 = time.time, time.time()
             jumped = lambda: real() + (86400 if real() - t0 > 1 else 0)
@@ -324,34 +332,34 @@ class GrokLane(unittest.TestCase):
 
 
 class ClaudeMcp(unittest.TestCase):
-    def test_operator_servers_load_and_each_server_is_preapproved_by_name(self):
-        # --restricted ignores ~/.claude.json and `mcp__*` is not honoured as an
-        # allow pattern: both were verified live, so each server is named.
+    def test_only_review_servers_load_and_each_is_preapproved_by_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / ".claude.json"
-            cfg.write_text(json.dumps({"mcpServers": {"qmd": {}, "keenable-free": {}},
+            cfg.write_text(json.dumps({"mcpServers": {"qmd": {}, "keenable-free": {
+                "type": "http", "url": "https://api.keenable.ai/mcp"}},
                                        "claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Kiwi.com"]}))
             lane = Lane("claude", "claude-sonnet-5", "low")
             with patch.object(adapters, "CLAUDE_JSON", cfg):
                 stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
                 app = adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
             for argv in (stream, app):
-                self.assertEqual(argv[argv.index("--mcp-config") + 1], str(cfg))
+                registered = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+                self.assertEqual(set(registered), {"qmd", "keenable-free"})
                 allowed = argv[argv.index("--allowedTools") + 1].split(",")
-                self.assertTrue({"mcp__qmd", "mcp__keenable-free", "mcp__claude_ai_Gmail",
-                                 "mcp__claude_ai_Kiwi_com"} <= set(allowed), allowed)
+                self.assertEqual(set(allowed), {"Read", "Write", "WebSearch", "WebFetch", "mcp__qmd", "mcp__keenable-free"}
+                                 if "Write" in allowed else {"Read", "WebSearch", "WebFetch", "mcp__qmd", "mcp__keenable-free"})
                 self.assertNotIn("mcp__*", allowed)
-                self.assertNotIn("--strict-mcp-config", argv)
+                self.assertIn("--strict-mcp-config", argv)
             with patch.object(adapters, "CLAUDE_JSON", Path(tmp) / "absent.json"):
                 argv = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
-            self.assertNotIn("--mcp-config", argv)
+            self.assertEqual(json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"], {})
 
 
 class IdleDefaults(unittest.TestCase):
     def test_default_uses_actual_lane_view_and_explicit_override_wins(self):
         from xcheck.lane import idle_for
-        self.assertEqual(idle_for(0, "stream"), 900)
-        self.assertEqual(idle_for(0, "tui"), 180)  # Agy app in a stream run
+        self.assertEqual(idle_for(0, "stream"), 0)
+        self.assertEqual(idle_for(0, "tui"), 0)  # silence is not model inactivity
         self.assertEqual(idle_for(37, "tui"), 37)
         self.assertEqual(idle_for(37, "stream"), 37)
 
@@ -361,6 +369,7 @@ class RunnerBound(unittest.TestCase):
         from xcheck.lane import _Stop, _stop_status, bound
         self.assertEqual(_stop_status(_Stop("SIGALRM"), 2)[0], "timeout")
         self.assertEqual(_stop_status(_Stop("SIGTERM"), 2)[0], "interrupted")
+        self.assertEqual(bound(None), 0)
         self.assertGreater(bound(60), 2 * 60 + 180)  # pool wait + spend + probe timeout
 
 
@@ -371,6 +380,7 @@ class RunnerBound(unittest.TestCase):
             root = Path(tmp)
             base = root / "run"
             stage(base)
+            shutil.copytree(base, base / ".packet", ignore=shutil.ignore_patterns(".packet"))
             peer = Lane("grok", "grok-4.7", "low")
             run = Run(base, {peer.name: peer}, CONTRACT, False, 10, 10,
                       "headless", "codex", "now", {}, {}, forced=[])
@@ -714,7 +724,7 @@ class Installation(unittest.TestCase):
                     lines = [line for line in rules.read_text().splitlines() if line.startswith("prefix_rule")]
                     self.assertEqual(lines, [
                         f'prefix_rule(pattern=["{link}", "{cmd}"], decision="allow")'
-                        for cmd in ("run", "wait", "status", "doctor", "capacity", "models")
+                        for cmd in ("run", "wait", "status", "activity", "cancel", "doctor", "capacity", "models")
                     ])
                     self.assertEqual(rules.read_text().count("Written by `xcheck install`"), 1)
                 finally:
@@ -922,6 +932,7 @@ class Preflight(unittest.TestCase):
                 path = base / target
                 path.write_text(path.read_text() + "\n" + TOKEN + "\n")
                 contract = validate.preflight(base)
+                shutil.copytree(base, base / ".packet", ignore=shutil.ignore_patterns(".packet"))
                 _stage(SimpleNamespace(base=base), work)
                 self.assertEqual(validate.last_line((work / contract.proof_target).read_text()), contract.token)
 
@@ -1241,9 +1252,11 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue((agy / "screen.log").exists())
         self.assertFalse((self.base / "lanes" / "grok-4.7-xhigh" / "screen.log").exists())
 
-    def test_an_answer_that_breaks_the_contract_is_invalid_not_timeout(self):
+    def test_an_incomplete_app_draft_keeps_its_timeout_and_body(self):
         rows = self.run_tui("invalid", extra=("--idle", "3"))
-        self.assertEqual({r["status"] for r in rows.values()}, {"invalid"}, rows)
+        self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
+        for name in rows:
+            self.assertIn("fine but no proof", (self.base / f"RESULT-{name}.md").read_text())
 
     def test_tui_lanes_are_trusted_before_they_start(self):
         self.run_tui("ok")
@@ -1275,7 +1288,7 @@ class EndToEnd(unittest.TestCase):
         rows = self.run_tui("answer-exit")
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
 
-    def test_a_tui_draft_is_not_published_until_complete_and_stable(self):
+    def test_a_tui_draft_is_not_published_until_committed(self):
         rows = self.run_tui("slowwrite")
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
         self.assertIn("after a rewrite", (self.base / "RESULT-grok-4.7-xhigh.md").read_text())
@@ -1299,14 +1312,11 @@ class EndToEnd(unittest.TestCase):
             self.assertIn("was never launched", p.stderr)
             self.assertNotIn("Traceback", p.stderr)
 
-    def test_an_app_stopped_on_a_limit_banner_fails_with_it(self):
-        t0 = time.time()
-        rows = self.run_tui("limit")  # default 180 s idle
-        self.assertEqual({r["status"] for r in rows.values()}, {"failed"}, rows)
-        self.assertLess(time.time() - t0, 60)
+    def test_a_limit_screen_is_diagnostic_until_an_explicit_idle_limit(self):
+        rows = self.run_tui("limit", extra=("--idle", "3"))
+        self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
         for r in rows.values():
-            self.assertIn("Individual quota reached", r["reason"])
-            self.assertIn("Resets in 62h37m27s", r["reason"])
+            self.assertTrue(any("Individual quota reached" in line for line in r["stderr_tail"]))
 
     def test_a_quoted_limit_banner_does_not_end_a_working_app(self):
         rows = self.run_tui("limit-echo")

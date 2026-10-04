@@ -59,6 +59,9 @@ answer = {
     "slow": f"### 1) VERDICT\nThe claim holds after a slow read.\n6) PROOF: {token}\nRESULT_COMPLETE\n",
 }.get(mode)
 answer_ok = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
+upstream_limit = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
+if mode == "echo-upstream-limit":
+    answer = answer_ok.replace("The claim holds", "The packet quotes " + upstream_limit)
 if mode == "slow":
     time.sleep(4)
 
@@ -73,7 +76,20 @@ tui = {"claude": "-p" not in argv, "codex": "exec" not in argv,
 if tui:
     print(f"\x1b[2J\x1b[H\x1b[1mfake {kind} TUI\x1b[0m\r\nworking on the review…\r", flush=True)
     target = Path(argv[argv.index("-C") + 1]) if kind == "codex" else Path.cwd()
-    if mode == "error":
+    if mode == "silent-work":
+        time.sleep(float(os.environ.get("FAKE_DELAY", "7")))
+        (target / "ANSWER.md").write_text(answer_ok)
+    elif mode == "deadline-rewrite":
+        (target / "ANSWER.md").write_text(answer_ok.replace("The claim holds", "EARLY candidate"))
+        time.sleep(4)
+        (target / "ANSWER.md").write_text(answer_ok.replace("The claim holds", "EARLY candidate revised"))
+        time.sleep(2)
+        (target / "ANSWER.md").write_text(answer_ok.replace("The claim holds", "FINAL reviewed answer"))
+    elif mode == "drawing-hang":
+        while True:
+            print("working animation", flush=True)
+            time.sleep(0.2)
+    elif mode == "error":
         print("You've hit your limit · resets 7pm\r", flush=True)
     elif mode == "slowwrite":
         (target / "ANSWER.md").write_text("### 1) VERDICT\npartial draft")
@@ -81,6 +97,7 @@ if tui:
         (target / "ANSWER.md").write_text(f"### 1) VERDICT\nThe claim holds after a rewrite.\n6) PROOF: {token}\nRESULT_COMPLETE\n")
     elif mode == "answer-exit":  # agy: writes its answer, then its app exits by itself
         (target / "ANSWER.md").write_text(answer_ok)
+        (target / "ANSWER.ready").write_text("ANSWER_READY\n")
         sys.exit(0)
     elif mode == "bg-child":
         child = os.fork()
@@ -100,6 +117,13 @@ if tui:
     elif mode == "limit":  # the real Agy per-model cap screen, then nothing
         sys.stdout.buffer.write((Path(__file__).resolve().parent.parent / "fixtures" / "agy-quota.screen").read_bytes())
         sys.stdout.flush()
+    elif mode == "quoted-limit-silent":
+        print('• "You\'ve hit your limit · resets 7pm"', flush=True)
+        time.sleep(float(os.environ.get("FAKE_DELAY", "20")))
+        (target / "ANSWER.md").write_text(answer_ok)
+    elif mode == "native-limit-exit":
+        print("Individual quota reached", flush=True)
+        sys.exit(1)
     elif mode == "limit-echo":  # a peer quoting the banner while it keeps working
         print("\u26a0 Individual quota reached. Please upgrade your subscription to increase\r", flush=True)
         for i in range(20):
@@ -108,26 +132,76 @@ if tui:
         (target / "ANSWER.md").write_text(answer_ok)
     elif mode != "hang":
         (target / "ANSWER.md").write_text(answer or "")
+    if mode not in ("hang", "error", "invalid", "noop-frames", "limit"):
+        (target / "ANSWER.ready").write_text("ANSWER_READY\n")
     time.sleep(60)
     sys.exit(0)
+
+if mode == "mixed-duration":
+    mode = "buffered-work"
+if mode == "buffered-work":
+    emit({"type": "step_start", "sessionID": "ses_fake", "part": {"type": "step-start"}})
+    emit({"type": "tool_use", "part": {"tool": "bash", "state": {"status": "running", "input": {"command": "SECRET command"}}}})
+    delay = float(os.environ.get("FAKE_DELAY", "7"))
+    time.sleep(delay if kind == "opencode" else delay / 8)
+    answer = answer_ok
+if mode in ("terminal-hang", "text-only", "codex-unflushed"):
+    answer = answer_ok
 
 if mode == "hang":
     time.sleep(60)
     sys.exit(0)
 if mode == "silent-exit":
     sys.exit(0)
+if mode == "error-retry":
+    errors = {
+        "codex": {"type": "error", "message": "status 402: usage limit reached"},
+        "claude": {"type": "result", "subtype": "success", "is_error": True,
+                   "result": "You've hit your limit · resets 7pm"},
+        "grok": {"type": "error", "message": "HTTP 402 Grok Build usage balance exhausted"},
+        "opencode": {"type": "error", "error": {"data": {"message": upstream_limit}}},
+    }
+    emit(errors[kind])
+    if kind == "codex":
+        emit({"type": "turn.failed", "error": {"message": errors[kind]["message"]}})
+    while True:
+        emit({"type": "heartbeat"})
+        time.sleep(0.2)
 
 if kind == "codex":
     out = Path(argv[argv.index("-o") + 1])
     emit({"type": "thread.started", "thread_id": "t"})
+    if mode == "reconnect":
+        emit({"type": "error", "message": "Reconnecting... 1/5 (stream disconnected before completion)"})
+        time.sleep(1)
+        answer = answer_ok
     if mode == "error":
         emit({"type": "error", "message": "status 402: usage limit reached"})
         emit({"type": "turn.failed", "error": {"message": "usage limit reached"}})
         sys.exit(1)
     emit({"type": "item.completed", "item": {"type": "agent_message", "text": answer}})
-    out.write_text(answer)
+    out.write_text(os.environ.get("FAKE_PARTIAL", "") if mode == "codex-unflushed" else answer)
     emit({"type": "turn.completed"})
+    if mode == "codex-unflushed":
+        time.sleep(60)
 elif kind == "claude":
+    if mode in ("mcp-policy-probe", "mcp-policy-audit", "mcp-startup-warning"):
+        config_arg = argv[argv.index("--mcp-config") + 1]
+        config = json.loads(config_arg) if config_arg.startswith('{') else json.loads(Path(config_arg).read_text())
+        offered = set(config.get('mcpServers', {}))
+        if '--strict-mcp-config' not in argv:
+            offered.add('cloudflare-browser-rendering')  # a fake global connector
+        emit({'type': 'system', 'subtype': 'init', 'mcp_servers':
+              [{'name': name, 'status': 'connected'} for name in sorted(offered)]})
+        if mode == 'mcp-policy-audit' or 'cloudflare-browser-rendering' in offered:
+            fixture = Path(__file__).resolve().parent.parent / 'fixtures' / 'claude-cloudflare-call.json'
+            for row in json.loads(fixture.read_text()):
+                block = row['tool'] if row['stream_type'] == 'assistant' else row['tool_result']
+                emit({'type': row['stream_type'], 'message': {'content': [block]}})
+        if mode == 'mcp-startup-warning':
+            emit({'type': 'system', 'subtype': 'init', 'mcp_servers':
+                  [{'name': 'optional-fake', 'status': 'needs-auth'}]})
+        answer = answer_ok
     emit({"type": "system", "subtype": "init"})
     if mode == "error":
         emit({"type": "result", "subtype": "success", "is_error": True,
@@ -147,13 +221,27 @@ elif kind == "grok":
 elif kind == "opencode":
     part = lambda **p: {"type": "text", "part": {"type": "text", **p}}
     emit({"type": "step_start", "part": {"type": "step-start"}})
+    if mode == "error-no-newline":
+        emit(part(text=answer_ok))
+        sys.stdout.write(json.dumps({"type": "error", "error": {"data": {"message": upstream_limit}}}))
+        sys.stdout.flush()
+        os.close(1)
+        time.sleep(60)
+        sys.exit(1)
+    if mode == "rate-limit-retry":
+        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "opencode-qwen-rate-limit.jsonl"
+        emit(json.loads(fixture.read_text()))
+        while True:
+            emit({"type": "step_start", "part": {"type": "step-start"}})
+            time.sleep(0.2)
     if mode == "error":
         emit({"type": "error", "error": {"name": "APIError", "data": {"message": "FreeUsageLimitError: free usage exceeded"}}})
         sys.exit(1)
     emit(part(text="I will read the packet first."))
     emit({"type": "tool_use", "part": {"type": "tool", "tool": "read", "state": {"status": "completed", "input": {"filePath": "PACKET.md"}}}})
     emit(part(text=answer))
-    emit({"type": "step_finish", "part": {"type": "step-finish"}})
+    if mode != "text-only":
+        emit({"type": "step_finish", "part": {"type": "step-finish", "reason": "stop"}})
 elif kind == "agy":
     sys.stdin.read()
     emit({"event": "init", "init": {}})
@@ -162,3 +250,6 @@ elif kind == "agy":
                                              "error": "Individual quota reached"}})
         sys.exit(1)
     emit({"event": "result", "result": {"status": "SUCCESS", "response": answer}})
+
+if mode == "terminal-hang":
+    time.sleep(60)

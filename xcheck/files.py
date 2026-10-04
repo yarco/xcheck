@@ -9,6 +9,7 @@ import os
 import signal
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,18 @@ from .validate import Contract
 # Runs, pool locks and liveness files live here; tests point it elsewhere so
 # they never contend with a real run for a quota pool.
 ROOT = Path(os.environ.get("XCHECK_ROOT", "/tmp/agent-offload"))
+
+STOP_SIGNALS = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM}
+
+
+@contextmanager
+def defer_stop():
+    """Defer cancellation until spawn ownership or cleanup is established."""
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+    try:
+        yield previous
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 def workspace(lane: str) -> Path:
@@ -40,7 +53,9 @@ def fresh_answer(lane_dir: Path, work: Path) -> str | None:
     across runs, so only an answer newer than this run's staging counts."""
     staged, answer = lane_dir / "staged", work / "ANSWER.md"
     try:
-        if answer.stat().st_mtime >= staged.stat().st_mtime:
+        ready = work / "ANSWER.ready"
+        if (ready.read_text().strip() == "ANSWER_READY" and ready.stat().st_mtime >= staged.stat().st_mtime
+                and answer.stat().st_mtime >= staged.stat().st_mtime):
             return answer.read_text(encoding="utf-8", errors="replace")
     except OSError:
         pass
@@ -116,7 +131,7 @@ class Run:
     contract: Contract
     web: bool
     idle: int                    # 0 = default for each lane's actual view
-    cap: int
+    cap: int | None
     mode: str                    # headless | herdr
     orch: str
     started: str
@@ -125,7 +140,7 @@ class Run:
     view: str = "stream"         # stream (headless NDJSON) | tui (interactive app, answers in ANSWER.md)
     capacity: bool = True        # each lane probes its pool before spending
     forced: list = None          # lanes launched past a capacity refusal
-    epoch: float = 0.0           # launch time: the "runner never started" grace counts from here
+    epoch: float = 0.0           # lower bound for this run's native-session creation time
 
     def lane(self, name: str) -> Lane:
         return self.lanes[name]

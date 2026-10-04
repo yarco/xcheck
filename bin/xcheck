@@ -7,6 +7,7 @@
   xcheck wait   --base B [--timeout S]   block until the run ends (exit 3 = still
                 running after S seconds); also reattaches if the supervisor died
   xcheck status --base B      render STATUS from files, no waiting
+  xcheck activity --base B [--lane NAME] [--json]  compact native progress metadata
   xcheck doctor               check adapter flags and model pins against installed CLIs
   xcheck capacity [--lanes …] read each lane's quota pool now (no inference)
   xcheck models [--provider ID] [--json] discover recent zero-price coding models
@@ -36,8 +37,9 @@ def main() -> int:
                    help="the orchestrating harness; its kind is never a peer")
     r.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster minus --orch")
     r.add_argument("--add", action="append", default=[], metavar="LANE",
-                   help="append an opt-in lane (kind:model[:effort]); use xcheck models for "
-                        "opencode:<provider>/<model>[:variant], or devin:swe-2-max")
+                   help="append an opt-in lane (kind:model[:effort]); pins: "
+                        + ", ".join(f"{l.kind}:{l.model}" for l in adapters.OPT_IN)
+                        + "; more opencode selectors from `xcheck models`")
     r.add_argument("--mode", default="auto", choices=["auto", "headless", "herdr"])
     r.add_argument("--view", default="auto", choices=["auto", "tui", "stream"],
                    help="tui: each harness's own interactive app (default in Herdr); "
@@ -45,19 +47,29 @@ def main() -> int:
     r.add_argument("--web", default="live", choices=["live", "packet"],
                    help="live (default): allow web; packet: disable built-in web and request no web (not isolation)")
     r.add_argument("--idle", type=int, default=None,
-                   help="seconds without output before a lane is killed (default 180 for apps, 900 for streams)")
-    r.add_argument("--cap", type=int, default=3600, help="wall-clock spend budget per lane, in seconds")
+                   help="optional explicit silence cutoff; may stop working models (no default cutoff)")
+    r.add_argument("--cap", type=int, default=None, help="optional explicit wall-clock spend limit; default waits for completion")
     r.add_argument("--force-lane", action="append", default=[], metavar="NAME",
                    help="launch this lane even if capacity says no (record why in chat)")
     r.add_argument("--skip-capacity", action="store_true", help="no capacity probe (tests, smoke runs)")
     r.add_argument("--detach", action="store_true",
-                   help="return once launched; collect with `xcheck wait` (for capped tool calls)")
+                   help="return once launched; retain one wait or verified completion callback")
+
+    r.add_argument("--supervisor", action="store_true", help=argparse.SUPPRESS)
 
     w = sub.add_parser("wait")
     w.add_argument("--base", required=True, type=Path)
     w.add_argument("--timeout", type=int, help="return with exit 3 after this many seconds")
     st = sub.add_parser("status")
     st.add_argument("--base", required=True, type=Path)
+    ca = sub.add_parser("cancel", help="explicitly cancel owned lanes; waiting never cancels")
+    ca.add_argument("--base", required=True, type=Path)
+    ca.add_argument("--lane")
+    ca.add_argument("--reason", required=True)
+    ac = sub.add_parser("activity", help="inspect native progress metadata without peer answer text")
+    ac.add_argument("--base", required=True, type=Path)
+    ac.add_argument("--lane")
+    ac.add_argument("--json", action="store_true", help="full native metadata instead of one line per lane")
     sub.add_parser("doctor")
     cp = sub.add_parser("capacity", help="read each lane's quota pool now (no inference)")
     cp.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster")
@@ -73,8 +85,9 @@ def main() -> int:
 
     a = p.parse_args()
     try:
-        if a.cmd == "run" and a.detach:
-            return run.detach([x for x in sys.argv[1:] if x != "--detach"], a.base)
+        if a.cmd == "run" and not a.supervisor:
+            code = run.detach([x for x in sys.argv[1:] if x != "--detach"] + ["--supervisor"], a.base)
+            return code if code or a.detach else run.wait(a.base, None)
         if a.cmd == "run":
             if a.lanes:
                 lanes = [adapters.parse_lane(s.strip()) for s in a.lanes.split(",") if s.strip()]
@@ -87,6 +100,18 @@ def main() -> int:
             return run.wait(a.base, a.timeout)
         if a.cmd == "status":
             print(run.render_status(run.launched(a.base.resolve())))
+            return 0
+        if a.cmd == "cancel":
+            return run.cancel(run.launched(a.base.resolve()), a.lane, a.reason)
+        if a.cmd == "activity":
+            import json
+            from xcheck import activity
+            current = run.launched(a.base.resolve())
+            names = [a.lane] if a.lane else list(current.lanes)
+            if any(n not in current.lanes for n in names):
+                raise ValueError("unknown lane")
+            rows = [activity.snapshot(current, n) for n in names]
+            print(json.dumps(rows, indent=2) if a.json else "\n".join(activity.compact(row) for row in rows))
             return 0
         if a.cmd == "capacity":
             from xcheck import capacity

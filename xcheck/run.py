@@ -1,10 +1,8 @@
 """The supervisor: preflight, fan-out (headless or Herdr), wait, status.
 
-Token discipline: while lanes work, the orchestrating model makes no calls.
-`run` blocks until every lane has ended and prints one status table. Where a
-harness cannot hold a call that long, `run --detach` returns at once and
-`wait --timeout S` blocks for at most S seconds per call (exit 3 = still
-running), so the model spends one small turn per S seconds, never a poll loop.
+Token discipline: supervision is local and invokes no model. Hold one host
+wait/background job until completion. A bounded wait is for an explicit status
+request, never a recipe for repeated master-model turns.
 """
 
 from __future__ import annotations
@@ -22,15 +20,15 @@ from pathlib import Path
 from . import adapters, herdr, validate
 from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, is_alive, now, workspace
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
-START_GRACE = 90  # seconds for a placed runner to record its pid
 STILL_RUNNING = 3
 
 DELIVER = {
     "stream": "Do not create, modify, or delete any file. Print your complete answer as "
               "your final message; the harness saves it.",
-    "tui": "Create, modify, or delete no file except one: write your complete answer to "
-           "./ANSWER.md in a single write, ending with its final line; the harness "
-           "publishes it.",
+    "tui": "Create, modify, or delete no file except these two: write your complete answer to "
+           "./ANSWER.md in a single write, ending with its final line. After all review "
+           "work and the answer write finish, write ./ANSWER.ready containing exactly "
+           "ANSWER_READY on its own line. This commits your answer; do not edit it afterwards.",
 }
 
 MESSAGE = (
@@ -61,19 +59,19 @@ class RunError(Exception):
 
 
 def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: bool,
-          idle: int | None, cap: int, force_lanes: set[str], skip_capacity: bool,
+          idle: int | None, cap: int | None, force_lanes: set[str], skip_capacity: bool,
           view: str = "auto") -> int:
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
         raise RunError(f"BASE must live under {ROOT} (got {base}); stage it as {ROOT}/<slug>")
     if not lanes:
         raise RunError("select at least one peer lane")
-    if cap <= 0 or (idle is not None and idle <= 0):
+    if (cap is not None and cap <= 0) or (idle is not None and idle <= 0):
         raise RunError("--cap and --idle must be positive seconds")
     unknown = force_lanes - {lane.name for lane in lanes}
     if unknown:
         raise RunError(f"--force-lane names unselected lanes: {', '.join(sorted(unknown))}")
-    contract = validate.preflight(base)
+    validate.preflight(base)
     names = [l.name for l in lanes]
     if len(set(names)) != len(names):
         raise RunError(f"duplicate lanes: {names}")
@@ -100,6 +98,19 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     # its app, even when the run's other lanes use the stream view.
     idle = idle or 0
 
+    try:
+        snapshot = base / ".packet"
+        snapshot.mkdir()
+        for f in ("PACKET.md", "PROMPT.md"):
+            shutil.copy2(base / f, snapshot / f, follow_symlinks=False)
+        if (base / "evidence").exists():
+            shutil.copytree(base / "evidence", snapshot / "evidence", symlinks=True)
+        # Validate the captured bytes that every lane will actually receive.
+        contract = validate.preflight(snapshot)
+    except BaseException:
+        shutil.rmtree(base / ".packet", ignore_errors=True)
+        (base / ".launched").rmdir()
+        raise
     run = Run(base=base, lanes={l.name: l for l in lanes}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
               herdr=ctx or {}, view=view, capacity=not skip_capacity, forced=sorted(force_lanes),
@@ -111,8 +122,9 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
             lane_view = "tui" if run.lanes[name].kind in adapters.APP_ONLY else view
             (d / "message.txt").write_text(_message(lane_view, web, run.lanes[name].kind), encoding="utf-8")
         run.save()
-    except OSError:
+    except BaseException:
         shutil.rmtree(base / "lanes", ignore_errors=True)
+        shutil.rmtree(base / ".packet", ignore_errors=True)
         (base / ".launched").rmdir()  # nothing started: the BASE stays usable
         raise
     atomic_write(base / "supervisor.pid", str(os.getpid()))  # for operators; liveness is the lock
@@ -148,7 +160,7 @@ def _message(view: str, web: bool, kind: str) -> str:
     deliver = DELIVER[view] if not shell else (
         "Print your complete answer as your final message; the harness saves it."
         if view == "stream" else
-        "Write your complete answer to ./ANSWER.md in a single write, ending with its final line; the harness publishes it.")
+        "Write your complete answer to ./ANSWER.md. After all review work and the answer write finish, write ./ANSWER.ready containing exactly ANSWER_READY on its own line. This commits your answer; do not edit it afterwards.")
     return MESSAGE.format(deliver=deliver, tool_scope=scope, web=(
         " Search the web when it can settle a fact your answer depends on, and cite"
         " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
@@ -173,7 +185,8 @@ def detach(argv: list[str], base: Path) -> int:
             return p.returncode or 2
         if not reused and (base / "run.json").exists():
             print(f"xcheck: supervisor pid {p.pid} running.\n"
-                  f"Collect with: xcheck wait --base {base} --timeout <seconds your tool call can hold>")
+                  f"Retain one completion operation: xcheck wait --base {base}\n"
+                  "If this host has no completion callback, disclose pending collection; do not schedule master polling.")
             return 0
         time.sleep(0.2)
     print(f"xcheck: supervisor pid {p.pid} started; see {log}")
@@ -215,8 +228,9 @@ def wait(base: Path, timeout: int | None) -> int:
 
 
 def _still_running(run: Run) -> int:
-    print(render_status(run) + f"xcheck: still running; call `xcheck wait --base {run.base}` "
-          f"again. Report any failed or skipped row above now.", flush=True)
+    print(render_status(run) + "xcheck: still running; collection is pending. Retain one completion operation or "
+          "collect on an explicit request; do not schedule another master turn. "
+          "Report any failed or skipped row above now.", flush=True)
     return STILL_RUNNING
 
 
@@ -232,14 +246,7 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
     pending = set(run.lanes)
     while pending:
         if interrupted:
-            if run.mode == "headless":
-                for name in pending:
-                    if name in children:
-                        _signal(children[name].pid, signal.SIGTERM)
-                deadline = time.time() + 30
-                while time.time() < deadline and any(not _exit_path(run, n).exists() for n in pending):
-                    time.sleep(0.5)
-            break
+            break  # subscriber/supervisor interruption leaves owned reviewers running
         if until and time.time() >= until:
             return _still_running(run)
         for name in sorted(pending):
@@ -250,10 +257,7 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
             if alive is False:
                 _settle_dead_runner(run, name)
                 pending.discard(name)
-            elif alive is None and time.time() - run.epoch > START_GRACE:
-                _write_exit(run, name, "failed", "lane runner never started")
-                pending.discard(name)
-            # A live runner needs no watchdog here: its own kernel alarm bounds it.
+            # Unknown startup remains pending; elapsed time cannot prove a failed launch.
         if pending:
             time.sleep(1)
     status = render_status(run)
@@ -292,6 +296,8 @@ def _settle_dead_runner(run: Run, name: str) -> None:
     """The runner died without exit.json. Stop its orphaned harness, then keep
     whatever answer it had already published."""
     d = run.lane_dir(name)
+    if _exit_path(run, name).exists():
+        return  # the runner may have published between the liveness probes
     try:
         harness = json.loads((d / "pids.json").read_text()).get("harness")
     except (OSError, ValueError):
@@ -301,17 +307,64 @@ def _settle_dead_runner(run: Run, name: str) -> None:
     if harness and any(re.search(re.escape(str(p)) + r"(?=[/\s'\"]|$)", cmd) for p in (d, workspace(name))):
         if end_group(harness):
             note += "; its harness was still running and was stopped"
-    elif harness and not cmd:
+    elif harness:
         note += "; harness identity unverified (exited or process table unreadable)"
     result = run.base / f"RESULT-{name}.md"
+    diagnostics = []
     salvaged = fresh_answer(d, workspace(name))
-    if not result.exists() and salvaged:
-        atomic_write(result, salvaged)  # the lane finished; its runner did not
-    if result.exists():
-        status, problems = validate.check(result.read_text(errors="replace"), run.contract)
-        _write_exit(run, name, status, f"{note}; published answer: {'; '.join(problems) or 'valid'}")
+    if not salvaged and (d / "stream.jsonl").is_file():
+        reader = adapters.Reader(run.lane(name).kind)
+        for line in (d / "stream.jsonl").read_text(errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                reader.feed(event)
+        reader.finish(d / "final.md")
+        diagnostics = reader.diagnostics
+        if reader.notes():
+            note += "; " + "; ".join(reader.notes())
+        if reader.completed and not reader.error:
+            salvaged = reader.text
+    if salvaged:
+        atomic_write(result, salvaged)
+        status, problems = validate.check(salvaged, run.contract)
+        _write_exit(run, name, status, f"{note}; committed answer: {'; '.join(problems) or 'valid'}", diagnostics)
     else:
-        _write_exit(run, name, "failed", note)
+        if result.exists():
+            note += "; retained output is diagnostic; native completion unverified"
+        _write_exit(run, name, "failed", note, diagnostics)
+
+
+def cancel(run: Run, name: str | None, reason: str) -> int:
+    if not reason.strip():
+        raise ValueError('--reason is required')
+    names = [name] if name else list(run.lanes)
+    if any(n not in run.lanes for n in names):
+        raise ValueError('unknown lane')
+    targets = []
+    for selected in names:
+        d = run.lane_dir(selected)
+        if (d / 'exit.json').exists():
+            print(f'xcheck: {selected} already ended')
+            continue
+        try:
+            pid = json.loads((d / 'pids.json').read_text())['runner']
+        except (OSError, ValueError, KeyError):
+            raise RunError(f'{selected}: runner not recorded; cancellation not sent')
+        cmd = _pid_cmd(pid)
+        if not is_alive(d / 'alive') or not all(re.search(re.escape(value) + r"(?=[/\s'\"]|$)", cmd)
+                                              for value in (str(run.base), selected)) or ' lane ' not in cmd:
+            raise RunError(f'{selected}: runner identity unverified; cancellation not sent')
+        targets.append((selected, d, pid))
+    # Validate the complete selection before signalling any lane.
+    for selected, d, pid in targets:
+        atomic_write(d / 'cancel.json', json.dumps(dict(reason=reason.strip(), at=now())))
+    for selected, d, pid in targets:
+        _signal(pid, signal.SIGTERM)
+        print(f'xcheck: cancellation sent to {selected}')
+    return 0
 
 
 def _signal(pid, sig: int) -> None:
@@ -322,10 +375,10 @@ def _signal(pid, sig: int) -> None:
             pass
 
 
-def _write_exit(run: Run, name: str, status: str, reason: str) -> None:
+def _write_exit(run: Run, name: str, status: str, reason: str, diagnostics: list | None = None) -> None:
     atomic_write(_exit_path(run, name), json.dumps({
         "lane": name, "status": status, "reason": reason, "exit_code": None, "error": None,
-        "ended": now(), "stderr_tail": [],
+        "ended": now(), "stderr_tail": [], "diagnostics": diagnostics or [],
     }, indent=2))
 
 
@@ -357,6 +410,11 @@ def render_status(run: Run) -> str:
 # ------------------------------------------------------------------ doctor
 
 
+# Each kind's own `models` listing; opencode is resolved per provider below.
+MODEL_LISTS = {"grok": ["grok", "models"], "agy": ["agy", "models"],
+               "devin": ["devin", "models", "list"]}
+
+
 def doctor() -> int:
     """Check every adapter flag against the installed CLI's own help, and the
     model pins against the CLIs' model lists. Config keys (codex -c ...) and
@@ -381,17 +439,27 @@ def doctor() -> int:
         missing = [f for f in flags if f not in text]
         print(f"{'FAIL' if missing else 'ok  '} {kind}: " + (f"missing {missing}" if missing else f"{len(flags)} flags present"))
         bad += bool(missing)
-    for kind, cmd in (("grok", ["grok", "models"]), ("agy", ["agy", "models"]),
-                      ("opencode", ["opencode", "models", "opencode"]),
-                      ("devin", ["devin", "models", "list"])):
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            listing = out.stdout + out.stderr
-        except (OSError, subprocess.TimeoutExpired):
-            listing = ""
-        for lane in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN):
-            if lane.kind == kind:
-                ok = lane.model in listing
-                print(f"{'ok  ' if ok else 'FAIL'} {kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")
-                bad += not ok
+    # opencode pins list under their provider (`opencode models <provider>`),
+    # not one shared listing.
+    listings: dict[tuple, str] = {}
+
+    def listing(cmd: list[str]) -> str:
+        if tuple(cmd) not in listings:
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                listings[tuple(cmd)] = out.stdout + out.stderr
+            except (OSError, subprocess.TimeoutExpired):
+                listings[tuple(cmd)] = ""
+        return listings[tuple(cmd)]
+
+    for lane in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN):
+        cmd = MODEL_LISTS.get(lane.kind)
+        if lane.kind == "opencode":
+            provider = lane.model.split("/", 1)[0] if "/" in lane.model else "opencode"
+            cmd = ["opencode", "models", provider]
+        if cmd is None:
+            continue
+        ok = lane.model in listing(cmd)
+        print(f"{'ok  ' if ok else 'FAIL'} {lane.kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")
+        bad += not ok
     return 1 if bad else 0

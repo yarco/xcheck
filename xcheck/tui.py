@@ -3,12 +3,11 @@
 The app's output goes to the runner's terminal unchanged (in Herdr, the pane),
 so the operator sees the real TUI; keystrokes from that terminal go to the app,
 so the operator can also type into it. The runner stays the owning process: it
-holds the pool lock, sees every byte (only drawn text resets the idle clock),
+holds the pool lock, sees every byte (only drawn text resets an explicit idle clock),
 and ends the app when the answer is published.
 
-The lane answers by writing ANSWER.md. It counts as published when its last
-non-empty line is RESULT_COMPLETE or RESULT_INVALID and it has not changed for
-STABLE seconds (a lane still writing is not cut off).
+The lane commits ANSWER.md by writing ANSWER.ready containing ANSWER_READY.
+An unchanged file, silence or terminal repaint never constitutes completion.
 """
 
 from __future__ import annotations
@@ -25,11 +24,8 @@ import time
 import tty
 from pathlib import Path
 
-from . import validate
-from .files import end_group, signal_group
+from .files import defer_stop, end_group, signal_group
 
-STABLE = 3.0
-LIMIT_SETTLE = 15.0  # seconds without drawing before a limit banner ends the lane
 LIMIT_LINES = 10  # the banner must be among the screen's last lines
 LOG_LIMIT = 8 * 1024 * 1024
 ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\r")
@@ -37,94 +33,100 @@ RESET = b"\x1b[?1049l\x1b[?25h\x1b[0m\r\n"
 
 
 def run(argv: list[str], env: dict, cwd: Path, answer: Path, screen_log: Path,
-        idle: int, cap: int, on_spawn, limit: re.Pattern | None = None,
+        idle: int, cap: int | None, on_spawn,
         ) -> tuple[str | None, str, int | None, str]:
-    """Returns (status or None when the answer decides, reason, exit code, answer text).
-    An app that stops drawing with a `limit` banner on its last screen ends
-    `failed` after LIMIT_SETTLE seconds instead of waiting out `idle`."""
-    pid, fd = pty.fork()
-    if pid == 0:  # child: session leader with the pty as its terminal
+    """Returns status, reason, exit code and committed answer or diagnostic draft."""
+    with defer_stop() as previous_mask:
+        pid, fd = pty.fork()
+        if pid == 0:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            try:
+                os.chdir(cwd)
+                os.execvpe(argv[0], argv, env)
+            except OSError as e:
+                os.write(2, f"xcheck: cannot start {argv[0]}: {e}\n".encode())
+            os._exit(127)
+        leader = pid
+        saved = previous = log = None
+        status, reason, code = None, "", None
+        committed, committed_text = False, ""
+        carry = b""
+        started = last = time.monotonic()
+        # Install the cleanup span before delivering a pending cancellation.
         try:
-            os.chdir(cwd)
-            os.execvpe(argv[0], argv, env)
-        except OSError as e:
-            os.write(2, f"xcheck: cannot start {argv[0]}: {e}\n".encode())
-        os._exit(127)
-    on_spawn(pid)
-    leader = pid
-    interactive = os.isatty(0)
-    saved = termios.tcgetattr(0) if interactive else None
-    if interactive:
-        tty.setraw(0)
-    _sync_size(fd)
-    previous = signal.signal(signal.SIGWINCH, lambda *_: _sync_size(fd))
-    status, reason, code = None, "", None
-    started = last = time.monotonic()
-    seen, seen_at = None, 0.0
-    carry = b""
-    recent, checked = b"", False
-    log = open(screen_log, "ab")
-    try:
-        while True:
-            ready, _, _ = select.select([fd, 0] if interactive else [fd], [], [], 1.0)
-            if fd in ready:
-                try:
-                    data = os.read(fd, 65536)
-                except OSError:  # EIO once the app closed its terminal
-                    data = b""
-                if not data:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            on_spawn(pid)
+            interactive = os.isatty(0)
+            saved = termios.tcgetattr(0) if interactive else None
+            if interactive:
+                tty.setraw(0)
+            _sync_size(fd)
+            previous = signal.signal(signal.SIGWINCH, lambda *_: _sync_size(fd))
+            log = open(screen_log, "ab")
+            while True:
+                ready, _, _ = select.select([fd, 0] if interactive else [fd], [], [], 1.0)
+                if fd in ready:
+                    try:
+                        data = os.read(fd, 65536)
+                    except OSError:  # EIO once the app closed its terminal
+                        data = b""
+                    if not data:
+                        break
+                    os.write(1, data)
+                    if log.tell() > LOG_LIMIT:
+                        log.truncate(0)
+                        log.seek(0)
+                    log.write(data)
+                    log.flush()  # on disk now: a killed runner leaves its last screen
+                    text, carry = _visible(carry + data)
+                    if text:
+                        last = time.monotonic()
+                if interactive and 0 in ready:
+                    data = os.read(0, 4096)
+                    if data:
+                        os.write(fd, data)
+                now = time.monotonic()
+                if cap is not None and now - started > cap:
+                    status, reason = "timeout", f"exceeded the {cap}s cap"
                     break
-                os.write(1, data)
-                if log.tell() > LOG_LIMIT:
-                    log.truncate(0)
-                    log.seek(0)
-                log.write(data)
-                log.flush()  # on disk now: a killed runner leaves its last screen
-                recent = (recent + data)[-65536:]
-                text, carry = _visible(carry + data)
-                if text:
-                    last, checked = time.monotonic(), False
-            if interactive and 0 in ready:
-                data = os.read(0, 4096)
-                if data:
-                    os.write(fd, data)
-            sig = _signature(answer)
-            if sig != seen:
-                seen, seen_at = sig, time.monotonic()
-            elif sig and time.monotonic() - seen_at >= STABLE and _complete(answer):
-                break
-            done, wstatus = os.waitpid(pid, os.WNOHANG)
-            if done:
-                code, pid = os.waitstatus_to_exitcode(wstatus), 0
-                break
-            now = time.monotonic()
-            if limit and not checked and now - last > LIMIT_SETTLE:
-                checked = True
-                banner = limit_banner(_lines(recent), limit)
-                if banner:
-                    status, reason = "failed", f"the app stopped on a limit screen: {banner}"
+                if _committed(answer):
+                    try:
+                        committed_text = answer.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    committed = True
                     break
-            if now - last > idle:
-                status, reason = "timeout", f"the app printed nothing for {idle}s"
-                break
-            if now - started > cap:
-                status, reason = "timeout", f"exceeded the {cap}s cap"
-                break
-    finally:
-        try:
-            if pid:
-                code = _end(pid)
+                done, wstatus = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    code, pid = os.waitstatus_to_exitcode(wstatus), 0
+                    break
+                now = time.monotonic()
+                if idle and now - last > idle:
+                    status, reason = "timeout", (
+                        f"no terminal text observed for {idle}s (explicit --idle; "
+                        "model or tool activity may be unobserved)")
+                    break
         finally:
-            # A background child may outlive the TUI leader and inherit the
-            # pool lock. Settle the entire group before the caller releases it.
-            end_group(leader)
-            log.close()
-            signal.signal(signal.SIGWINCH, previous)
-            if saved is not None:
-                termios.tcsetattr(0, termios.TCSADRAIN, saved)
-            os.write(1, RESET)
-            os.close(fd)
-    text = answer.read_text(encoding="utf-8", errors="replace") if answer.exists() else ""
+            with defer_stop():
+                try:
+                    if pid:
+                        code = _end(pid)
+                finally:
+                    end_group(leader)
+                    if log is not None:
+                        log.close()
+                    if previous is not None:
+                        signal.signal(signal.SIGWINCH, previous)
+                    if saved is not None:
+                        termios.tcsetattr(0, termios.TCSADRAIN, saved)
+                    os.write(1, RESET)
+                    os.close(fd)
+    if status is None and not committed and not _committed(answer):
+        status, reason = "failed", "app exited before committing ANSWER.ready"
+    try:
+        text = committed_text if committed else answer.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
     return status, reason, code, text
 
 
@@ -166,17 +168,11 @@ def _visible(buf: bytes) -> tuple[bytes, bytes]:
     return bytes(c for c in ANSI.sub(b"", buf) if c > 32), carry
 
 
-def _signature(path: Path):
+def _committed(answer: Path) -> bool:
     try:
-        st = path.stat()
+        return (answer.parent / 'ANSWER.ready').read_text().strip() == 'ANSWER_READY' and answer.is_file()
     except OSError:
-        return None
-    return st.st_size, st.st_mtime_ns
-
-
-def _complete(path: Path) -> bool:
-    last = validate.last_line(path.read_text(encoding="utf-8", errors="replace"))
-    return last in (validate.COMPLETE, validate.INVALID)
+        return False
 
 
 def _sync_size(fd: int) -> None:

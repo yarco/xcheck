@@ -1,4 +1,4 @@
-"""Run one lane to completion: spawn, stream, enforce the deadline, publish.
+"""Run one lane to completion: own the harness, consume its result, publish.
 
 The same runner is used headless (as a child of `xcheck run`) and in a Herdr
 pane (started with `pane run`). It owns the harness process group and always
@@ -16,19 +16,21 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from functools import partial
+from contextlib import ExitStack
 
 import shutil
 
-from . import adapters, capacity, pools, trust, tui, validate
-from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, now, signal_group, workspace
+from . import activity, adapters, capacity, pools, trust, tui, validate
+from .files import ROOT, Run, atomic_write, defer_stop, end_group, fresh_answer, hold_life, now, signal_group, workspace
 
-TUI_IDLE = 180
-STREAM_IDLE = 900
+TUI_IDLE = 0  # terminal silence does not establish model or tool inactivity
+STREAM_IDLE = 0
 LINGER = 3  # seconds a finished Herdr pane stays visible
 
 
 def idle_for(configured: int, view: str) -> int:
-    """A per-run override wins; otherwise use the actual lane view."""
+    """Only an explicitly configured silence limit can stop quiet work."""
     return configured or (TUI_IDLE if view == "tui" else STREAM_IDLE)
 
 TAIL_LINES = 40
@@ -40,8 +42,8 @@ TAIL_LINES = 40
 # any pane. Scrubbing HERDR_* is not enough: the herdr CLI falls back to its
 # default socket, so the lane points HERDR_SOCKET_PATH at a path that cannot
 # exist and every herdr call inside a lane finds no server.
-# Provider API keys are removed too: every lane runs on subscription auth, and
-# a key in the environment would bill it instead. User preferences such as
+# Provider API keys are removed unless the selected OpenCode provider needs
+# its own configured authentication. User preferences such as
 # GROK_TELEMETRY_* stay.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE")  # an opencode orchestrator's session; any config override breaks the free tier
@@ -54,7 +56,7 @@ SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
 def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_NAMES
-           and not k.endswith("_API_KEY")}  # no lane uses API keys; any would bill
+           and not k.endswith("_API_KEY")}
     # The inherited PWD names the orchestrator's directory, and opencode roots
     # its file tools and shell there instead of at its real cwd.
     env["PWD"] = str(work)
@@ -70,16 +72,22 @@ class _Stop(BaseException):  # a signal, never mistaken for an ordinary failure
     pass
 
 
-def bound(cap: int) -> int:
+def bound(cap: int | None) -> int:
     """The runner's own hard limit: pool wait and spend (each up to `cap`) plus
     the capacity probe and group shutdown. A kernel alarm enforces it, so a
     runner stuck outside its loops still ends with a record, supervised or not."""
-    return 2 * cap + 300
+    return 2 * cap + 300 if cap is not None else 0
 
 
-def _stop_status(stop: _Stop, cap: int) -> tuple[str, str]:
+def _stop_status(stop: _Stop, cap: int | None, directory: Path | None = None) -> tuple[str, str]:
     if str(stop) == "SIGALRM":
         return "timeout", f"runner exceeded its own {bound(cap)}s bound"
+    if str(stop) == "SIGTERM" and directory is not None:
+        try:
+            reason = json.loads((directory / "cancel.json").read_text())["reason"]
+            return "interrupted", f"cancelled: {reason}"
+        except (OSError, ValueError, KeyError):
+            pass
     return "interrupted", f"runner received {stop}"
 
 
@@ -89,13 +97,14 @@ def _raise_stop(signum, _frame):
 
 def run_lane(base: Path, name: str) -> int:
     """Run one lane; whatever happens, end with exit.json."""
+    _alive = hold_life(Run.load(base).lane_dir(name) / "alive")
     try:
         code = _run_lane(base, name)
     except _Stop as stop:  # a signal outside the guarded spans still ends with a record
         run = Run.load(base)
         code = 130
         if not (run.lane_dir(name) / "exit.json").exists():
-            status, reason = _stop_status(stop, run.cap)
+            status, reason = _stop_status(stop, run.cap, run.lane_dir(name))
             atomic_write(run.lane_dir(name) / "exit.json", json.dumps({
                 "lane": name, "status": status, "reason": reason,
                 "exit_code": None, "error": None, "ended": now(), "stderr_tail": []}, indent=2))
@@ -117,6 +126,8 @@ def run_lane(base: Path, name: str) -> int:
                 "lane": name, "status": status, "reason": reason, "exit_code": None, "error": None,
                 "ended": now(), "stderr_tail": [], "result_bytes": len(text.encode())}, indent=2))
         code = 1
+    finally:
+        _alive.close()
     signal.alarm(0)
     if Run.load(base).mode == "herdr":
         try:
@@ -141,107 +152,122 @@ def _run_lane(base: Path, name: str) -> int:
 
     started = time.time()
     reader = adapters.Reader(lane.kind)
-    _alive = hold_life(d / "alive")  # released by the kernel when this runner ends
     # Recorded before any spend, so a crashed supervisor's successor sees this
     # lane as live from its first instant.
     atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": None}))
 
+    atomic_write(d / "phase.json", json.dumps(dict(phase="queued", pool=lane.pool)))
     missing = adapters.missing_keys(lane)
     if missing:
         return _finish(run, name, started, "skipped",
                        f"auth-required: {', '.join(missing)} is empty in the environment xcheck ran in",
                        None, reader, err_path)
     # One run at a time spends from a pool; wait here (no orchestrator turns).
-    held = pools.acquire(ROOT, lane.pool, str(run.base), time.monotonic() + run.cap,
+    held = pools.acquire(ROOT, lane.pool, str(run.base), time.monotonic() + run.cap if run.cap is not None else None,
                          on_wait=lambda owner: print(
                              f"xcheck lane {name}: waiting for pool {lane.pool} "
                              f"(held by {Path(owner).name or 'another run'})", flush=True))
     if held is None:
         return _finish(run, name, started, "skipped",
                        f"pool {lane.pool} stayed busy for {run.cap}s", None, reader, err_path)
-    started = time.time()  # when spending can start; exit.json records wall time
-    _stage(run, work)  # only now: the pool lock makes this workspace ours
-    (d / "staged").touch()
+    try:
+        started = time.time()  # when spending can start; exit.json records wall time
+        _stage(run, work)  # only now: the pool lock makes this workspace ours
+        (d / "staged").touch()
 
-    # Capacity is read here, immediately before spending and outside any
-    # orchestrator sandbox when the runner lives in a Herdr pane.
-    if run.capacity and name not in run.forced:
-        reading = capacity.read(lane, capacity.sharing(lane, run.lanes.values()))
-        note = f"{reading.status}: {reading.note}"
-        print(f"xcheck lane {name}: capacity {note}", flush=True)
-        if not reading.ok:
-            return _finish(run, name, started, "skipped", note, None, reader, err_path)
-    if view == "tui":
-        return _run_tui(run, name, lane, d, work, message, log, started, reader, held, idle)
+        # Capacity is read here, immediately before spending and outside any
+        # orchestrator sandbox when the runner lives in a Herdr pane.
+        if run.capacity and name not in run.forced:
+            atomic_write(d / "phase.json", json.dumps(dict(phase="checking_capacity")))
+            reading = capacity.read(lane, capacity.sharing(lane, run.lanes.values()))
+            note = f"{reading.status}: {reading.note}"
+            print(f"xcheck lane {name}: capacity {note}", flush=True)
+            if not reading.ok:
+                return _finish(run, name, started, "skipped", note, None, reader, err_path)
+        atomic_write(d / "phase.json", json.dumps(dict(phase="starting")))
+        if view == "tui":
+            return _run_tui(run, name, lane, d, work, message, log, started, reader, held, idle)
 
-    spec = adapters.launch(lane, work, message, final, log, run.web)
-    env = lane_env(spec, work)
-    status, reason, code = None, "", None
-    stdin = open(spec.stdin, "rb") if spec.stdin else subprocess.DEVNULL
-    with open(stream_path, "ab") as stream, open(err_path, "ab") as err:
-        try:
-            # The harness inherits the pool lock: the pool stays held while it can
-            # spend, even if this runner is killed.
-            proc = subprocess.Popen(spec.argv, cwd=work, env=env, stdin=stdin, stdout=subprocess.PIPE,
-                                    stderr=err, start_new_session=True, pass_fds=(held.fileno(),))
-        except OSError as e:
-            return _finish(run, name, started, "failed", f"could not start {spec.argv[0]}: {e}",
-                           None, reader, err_path)
-        atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": proc.pid}))
-        print(f"xcheck lane {name}: {' '.join(spec.argv[:3])} … (pid {proc.pid})", flush=True)
-        sel = selectors.DefaultSelector()
-        sel.register(proc.stdout, selectors.EVENT_READ)
-        # Intervals use the monotonic clock: it stops while the Mac sleeps, so a
-        # closed lid neither idles nor spends a lane's budget.
-        last = spend_from = time.monotonic()
-        pending = b""
-        try:
-            while True:
-                if not sel.get_map():
-                    time.sleep(0.5)  # stdout closed; wait for the exit
-                for key, _ in sel.select(timeout=1.0) if sel.get_map() else ():
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        sel.unregister(key.fileobj)
+        spec = adapters.launch(lane, work, message, final, log, run.web)
+        env = lane_env(spec, work)
+        status, reason, code = None, "", None
+        with ExitStack() as stack:
+            stdin = stack.enter_context(open(spec.stdin, "rb")) if spec.stdin else subprocess.DEVNULL
+            stream = stack.enter_context(open(stream_path, "ab"))
+            err = stack.enter_context(open(err_path, "ab"))
+            sel = stack.enter_context(selectors.DefaultSelector())
+            proc = None
+            try:
+                with defer_stop() as previous:
+                    proc = subprocess.Popen(
+                        spec.argv, cwd=work, env=env, stdin=stdin, stdout=subprocess.PIPE,
+                        stderr=err, start_new_session=True, pass_fds=(held.fileno(),),
+                        preexec_fn=partial(signal.pthread_sigmask, signal.SIG_SETMASK, previous))
+                atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": proc.pid}))
+                atomic_write(d / "phase.json", json.dumps(dict(phase="running")))
+                print(f"xcheck lane {name}: {' '.join(spec.argv[:3])} … (pid {proc.pid})", flush=True)
+                sel.register(proc.stdout, selectors.EVENT_READ)
+                last = spend_from = time.monotonic()
+                pending = b""
+                progress = activity.Activity(d, lane.kind)
+                while True:
+                    if not sel.get_map():
+                        time.sleep(0.5)
+                    for key, _ in sel.select(timeout=1.0) if sel.get_map() else ():
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            if pending:
+                                _consume(reader, pending, progress)
+                                pending = b""
+                            sel.unregister(key.fileobj)
+                            break
+                        last = time.monotonic()
+                        stream.write(chunk)
+                        stream.flush()
+                        pending += chunk
+                        *lines, pending = pending.split(b"\n")
+                        for raw in lines:
+                            _consume(reader, raw, progress)
+                    if reader.error:
+                        status, reason = "failed", reader.error
                         break
-                    last = time.monotonic()
-                    stream.write(chunk)
-                    stream.flush()
-                    pending += chunk
-                    *lines, pending = pending.split(b"\n")
-                    for raw in lines:
-                        _consume(reader, raw)
-                if not sel.get_map() and proc.poll() is not None:
-                    break
-                t = time.monotonic()
-                if t - last > idle:
-                    status, reason = "timeout", f"no output for {idle}s"
-                elif t - spend_from > run.cap:
-                    status, reason = "timeout", f"exceeded the {run.cap}s cap"
-                if status:
-                    _kill(proc)
-                    break
-            if pending:
-                _consume(reader, pending)
-        except _Stop as stop:
-            status, reason = _stop_status(stop, run.cap)
-            _kill(proc)
-        code = proc.wait()
-        _reap_group(proc.pid)  # MCP servers, language servers, other leftovers of the lane
-        held.release()
-    if spec.stdin:
-        stdin.close()
-    reader.finish(final)
-    if status is None:
-        if reader.text.strip():
-            status, problems = validate.check(reader.text, run.contract)
-            reason = "; ".join(problems) or validate.COMPLETE
+                    if reader.completed:
+                        break
+                    if not sel.get_map() and proc.poll() is not None:
+                        break
+                    t = time.monotonic()
+                    if idle and t - last > idle:
+                        status, reason = "timeout", f"no output for {idle}s"
+                    elif run.cap is not None and t - spend_from > run.cap:
+                        status, reason = "timeout", f"exceeded the {run.cap}s cap"
+                    if status:
+                        break
+                if pending:
+                    _consume(reader, pending, progress)
+            except _Stop as stop:
+                status, reason = _stop_status(stop, run.cap, d)
+            finally:
+                if proc is not None:
+                    with defer_stop():
+                        _kill(proc)
+                        code = proc.wait()
+                        _reap_group(proc.pid)
+                        proc.stdout.close()
+        reader.finish(final)
+        if status is None:
             if reader.error:
-                reason += f"; harness error: {reader.error}"
-        else:
-            status = "failed"
-            reason = reader.error or _first_stderr_line(err_path) or f"no answer (exit {code})"
-    return _finish(run, name, started, status, reason, code, reader, err_path)
+                status, reason = "failed", reader.error
+            elif not reader.completed:
+                status, reason = "failed", f"harness exited without native completion (exit {code})"
+            elif reader.text.strip():
+                status, problems = validate.check(reader.text, run.contract)
+                reason = "; ".join(problems) or validate.COMPLETE
+            else:
+                status = "failed"
+                reason = _first_stderr_line(err_path) or f"no answer (exit {code})"
+        return _finish(run, name, started, status, reason, code, reader, err_path)
+    finally:
+        held.release()
 
 
 def _writable_retry(func, path, exc) -> None:
@@ -260,9 +286,9 @@ def _stage(run: Run, work: Path) -> None:
         shutil.rmtree(work, onexc=_writable_retry)
     work.mkdir(parents=True)
     for f in ("PACKET.md", "PROMPT.md"):
-        shutil.copy2(run.base / f, work / f)
-    if (run.base / "evidence").is_dir():
-        shutil.copytree(run.base / "evidence", work / "evidence")
+        shutil.copy2(run.base / ".packet" / f, work / f)
+    if (run.base / ".packet" / "evidence").is_dir():
+        shutil.copytree(run.base / ".packet" / "evidence", work / "evidence")
 
 
 def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log: Path,
@@ -274,30 +300,28 @@ def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log:
     answer, screen = work / "ANSWER.md", d / "screen.log"
 
     def spawned(pid: int) -> None:
+        atomic_write(d / "phase.json", json.dumps(dict(phase="running")))
         atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": pid}))
 
     try:
         status, reason, code, text = tui.run(spec.argv, lane_env(spec, work), work, answer, screen,
-                                             idle, run.cap, spawned, adapters.APP_LIMIT)
+                                             idle, run.cap, spawned)
     except _Stop as stop:
-        status, reason = _stop_status(stop, run.cap)
+        status, reason = _stop_status(stop, run.cap, run.lane_dir(name))
         code = None
         text = answer.read_text(encoding="utf-8", errors="replace") if answer.exists() else ""
-    finally:
-        held.release()
     reader.text = text
     tail = tui.screen_tail(screen)
-    if text.strip() and status != "interrupted":  # an answer exists: judge the answer
-        stopped = f"; then {reason}" if status else ""
+    if text.strip() and status is None:
         status, problems = validate.check(text, run.contract)
-        reason = ("; ".join(problems) or validate.COMPLETE) + stopped
+        reason = "; ".join(problems) or validate.COMPLETE
     elif status is None:
         status = "failed"
         reason = "the app ended without writing ANSWER.md; last screen: " + " / ".join(tail[-4:])
     return _finish(run, name, started, status, reason, code, reader, screen, tail=tail)
 
 
-def _consume(reader: adapters.Reader, raw: bytes) -> None:
+def _consume(reader: adapters.Reader, raw: bytes, progress=None) -> None:
     line = raw.decode("utf-8", errors="replace").strip()
     if not line:
         return
@@ -307,6 +331,8 @@ def _consume(reader: adapters.Reader, raw: bytes) -> None:
         print(adapters._clip(line), flush=True)
         return
     if isinstance(obj, dict):
+        if progress:
+            progress.observe(obj)
         view = reader.feed(obj)
         if view:
             print(view, flush=True)
@@ -340,6 +366,7 @@ def _kill(proc: subprocess.Popen) -> None:
 
 def _finish(run: Run, name: str, started: float, status: str, reason: str, code, reader, err_path,
             tail: list[str] | None = None) -> int:
+    reason = "; ".join([reason, *reader.notes()])
     text = reader.text
     if text.strip():
         atomic_write(run.base / f"RESULT-{name}.md", text if text.endswith("\n") else text + "\n")
@@ -350,7 +377,7 @@ def _finish(run: Run, name: str, started: float, status: str, reason: str, code,
         "lane": name, "status": status, "reason": reason, "exit_code": code,
         "error": reader.error, "started": now(started), "ended": now(),
         "seconds": round(time.time() - started), "result_bytes": len(text.encode()),
-        "stderr_tail": tail,
+        "stderr_tail": tail, "diagnostics": reader.diagnostics,
     }
     atomic_write(run.lane_dir(name) / "exit.json", json.dumps(record, indent=2))
     print(f"xcheck lane {name}: {status} — {reason}", flush=True)

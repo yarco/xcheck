@@ -257,9 +257,16 @@ def _grok(lane: Lane) -> dict[str, float]:
         raise LoginRequired("no Grok login: run grok login")
     key = max(logins, key=lambda r: str(r.get("create_time", "")))["key"]
     # A rejected token may only be stale: running `grok` once refreshes it.
-    return grok_windows(_get("https://cli-chat-proxy.grok.com/v1/billing?format=credits",
-                             {"Authorization": f"Bearer {key}", "X-XAI-Token-Auth": "xai-grok-cli"},
-                             "Grok token rejected: run grok once to refresh it, or grok login"))
+    windows = grok_windows(_get("https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+                               {"Authorization": f"Bearer {key}", "X-XAI-Token-Auth": "xai-grok-cli"},
+                               "Grok token rejected: run grok once to refresh it, or grok login"))
+    if not windows:
+        # The native unified-billing response can contain only period and
+        # balance fields. Zero prepaid/on-demand balances establish no quota.
+        raise ValueError("Grok credits view supplied neither creditUsagePercent nor GrokBuild usagePercent; "
+                         "quota reserve cannot be verified. Check Grok /usage and recheck "
+                         "xcheck capacity --lanes grok:grok-4.7:xhigh before a fresh run")
+    return windows
 
 
 def grok_windows(payload: dict) -> dict[str, float]:
