@@ -248,6 +248,35 @@ Runner and supervisor liveness is an exclusive lock on their own `alive` file, r
 - Claude's app view sends its first turn before MCP servers finish connecting; a slow server (qmd under load took 25 s) can be missing from a short review. The stream view waits for connections.
 - Captured fixtures cover Codex quota, Agy per-model quota, OpenCode Qwen upstream HTTP 429, Grok missing quota percentages, and a successful disallowed Claude Cloudflare call. Fixtures omit credentials, response headers and account identifiers. Other native account quota/auth failures still need captured fixtures; invalid-model fixtures prove parser shape only.
 
+## ACPX boundary
+
+The OpenClaw `acpx` package was reviewed before this release (upstream main at
+`27efb1b57b9de22105a91e9154b1d29b51ede8cb`, package `0.19.4`). It is a useful
+ACP client for a future opt-in lane: its embedded runtime exposes prompt
+readiness, canonical turn results, cancellation, permission policies and owned
+adapter cleanup, and its Devin and OpenCode profiles could eventually replace
+their current app or direct-CLI launchers after live lane tests.
+
+It is not the coordinator for this protocol. `acpx compare` runs agents serially
+in one workspace, and `acpx` flows own a separate persisted run/session model.
+Neither supplies this protocol's immutable per-lane packet copies, cross-harness
+exclusion, quota-pool admission, launch-once BASE, proof-token answer contract,
+or the rule that losing a subscriber detaches without cancelling reviewers.
+ACPX is also a protocol client rather than an operating-system sandbox; its
+embedded environment is an overlay on the host environment, and shared sessions
+require the same user, home, exact cwd and adapter command. A generic ACP lane
+would therefore weaken the current permission and credential boundaries unless
+the xcheck runner remained the owner of admission, a scrubbed launch environment,
+process-group cleanup, native completion parsing and answer validation.
+
+For those reasons this release keeps the validated native transports and does
+not add an unverified Node dependency or an automatic ACP fallback. A future
+ACP lane must be opt-in, use a pinned package and adapter command, run a fresh
+complete packet in both placements, and prove tool-permission behavior, exact
+model selection, cancellation, subscriber disconnect, process cleanup and wrong
+proof rejection before it joins the roster. Existing Herdr panes and the direct
+Codex app-server provider remain outside ACPX's ownership model.
+
 ## Deliberately absent
 
 Legacy (archived read-only in `../x-check-legacy/`, never a launcher) solved problems this design does not have. Do not re-add these without a failure that happened within scope:
@@ -263,7 +292,7 @@ Legacy (archived read-only in `../x-check-legacy/`, never a launcher) solved pro
 | Host router with note read-map, wait metrics, `LIVE_CHECK_CAP` gate | `--mode auto` places; the note fits one read; token discipline is structural; the cap was a prompt contract, not enforcement |
 | Perplexity lane | not a default peer; its failure shapes stay documented in Legacy |
 | An opencode reviewer agent or permission rules | the free tier refuses custom permission/tool sets; its workspace and retrieval restrictions remain instructions, and the dropped Seatbelt profile is not a boundary |
-| `devin acp --agent-type review` | ACP, which the runner does not speak; the app writes `ANSWER.md` like Agy |
+| `devin acp --agent-type review` | ACPX may become an opt-in Devin transport after the ACP boundary above is proven; this release keeps the validated app path |
 | Runtime under `~/.agents` with per-start hash verification | `~/.local` is outside Codex's writable roots, so the read-only snapshot needs no re-verification |
 | Snapshot pruning | a queued runner may still exec an older snapshot |
 | Fallback quota meters (Agy language-server port scan, CSRF probing, desktop-token scraping; Grok monthly view), an outer retry layer, secret redaction of notes | each pool's one meter works; an unreadable meter fails closed; notes never carry payloads or tokens |
