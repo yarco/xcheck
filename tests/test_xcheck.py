@@ -287,10 +287,10 @@ class DevinLane(unittest.TestCase):
 
 
 class GrokLane(unittest.TestCase):
-    def test_read_only_sandbox_and_env(self):
+    def test_authorized_unrestricted_profile_and_env(self):
         spec = adapters.launch(Lane("grok", "grok-4.7", "xhigh"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), web=False)
         i = spec.argv.index("--sandbox")
-        self.assertEqual(spec.argv[i + 1], "read-only")  # strict breaks exec hooks; off has no write guard
+        self.assertEqual(spec.argv[i + 1], "off")  # preserves OrbStack's Docker integration
         self.assertEqual(spec.env_set, {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"})
         self.assertNotIn("--no-memory", spec.argv)
         self.assertNotIn("MCPTool(*)", spec.argv)
@@ -303,6 +303,9 @@ class GrokLane(unittest.TestCase):
         self.assertNotIn("Bash", app)
         self.assertIn("--always-approve", stream)
         self.assertIn("--always-approve", app)
+        for argv in (stream, app):
+            self.assertEqual(argv[argv.index("--sandbox") + 1], "off")
+            self.assertNotIn("--yolo", argv)
         self.assertNotIn("MCPTool(*)", stream)
         self.assertNotIn("MCPTool(*)", app)
 
@@ -802,6 +805,8 @@ class Installation(unittest.TestCase):
         models = "\n".join(l.model for l in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))
 
         def fake_run(cmd, **_):
+            if cmd[-2:] == ["version", "--json"]:
+                return subprocess.CompletedProcess(cmd, 0, '{"currentVersion":"fixture-version"}', "")
             return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), models), "")
 
         with patch.object(install, "source_root", return_value=REPO), \

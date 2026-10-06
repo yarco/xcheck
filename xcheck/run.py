@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -44,7 +45,7 @@ MESSAGE = (
     "and stop.\n"
 )
 
-SHELL_SCOPE = (  # harnesses with Bash under an OS write sandbox
+SHELL_SCOPE = (  # harnesses with Bash; workspace scope is an instruction
     "Bash and other tools are available for checks, including disposable writes "
     "inside this workspace. Do not change PACKET.md, PROMPT.md, evidence/, or "
     "files outside this workspace."
@@ -429,8 +430,10 @@ MODEL_LISTS = {"grok": ["grok", "models"], "agy": ["agy", "models"],
 def doctor() -> int:
     """Check every adapter flag against the installed CLI's own help, and the
     model pins against the CLIs' model lists. Config keys (codex -c ...) and
-    argument values are pinned by unit tests and smoke runs, not here."""
+    argument values are pinned by unit tests and smoke runs. Grok additionally
+    probes the configured native startup without invoking a model."""
     from . import install
+    from .lane import grok_startup_check
     bad = 0
     root, current = install.source_root(), install.installed_digest()
     source = install.digest(root) if root and root.is_dir() else None
@@ -450,6 +453,10 @@ def doctor() -> int:
         missing = [f for f in flags if f not in text]
         print(f"{'FAIL' if missing else 'ok  '} {kind}: " + (f"missing {missing}" if missing else f"{len(flags)} flags present"))
         bad += bool(missing)
+    with tempfile.TemporaryDirectory(prefix="xcheck-grok-doctor-") as tmp:
+        problem = grok_startup_check(Path(tmp))
+    print(f"FAIL grok: {problem}" if problem else "ok   grok: startup with --sandbox off (zero inference)")
+    bad += bool(problem)
     # opencode pins list under their provider (`opencode models <provider>`),
     # not one shared listing.
     listings: dict[tuple, str] = {}
@@ -458,7 +465,7 @@ def doctor() -> int:
         if tuple(cmd) not in listings:
             try:
                 out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                listings[tuple(cmd)] = out.stdout + out.stderr
+                listings[tuple(cmd)] = out.stdout + out.stderr if out.returncode == 0 else ""
             except (OSError, subprocess.TimeoutExpired):
                 listings[tuple(cmd)] = ""
         return listings[tuple(cmd)]
@@ -470,7 +477,8 @@ def doctor() -> int:
             cmd = ["opencode", "models", provider]
         if cmd is None:
             continue
-        ok = lane.model in listing(cmd)
+        text = listing(cmd)
+        ok = lane.model in text.splitlines() if lane.kind == "opencode" else lane.model in text
         print(f"{'ok  ' if ok else 'FAIL'} {lane.kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")
         bad += not ok
     return 1 if bad else 0

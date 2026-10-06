@@ -68,6 +68,32 @@ def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
     return env
 
 
+def grok_startup_check(work: Path) -> str | None:
+    """Probe the configured native startup without a session or inference.
+
+    Grok applies the sandbox before its `version` subcommand, unlike --version
+    and --help. Never expose stdout from other commands as a diagnostic.
+    """
+    spec = adapters.Launch(["grok", *adapters.GROK_SANDBOX_ARGS, "--cwd", str(work),
+                            "version", "--json"], None, env_set=adapters.GROK_ENV)
+    try:
+        out = subprocess.run(spec.argv, cwd=work, env=lane_env(spec, work),
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"startup-unavailable: Grok startup probe: {exc}; repair startup and recheck xcheck doctor"
+    detail = "; ".join(out.stderr.strip().splitlines()[-4:])[:1200]
+    if out.returncode or "sandbox could not be applied" in out.stderr:
+        return (f"startup-unavailable: Grok startup probe exited {out.returncode}: "
+                f"{detail or 'no stderr'}; repair native startup and recheck xcheck doctor")
+    try:
+        payload = json.loads(out.stdout)
+        if isinstance(payload, dict) and isinstance(payload.get("currentVersion"), str) and payload["currentVersion"]:
+            return None
+    except ValueError:
+        pass
+    return "startup-unavailable: Grok startup probe returned no native version JSON; check grok version --help and xcheck doctor"
+
+
 class _Stop(BaseException):  # a signal, never mistaken for an ordinary failure
     pass
 

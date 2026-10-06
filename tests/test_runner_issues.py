@@ -5,14 +5,107 @@ Qwen fixture: acceptance run's native error, without identifiers or headers.
 """
 
 import json
+import io
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 import test_xcheck as support
 import test_runtime_e2e as runtime
-from xcheck import adapters, capacity
+from xcheck import adapters, capacity, install, lane, run
+
+
+class ReportStartup(unittest.TestCase):
+    def probe(self, result):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(lane.subprocess, 'run', return_value=result) as start:
+            problem = lane.grok_startup_check(Path(tmp))
+            call = start.call_args
+        self.assertEqual(call.args[0][-2:], ['version', '--json'])
+        self.assertEqual(call.args[0][1:3], ['--sandbox', 'off'])
+        self.assertEqual(call.kwargs['stdin'], subprocess.DEVNULL)
+        self.assertEqual(call.kwargs['timeout'], 30)
+        return problem, call.kwargs
+
+    def test_native_sandbox_refusal_retains_cause_without_inspect_stdout(self):
+        stderr = (support.FIX / 'grok-sandbox-refusal.stderr').read_text()
+        problem, _ = self.probe(subprocess.CompletedProcess([], 1, 'PRIVATE CONFIG SENTINEL', stderr))
+        self.assertIn('startup-unavailable', problem)
+        self.assertIn('/var/run/docker.sock: endpoint is a symlink', problem)
+        self.assertNotIn('PRIVATE CONFIG SENTINEL', problem)
+
+    def test_native_startup_success_scrubs_keys_and_inherited_sandbox(self):
+        with patch.dict(os.environ, {'GROK_SANDBOX': 'off', 'TEST_API_KEY': 'SECRET', 'CLAUDECODE': '1'}):
+            problem, kwargs = self.probe(subprocess.CompletedProcess([], 0, '{"currentVersion":"1.0.46"}', ''))
+        self.assertIsNone(problem)
+        self.assertNotIn('GROK_SANDBOX', kwargs['env'])
+        self.assertNotIn('TEST_API_KEY', kwargs['env'])
+        self.assertNotIn('CLAUDECODE', kwargs['env'])
+        self.assertEqual(kwargs['env']['GROK_DISABLE_AUTOUPDATER'], '1')
+        self.assertEqual(kwargs['env']['XCHECK_LANE'], '1')
+
+    def test_unapplied_sandbox_warning_never_passes_even_on_zero_exit(self):
+        problem, _ = self.probe(subprocess.CompletedProcess([], 0, '{"currentVersion":"1"}',
+                                 'warning: sandbox could not be applied: unavailable kernel'))
+        self.assertIn('startup-unavailable', problem)
+
+    def test_missing_native_version_never_passes(self):
+        for stdout in ('', 'not json', '[]', '{}', '{"currentVersion":null}', '{"currentVersion":""}'):
+            with self.subTest(stdout=stdout):
+                problem, _ = self.probe(subprocess.CompletedProcess([], 0, stdout, ''))
+                self.assertIn('no native version JSON', problem)
+
+    def test_probe_error_or_timeout_is_not_readiness(self):
+        for exc in (FileNotFoundError('grok unavailable'), subprocess.TimeoutExpired('grok', 30)):
+            with self.subTest(exc=exc), patch.object(lane.subprocess, 'run', side_effect=exc):
+                self.assertIn('startup-unavailable', lane.grok_startup_check(Path('/tmp')))
+
+    def test_probe_never_swallows_cancellation(self):
+        with patch.object(lane.subprocess, 'run', side_effect=lane._Stop('SIGTERM')):
+            with self.assertRaises(lane._Stop):
+                lane.grok_startup_check(Path('/tmp'))
+
+    def doctor(self, probe, listing_failure=False, suffix=False):
+        helps = {tuple(cmd): (support.FIX / 'cli-help' / f'{kind.replace(" ", "-")}.txt').read_text()
+                 for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
+        def fake_run(cmd, **_):
+            if tuple(cmd) in helps:
+                return subprocess.CompletedProcess(cmd, 0, helps[tuple(cmd)], '')
+            if cmd[-2:] == ['version', '--json']:
+                return probe
+            pins = [peer.model for peer in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)]
+            if cmd[:2] == ['opencode', 'models']:
+                pins = [model + '-preview' if suffix else model for model in pins]
+            return subprocess.CompletedProcess(cmd, 1 if listing_failure else 0, '\n'.join(pins), '')
+        with patch.object(install, 'source_root', return_value=support.REPO), \
+                patch.object(install, 'installed_digest', return_value=install.digest(support.REPO)), \
+                patch.object(run.subprocess, 'run', side_effect=fake_run), redirect_stdout(io.StringIO()) as out:
+            code = run.doctor()
+        return code, out.getvalue()
+
+    def test_doctor_fails_live_startup_even_when_all_flags_and_pins_exist(self):
+        code, text = self.doctor(subprocess.CompletedProcess([], 1, '',
+                                    (support.FIX / 'grok-sandbox-refusal.stderr').read_text()))
+        self.assertEqual(code, 1)
+        self.assertIn('endpoint is a symlink', text)
+        self.assertIn('grok: 13 flags present', text)
+
+    def test_doctor_accepts_native_startup_and_current_pins(self):
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"fixture"}', ''))
+        self.assertEqual(code, 0, text)
+        self.assertIn('startup with --sandbox off (zero inference)', text)
+        self.assertNotIn('qwen3.8-27b:free', text)
+
+    def test_doctor_rejects_failed_listing_and_model_prefix_collision(self):
+        for kwargs in ({'listing_failure': True}, {'suffix': True}):
+            with self.subTest(kwargs=kwargs):
+                code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"fixture"}', ''), **kwargs)
+                self.assertEqual(code, 1, text)
+                self.assertIn('NOT in opencode models', text)
 
 
 class ReportMeters(unittest.TestCase):
@@ -157,6 +250,23 @@ class ReportRuntime(unittest.TestCase):
     xcheck = runtime.RuntimeHandoff.xcheck
     make_writable = staticmethod(runtime.RuntimeHandoff.make_writable)
     assert_settled = runtime.RuntimeHandoff.assert_settled
+
+    def test_authorized_grok_mode_finishes_with_orbstack_socket_in_both_views(self):
+        for view in ('stream', 'tui'):
+            with self.subTest(view=view):
+                if view == 'tui':
+                    self.base = support.EndToEnd.second_base(self)
+                result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
+                                     'grok:grok-4.7:xhigh,codex:gpt-6.1-sol:high', '--mode', 'headless',
+                                     '--view', view, '--skip-capacity', mode='socket-symlink', timeout=15)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                rows = {row['lane']: row for row in json.loads((self.base / 'STATUS.json').read_text())['lanes']}
+                for name in ('grok-4.7-xhigh', 'codex-gpt-6.1-sol-high'):
+                    row = rows[name]
+                    self.assertEqual(row['status'], 'done', row)
+                    self.assertEqual(row['reason'], 'RESULT_COMPLETE')
+                    self.assertTrue((self.base / f"RESULT-{name}.md").exists())
+                    self.assert_settled(row, 'grok' if name.startswith('grok') else 'codex')
 
     def claude_run(self, mode):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',

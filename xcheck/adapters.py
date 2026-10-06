@@ -72,7 +72,6 @@ OPT_IN = (
     Lane("opencode", "opencode/space-bunny-free"),
     # Contributor tier permits logging/training; mind what its packets hold.
     Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),
-    Lane("opencode", "openrouter/qwen/qwen3.8-27b:free"),
 )
 
 
@@ -138,7 +137,7 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
             "grok", "--prompt-file", str(message), "-m", lane.model,
             "--reasoning-effort", lane.effort, "--cwd", str(work),
             "--tools", tools, "--no-subagents", "--no-plan",
-            "--sandbox", "read-only", "--always-approve", "--debug-file", str(log),
+            *GROK_SANDBOX_ARGS, "--always-approve", "--debug-file", str(log),
             "--output-format", "streaming-json",
         ]
         if not web:
@@ -202,12 +201,12 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
     return env
 
 
-# Grok: `read-only` reads everywhere and kernel-denies writes outside ~/.grok and
-# tmp; `strict` cannot read /opt/homebrew, so operator hooks that exec a binary
-# fail with 126 (ignored by grok); `off` has no write guard. Memory and the
-# updater are off through their documented variables (neither `--no-memory` nor
-# `--no-auto-update` is in `grok --help`).
+# Grok reviews use the operator-authorized unrestricted profile: read-only
+# refuses OrbStack's symlinked Docker socket. --always-approve is the native
+# automatic approval flag; there is no documented --yolo. Review-only scope
+# is an instruction. Memory and the updater remain off.
 GROK_ENV = {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"}
+GROK_SANDBOX_ARGS = ("--sandbox", "off")
 
 # Devin: override any shell default for DEVIN_PERMISSION_MODE. The
 # lane must accept workspace edits (ANSWER.md) without a prompt. accept-edits
@@ -323,12 +322,12 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
         ]
         return Launch(argv, None)
     if lane.kind == "grok":
-        # The app ignores --tools (user-guide 14); the sandbox still limits
-        # writes outside temp paths. Bash remains available without prompts.
+        # The app ignores --tools (user-guide 14). Review-only file/action
+        # limits are instructions; Bash and MCP run without prompts.
         argv = [
             "grok", "-m", lane.model, "--reasoning-effort", lane.effort, "--cwd", str(work),
             "--no-subagents", "--no-plan",
-            "--sandbox", "read-only", "--always-approve", "--debug-file", str(log),
+            *GROK_SANDBOX_ARGS, "--always-approve", "--debug-file", str(log),
             *([] if web else ["--disable-web-search"]), message,
         ]
         return Launch(argv, None, env_set=GROK_ENV)

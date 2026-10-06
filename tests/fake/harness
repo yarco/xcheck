@@ -15,6 +15,14 @@ kind = Path(sys.argv[0]).name
 mode = os.environ.get("FAKE_MODE", "ok")
 argv = sys.argv[1:]
 
+if kind == "grok" and mode == "socket-symlink" and argv[argv.index("--sandbox") + 1] != "off":
+    sys.stderr.write((Path(__file__).resolve().parent.parent / "fixtures/grok-sandbox-refusal.stderr").read_text())
+    sys.exit(1)
+if kind == "grok" and argv[-2:] == ["version", "--json"]:
+    assert argv[argv.index("--sandbox") + 1] == "off"
+    print(json.dumps({"currentVersion": "fixture-version", "channel": "stable"}))
+    sys.exit(0)
+
 
 def emit(obj):
     print(json.dumps(obj), flush=True)
@@ -59,6 +67,8 @@ answer = {
     "slow": f"### 1) VERDICT\nThe claim holds after a slow read.\n6) PROOF: {token}\nRESULT_COMPLETE\n",
 }.get(mode)
 answer_ok = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
+if mode == "socket-symlink":
+    answer = answer_ok
 upstream_limit = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
 if mode == "echo-upstream-limit":
     answer = answer_ok.replace("The claim holds", "The packet quotes " + upstream_limit)
