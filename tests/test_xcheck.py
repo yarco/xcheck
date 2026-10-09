@@ -50,7 +50,7 @@ class LaneNames(unittest.TestCase):
 
     def test_pools(self):
         self.assertEqual(Lane("agy", "gemini-3.8-flash-high").pool, "agy-gemini")
-        self.assertEqual(Lane("agy", "claude-sonnet-4-6").pool, "agy-3p")
+        self.assertEqual(Lane("agy", "gemini-pro-agent").pool, "agy-gemini")
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").pool, "grok")
         self.assertEqual(Lane("devin", "swe-2-max").pool, "devin")
 
@@ -194,19 +194,12 @@ class OpencodeLane(unittest.TestCase):
 
 
 class LimitBanner(unittest.TestCase):
-    def test_the_real_agy_quota_screen_names_the_cap(self):
-        from xcheck import tui
-        lines = tui._lines((FIX / "agy-quota.screen").read_bytes())
-        self.assertEqual(tui.limit_banner(lines, adapters.APP_LIMIT),
-                         "⚠ Individual quota reached. Please upgrade your subscription to increase "
-                         "your limits. Resets in 62h37m27s.")
-
     def test_banners_count_only_at_a_line_start_near_the_bottom(self):
         from xcheck import tui
         for line in ("You've hit your limit · resets 7pm (America/Los_Angeles)", "  ⎿  You hit your weekly limit."):
             self.assertIsNotNone(tui.limit_banner(["work", line, "> "], adapters.APP_LIMIT), line)
-        self.assertIsNone(tui.limit_banner(["The banner Individual quota reached means a cap"], adapters.APP_LIMIT))
-        self.assertIsNone(tui.limit_banner(["⚠ Individual quota reached.", *["more work"] * 10], adapters.APP_LIMIT))
+        self.assertIsNone(tui.limit_banner(["The banner You've hit your limit means a cap"], adapters.APP_LIMIT))
+        self.assertIsNone(tui.limit_banner(["You've hit your limit · resets 7pm", *["more work"] * 10], adapters.APP_LIMIT))
 
 
 class SleepingMac(unittest.TestCase):
@@ -633,9 +626,9 @@ class Capacity(unittest.TestCase):
         report = self.fixture("agy-usage.json")
         self.assertEqual(report["num_turns"], 0)  # /usage is free
         gemini = c.agy_windows(report["command"]["data"], "gemini-3.8-flash-high")
-        third = c.agy_windows(report["command"]["data"], "claude-sonnet-4-6")
         self.assertEqual(set(gemini), {"gemini-5h", "gemini-weekly"})
-        self.assertEqual(set(third), {"3p-5h", "3p-weekly"})
+        with self.assertRaisesRegex(ValueError, "Gemini"):
+            c.agy_windows(report["command"]["data"], "claude-sonnet-4-6")
 
     def test_claude_scoped_cap_binds_only_its_model_family(self):
         from xcheck import capacity as c
@@ -736,13 +729,13 @@ class Capacity(unittest.TestCase):
                 with self.subTest(account=account, product=product):
                     self.assertEqual(c.judge(c.grok_windows(payload), 10).status, "capacity-unknown")
 
-    def test_missing_agy_windows_fail_closed_for_either_family(self):
+    def test_missing_agy_windows_fail_closed_for_each_acp_pin(self):
         from xcheck import capacity as c
-        for model, family in (("gemini-3.8-flash-high", "gemini"), ("claude-sonnet-4-6", "3p")):
+        for model in ("gemini-3.8-flash-high", "gemini-pro-agent"):
             for window in ("5h", "weekly"):
                 data = self.fixture("agy-usage.json")["command"]["data"]
                 for group in data["groups"]:
-                    group["buckets"] = [b for b in group["buckets"] if b["id"] != f"{family}-{window}"]
+                    group["buckets"] = [b for b in group["buckets"] if b["id"] != f"gemini-{window}"]
                 with self.subTest(model=model, window=window), \
                      patch.dict(c.METERS, {"agy": lambda lane: c.agy_windows(data, lane.model)}):
                     self.assertEqual(c.read(Lane("agy", model)).status, "capacity-unknown")
@@ -760,11 +753,11 @@ class Capacity(unittest.TestCase):
 
     def test_disabled_five_hour_bucket_is_ignored_but_weekly_is_required(self):
         from xcheck.capacity import agy_windows
-        data = {"groups": [{"buckets": [{"id": "3p-weekly", "remaining_fraction": 0.0},
-                                        {"id": "3p-5h", "remaining_fraction": 1, "disabled": True}]}]}
-        self.assertEqual(agy_windows(data, "claude-sonnet-4-6"), {"3p-weekly": 0.0})
+        data = {"groups": [{"buckets": [{"id": "gemini-weekly", "remaining_fraction": 0.0},
+                                        {"id": "gemini-5h", "remaining_fraction": 1, "disabled": True}]}]}
+        self.assertEqual(agy_windows(data, "gemini-pro-agent"), {"gemini-weekly": 0.0})
         with self.assertRaises(KeyError):
-            agy_windows({"groups": []}, "claude-sonnet-4-6")
+            agy_windows({"groups": []}, "gemini-pro-agent")
 
     def test_manual_claude_reading_must_be_fresh(self):
         from datetime import datetime, timedelta, timezone
@@ -812,6 +805,8 @@ class Installation(unittest.TestCase):
         with patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value="stale"), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
+             patch.object(adapters, "unavailable", return_value=None), \
+             patch.object(run, "agy_acp_models", return_value=models.splitlines()), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(run.doctor(), 1)
         self.assertIn("FAIL installed copy stale != source", output.getvalue())
@@ -819,6 +814,8 @@ class Installation(unittest.TestCase):
         with patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
+             patch.object(adapters, "unavailable", return_value=None), \
+             patch.object(run, "agy_acp_models", return_value=models.splitlines()), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(run.doctor(), 0)
 
@@ -826,6 +823,8 @@ class Installation(unittest.TestCase):
         with patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
+             patch.object(adapters, "unavailable", return_value=None), \
+             patch.object(run, "agy_acp_models", return_value=models.splitlines()), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(run.doctor(), 1)
         self.assertIn("grok: missing ['--sandbox']", output.getvalue())
@@ -836,9 +835,7 @@ class TrustFiles(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir)
         os.environ["CODEX_CONFIG"] = str(self.dir / "config.toml")
-        os.environ["AGY_SETTINGS"] = str(self.dir / "settings.json")
         self.addCleanup(os.environ.pop, "CODEX_CONFIG")
-        self.addCleanup(os.environ.pop, "AGY_SETTINGS")
         from xcheck import trust
         self.trust = trust
 
@@ -864,17 +861,6 @@ class TrustFiles(unittest.TestCase):
         self.assertIn('model = "x"', section)
         self.assertIn('[projects."/another"]\ntrust_level = "untrusted"', text)
         self.assertFalse(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
-
-    def test_agy_trusts_both_spellings_and_silences_the_survey(self):
-        s = self.dir / "settings.json"
-        s.write_text('{"theme": "dark", "trustedWorkspaces": ["/x"]}')
-        self.assertTrue(self.trust.ensure("agy", Path("/private/tmp/agent-offload/.lanes/b")))
-        data = json.loads(s.read_text())
-        self.assertEqual(data["theme"], "dark")
-        self.assertEqual(data["trustedWorkspaces"], ["/x", "/private/tmp/agent-offload/.lanes/b",
-                                                     "/tmp/agent-offload/.lanes/b"])
-        self.assertIs(data["showFeedbackSurvey"], False)
-        self.assertFalse(self.trust.ensure("agy", Path("/private/tmp/agent-offload/.lanes/b")))
 
     def test_claude_and_grok_need_nothing(self):
         self.assertFalse(self.trust.ensure("claude", Path("/private/tmp/x")))
@@ -1014,15 +1000,20 @@ class EndToEnd(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
         self.bin = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.bin)
-        for k in adapters.KINDS:
+        for k in (*adapters.KINDS, "acpx", "security"):
             (self.bin / k).symlink_to(REPO / "tests" / "fake" / "harness")
+        acp = self.root / "agy-acp"
+        acp.mkdir()
+        (acp / "agy_acp_server.par").symlink_to(REPO / "tests" / "fake" / "harness")
+        env = patch.dict(os.environ, {"XCHECK_AGY_ACP_DIR": str(acp)})
+        env.start()
+        self.addCleanup(env.stop)
         stage(self.base)
 
     def xcheck(self, *args, mode="ok", timeout=60, capacity=None, env_extra=None):
         env = {**os.environ, **(env_extra or {}), "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
                "XCHECK_ROOT": str(self.root),
-               "CODEX_CONFIG": str(self.root / "codex-config.toml"),
-               "AGY_SETTINGS": str(self.root / "agy-settings.json")}
+               "CODEX_CONFIG": str(self.root / "codex-config.toml")}
         if capacity:
             env["FAKE_CAPACITY"] = capacity
         env.pop("HERDR_ENV", None)
@@ -1208,7 +1199,7 @@ class EndToEnd(unittest.TestCase):
         dump = self.bin / "env"
         leak = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_EFFORT": "max",
                 "ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "HERDR_PANE_ID": "w1:p1",
-                "CODEX_COMPANION_SESSION_ID": "c", "GROK_SANDBOX": "ws"}
+                "CODEX_COMPANION_SESSION_ID": "c", "GROK_SANDBOX": "ws", "ACPX_AUTH_TOKEN": "t"}
         keep = {"GROK_TELEMETRY_ENABLED": "0"}
         # herdr falls back to its default socket when HERDR_* is gone: the lane names a dead one
         live_socket = {"HERDR_SOCKET_PATH": str(Path.home() / ".config/herdr/herdr.sock")}
@@ -1216,21 +1207,21 @@ class EndToEnd(unittest.TestCase):
         stale = {"PWD": str(Path.home()), "OLDPWD": str(Path.home())}
         env = {**os.environ, **leak, **keep, **stale, **live_socket, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
-               "CODEX_CONFIG": str(self.root / "codex-config.toml"),
-               "AGY_SETTINGS": str(self.root / "agy-settings.json")}
+               "CODEX_CONFIG": str(self.root / "codex-config.toml")}
         lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free,devin:swe-2-max"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
                            env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr)
         for kind in adapters.KINDS:
-            seen = json.loads(dump.with_suffix(f".{kind}.json").read_text())
+            lane = next(l for l in lanes.split(",") if l.startswith(kind + ":"))
+            work = self.root / ".lanes" / adapters.parse_lane(lane).name
+            # The Agy server may write only inside its lane: it dumps into its workspace.
+            seen = json.loads((work / "env.agy.json" if kind == "agy" else dump.with_suffix(f".{kind}.json")).read_text())
             self.assertFalse(set(leak) & set(seen), f"{kind} saw {set(leak) & set(seen)}")
             self.assertEqual(seen.get("GROK_TELEMETRY_ENABLED"), "0")
             self.assertEqual(seen.get("HERDR_SOCKET_PATH"), "/nonexistent/xcheck-lanes-have-no-herdr.sock", kind)
             self.assertEqual(seen.get("XCHECK_LANE"), "1", kind)  # ~/.zshrc then loads no secrets
-            lane = next(l for l in lanes.split(",") if l.startswith(kind + ":"))
-            work = self.root / ".lanes" / adapters.parse_lane(lane).name
             self.assertEqual(seen.get("PWD"), str(work), kind)
             self.assertNotIn("OLDPWD", seen, kind)
 
@@ -1261,9 +1252,9 @@ class EndToEnd(unittest.TestCase):
     def test_disjoint_pools_and_same_run_lanes_run_together(self):
         other = self.second_base()
         t0 = time.time()
-        self.detach(self.base, "agy:gemini-3.8-flash-high,agy:gemini-3.1-pro-high", "slow")
+        self.detach(self.base, "agy:gemini-3.8-flash-high,agy:gemini-pro-agent", "slow")
         self.detach(other, "grok:grok-4.7:xhigh", "slow")
-        for base, lane in ((self.base, "agy-gemini-3.8-flash-high"), (self.base, "agy-gemini-3.1-pro-high"),
+        for base, lane in ((self.base, "agy-gemini-3.8-flash-high"), (self.base, "agy-gemini-pro-agent"),
                            (other, "grok-4.7-xhigh")):
             self.assertEqual(self.lane_exit(base, lane)["status"], "done")
             self.assertNotIn("waiting for pool", (base / "lanes" / lane / "view.log").read_text())
@@ -1307,22 +1298,23 @@ class EndToEnd(unittest.TestCase):
             held.release()
 
     def run_tui(self, mode, extra=()):
-        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free"
+        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,opencode:muse-spark-1.3-contributor-free"
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--view", "tui", "--skip-capacity", *extra, mode=mode)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         return {r["lane"]: r for r in json.loads((self.base / "STATUS.json").read_text())["lanes"]}
 
-    def test_agy_runs_as_its_app_even_in_the_stream_view(self):
-        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
+    def test_agy_streams_through_acp_even_in_the_app_view(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless", "--view", "tui",
                         "--skip-capacity", "--lanes", "agy:gemini-3.8-flash-high,grok:grok-4.7:xhigh")
         self.assertEqual(p.returncode, 0, p.stderr)
         rows = {r["lane"]: r for r in json.loads((self.base / "STATUS.json").read_text())["lanes"]}
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
         agy = self.base / "lanes" / "agy-gemini-3.8-flash-high"
-        self.assertIn("ANSWER.md", (agy / "message.txt").read_text())
-        self.assertTrue((agy / "screen.log").exists())
-        self.assertFalse((self.base / "lanes" / "grok-4.7-xhigh" / "screen.log").exists())
+        self.assertIn("final message", (agy / "message.txt").read_text())
+        self.assertTrue((agy / "stream.jsonl").exists())
+        self.assertFalse((agy / "screen.log").exists())
+        self.assertTrue((self.base / "lanes" / "grok-4.7-xhigh" / "screen.log").exists())
 
     def test_an_incomplete_app_draft_keeps_its_timeout_and_body(self):
         rows = self.run_tui("invalid", extra=("--idle", "3"))
@@ -1333,11 +1325,8 @@ class EndToEnd(unittest.TestCase):
     def test_tui_lanes_are_trusted_before_they_start(self):
         self.run_tui("ok")
         codex = (self.root / "codex-config.toml").read_text()
-        agy = json.loads((self.root / "agy-settings.json").read_text())
         work = os.path.realpath(self.root / ".lanes" / "codex-gpt-6.1-sol-high")
         self.assertIn(f'[projects."{work}"]\ntrust_level = "trusted"', codex)
-        self.assertIn(os.path.realpath(self.root / ".lanes" / "agy-gemini-3.8-flash-high"), agy["trustedWorkspaces"])
-        self.assertIs(agy["showFeedbackSurvey"], False)
         before = (self.root / "codex-config.toml").read_text()
         other = self.second_base()
         p = self.xcheck("run", "--base", str(other), "--orch", "other", "--lanes", "codex:gpt-6.1-sol:high",
@@ -1388,7 +1377,7 @@ class EndToEnd(unittest.TestCase):
         rows = self.run_tui("limit", extra=("--idle", "3"))
         self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
         for r in rows.values():
-            self.assertTrue(any("Individual quota reached" in line for line in r["stderr_tail"]))
+            self.assertTrue(any("hit your limit" in line for line in r["stderr_tail"]))
 
     def test_a_quoted_limit_banner_does_not_end_a_working_app(self):
         rows = self.run_tui("limit-echo")

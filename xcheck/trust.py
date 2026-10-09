@@ -1,19 +1,17 @@
 """Record, once, that a lane's workspace is trusted by the apps that ask.
 
-Codex and Agy show a "trust this folder?" screen before their interactive app
-starts in a directory they have not seen, and they match the exact path (a
-trusted parent does not count; /tmp and /private/tmp are distinct spellings).
-A Codex `-c projects."<dir>".trust_level` override does not suppress it.
+Codex shows a "trust this folder?" screen before its interactive app starts
+in a directory it has not seen, and it matches the exact path (a trusted parent
+does not count; /tmp and /private/tmp are distinct spellings). A Codex
+`-c projects."<dir>".trust_level` override does not suppress it.
 
 Each lane works in a stable directory (ROOT/.lanes/<lane>), so trust is one
-entry per lane, written here idempotently: a no-op once present. Agy's
-post-turn feedback survey is switched off in the same place. Claude Code and
-Grok showed no such screen for a lane workspace.
+entry per lane, written here idempotently: a no-op once present. Claude Code,
+Grok and Agy's ACP server showed no such screen for a lane workspace.
 
-  Codex  ~/.codex/config.toml                     [projects."<dir>"] trust_level = "trusted"
-  Agy    ~/.gemini/antigravity-cli/settings.json  trustedWorkspaces += <dir>; showFeedbackSurvey = false
+  Codex  ~/.codex/config.toml  [projects."<dir>"] trust_level = "trusted"
 
-CODEX_CONFIG and AGY_SETTINGS override the files (tests).
+CODEX_CONFIG overrides the file (tests).
 """
 
 from __future__ import annotations
@@ -31,11 +29,6 @@ def _codex_config() -> Path:
     return Path(os.environ.get("CODEX_CONFIG") or Path.home() / ".codex" / "config.toml")
 
 
-def _agy_settings() -> Path:
-    return Path(os.environ.get("AGY_SETTINGS")
-                or Path.home() / ".gemini" / "antigravity-cli" / "settings.json")
-
-
 def spellings(path: Path) -> list[str]:
     p = str(path)
     if p.startswith("/private/tmp/"):
@@ -49,8 +42,6 @@ def ensure(kind: str, workspace: Path) -> bool:
     """Trust `workspace` for `kind`; True if a file was changed."""
     if kind == "codex":
         return _locked(_codex_config(), lambda text: _codex(text, spellings(workspace)))
-    if kind == "agy":
-        return _locked(_agy_settings(), lambda text: _agy(text, spellings(workspace)))
     return False
 
 
@@ -82,16 +73,6 @@ def _codex(text: str, paths: list[str]) -> str:
     if not same:
         raise ValueError("unsupported Codex project table layout; trust the lane workspace by hand")
     return text
-
-
-def _agy(text: str, paths: list[str]) -> str:
-    data = json.loads(text) if text.strip() else {}
-    if not isinstance(data, dict):
-        raise ValueError("agy settings root is not an object")
-    trusted = data.get("trustedWorkspaces") or []
-    data["trustedWorkspaces"] = trusted + [p for p in paths if p not in trusted]
-    data["showFeedbackSurvey"] = False
-    return json.dumps(data, indent=2) + "\n"
 
 
 def _locked(path: Path, change) -> bool:

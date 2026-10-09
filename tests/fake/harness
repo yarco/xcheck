@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Fake codex/claude/grok/agy/opencode/devin: speaks each CLI's real stream shape.
+"""Fake codex/claude/grok/opencode/devin, agy's quota meter, acpx and Antigravity's
+ACP server, and the Keychain lookup: each speaks its real CLI's shape.
 
 The kind is argv[0]'s basename. FAKE_MODE selects the behaviour:
 ok | invalid | declined | error | hang | silent-exit | noop-frames | limit | limit-echo.
@@ -26,6 +27,105 @@ if kind == "grok" and argv[-2:] == ["version", "--json"]:
 
 def emit(obj):
     print(json.dumps(obj), flush=True)
+
+
+# The Keychain lookup for the Antigravity ACP login (FAKE_AGY_LOGIN=absent|locked).
+if kind == "security":
+    sys.exit({"present": 0, "absent": 44, "locked": 36}[os.environ.get("FAKE_AGY_LOGIN", "present")])
+
+# acpx: spawns the --agent command with only stdio, as Node does, and prints the
+# ACP JSON-RPC stream in both directions (`--format json`).
+if kind == "acpx":
+    import shlex
+    import subprocess
+    if "--help" in argv:
+        print("--agent --cwd --model --approve-all --no-terminal --no-fs --prompt-retries --format --file")
+        sys.exit(0)
+    agent = subprocess.Popen(shlex.split(argv[argv.index("--agent") + 1]), cwd=argv[argv.index("--cwd") + 1],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    model = argv[argv.index("--model") + 1]
+    prompt = Path(argv[argv.index("--file") + 1]).read_text() if "--file" in argv else argv[-1]
+
+    def send(msg):
+        emit(msg)
+        agent.stdin.write(json.dumps(msg) + "\n")
+        agent.stdin.flush()
+
+    send({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1}})
+    for line in agent.stdout:
+        msg = json.loads(line)
+        emit(msg)
+        if msg.get("id") == 0 and "result" in msg:
+            send({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {"cwd": os.getcwd()}})
+        elif msg.get("id") == 1 and "result" in msg:
+            offered = [m["modelId"] for m in msg["result"]["models"]["availableModels"]]
+            if model not in offered:
+                emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message":
+                      f'Cannot apply --model "{model}": Available models: {", ".join(offered)}'}})
+                sys.exit(1)
+            send({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+                  "params": {"sessionId": "s", "prompt": [{"type": "text", "text": prompt}]}})
+        elif msg.get("method") == "session/request_permission":
+            send({"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": {"outcome": "selected", "optionId": "allow"}}})
+        elif msg.get("id") == 2:
+            sys.exit(0 if "result" in msg else 1)
+    emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "agent disconnected"}})
+    sys.exit(1)
+
+# Antigravity's ACP server, run by acpx through `xcheck hold` and sandbox-exec.
+if kind == "agy_acp_server.par":
+    if os.environ.get("FAKE_ENV_DUMP"):
+        Path("env.agy.json").write_text(json.dumps(dict(os.environ)))  # Seatbelt: only the workspace
+
+    def update(u):
+        emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": u}})
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if msg.get("method") == "initialize":
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1}})
+        elif msg.get("method") == "session/new":
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "models": {
+                "currentModelId": "gemini-3.8-flash-high", "availableModels": [
+                    {"modelId": "gemini-3.8-flash-high"}, {"modelId": "gemini-pro-agent"}]}}})
+        elif msg.get("method") == "session/prompt":
+            pid = msg["id"]
+            tail = [l for l in Path("evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
+            reply = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {tail}\nRESULT_COMPLETE\n"
+            if mode == "custody":  # what the spender holds, sees and may write
+                busy = Path(os.environ["XCHECK_ROOT"]) / ".pools" / "agy-gemini" / "busy"
+                held = []
+                for fd in range(3, 256):
+                    try:
+                        held += [fd] if os.fstat(fd).st_ino == busy.stat().st_ino else []
+                    except OSError:
+                        pass
+                outside = Path(os.environ["XCHECK_ROOT"]) / "outside-probe.txt"
+                try:
+                    outside.write_text("x")
+                    wrote_outside = True
+                except OSError:
+                    wrote_outside = False
+                Path("probe.json").write_text(json.dumps({
+                    "holds_busy": held, "wrote_outside": wrote_outside,
+                    "gemini_home": os.environ.get("GEMINI_HOME"),
+                    "acpx_env": sorted(k for k in os.environ if k.startswith("ACPX_"))}))
+            if mode in ("hang", "slow"):
+                time.sleep(60 if mode == "hang" else 4)
+            update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Reading the packet."}})
+            update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Running view_file", "kind": "read"})
+            update({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})
+            emit({"jsonrpc": "2.0", "id": 7, "method": "session/request_permission",
+                  "params": {"sessionId": "s", "toolCall": {"toolCallId": "t2"}}})
+            if mode == "error":
+                emit({"jsonrpc": "2.0", "id": pid, "error": {"code": -32603, "message": "Individual quota reached"}})
+                continue
+            text = {"mcp-fail": "The MCP server 'semble' failed to initialize: connection closed",
+                    "invalid": "### 1) VERDICT\nfine but no proof and no marker\n"}.get(mode, reply)
+            for i in range(0, len(text), 9):
+                update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text[i:i + 9]}})
+            emit({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": "refusal" if mode == "refusal" else "end_turn"}})
+    sys.exit(0)
 
 
 # Quota meters (xcheck/capacity.py), FAKE_CAPACITY=eligible|reserve-low.
@@ -81,7 +181,7 @@ if os.environ.get("FAKE_ENV_DUMP"):
 # Interactive (TUI) invocations: the app writes ANSWER.md in its cwd, then idles
 # like a real TUI waiting for the next prompt.
 tui = {"claude": "-p" not in argv, "codex": "exec" not in argv,
-       "grok": "--prompt-file" not in argv, "agy": "-i" in argv, "opencode": "run" not in argv,
+       "grok": "--prompt-file" not in argv, "opencode": "run" not in argv,
        "devin": "-p" not in argv and "--print" not in argv}[kind]
 if tui:
     print(f"\x1b[2J\x1b[H\x1b[1mfake {kind} TUI\x1b[0m\r\nworking on the review…\r", flush=True)
@@ -105,7 +205,7 @@ if tui:
         (target / "ANSWER.md").write_text("### 1) VERDICT\npartial draft")
         time.sleep(2)
         (target / "ANSWER.md").write_text(f"### 1) VERDICT\nThe claim holds after a rewrite.\n6) PROOF: {token}\nRESULT_COMPLETE\n")
-    elif mode == "answer-exit":  # agy: writes its answer, then its app exits by itself
+    elif mode == "answer-exit":  # writes its answer, then the app exits by itself
         (target / "ANSWER.md").write_text(answer_ok)
         (target / "ANSWER.ready").write_text("ANSWER_READY\n")
         sys.exit(0)
@@ -124,18 +224,17 @@ if tui:
             sys.stdout.write("\x1b[?2026h\x1b[?25l\x1b[?2026l")
             sys.stdout.flush()
             time.sleep(0.2)
-    elif mode == "limit":  # the real Agy per-model cap screen, then nothing
-        sys.stdout.buffer.write((Path(__file__).resolve().parent.parent / "fixtures" / "agy-quota.screen").read_bytes())
-        sys.stdout.flush()
+    elif mode == "limit":  # an app's limit banner, then nothing
+        print("\u26a0 You've hit your limit · resets 7pm (America/Los_Angeles)\r", flush=True)
     elif mode == "quoted-limit-silent":
         print('• "You\'ve hit your limit · resets 7pm"', flush=True)
         time.sleep(float(os.environ.get("FAKE_DELAY", "20")))
         (target / "ANSWER.md").write_text(answer_ok)
     elif mode == "native-limit-exit":
-        print("Individual quota reached", flush=True)
+        print("You've hit your limit · resets 7pm", flush=True)
         sys.exit(1)
     elif mode == "limit-echo":  # a peer quoting the banner while it keeps working
-        print("\u26a0 Individual quota reached. Please upgrade your subscription to increase\r", flush=True)
+        print("\u26a0 You've hit your limit · resets 7pm (America/Los_Angeles)\r", flush=True)
         for i in range(20):
             print(f"thinking {i}s\r", flush=True)
             time.sleep(1)
@@ -252,14 +351,6 @@ elif kind == "opencode":
     emit(part(text=answer))
     if mode != "text-only":
         emit({"type": "step_finish", "part": {"type": "step-finish", "reason": "stop"}})
-elif kind == "agy":
-    sys.stdin.read()
-    emit({"event": "init", "init": {}})
-    if mode == "error":
-        emit({"event": "result", "result": {"status": "ERROR", "response": "",
-                                             "error": "Individual quota reached"}})
-        sys.exit(1)
-    emit({"event": "result", "result": {"status": "SUCCESS", "response": answer}})
 
 if mode == "terminal-hang":
     time.sleep(60)

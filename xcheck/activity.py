@@ -17,6 +17,9 @@ class Activity:
 
     def observe(self, obj):
         event = obj.get('type')
+        if self.kind == 'agy':  # ACP JSON-RPC: name the update, call or response
+            update = (obj.get('params') or {}).get('update') or {}
+            event = update.get('sessionUpdate') or obj.get('method') or ('error' if 'error' in obj else 'result')
         at = now()
         self.data.update(events=self.data['events'] + 1, last_event=event, observed_at=at)
         if self.kind == 'opencode' and isinstance(obj.get('sessionID'), str):
@@ -30,6 +33,10 @@ class Activity:
             item = obj.get('item') or {}
             if item.get('type') in ('command_execution', 'mcp_tool_call', 'web_search'):
                 tool = item['type']
+        elif self.kind == 'agy' and event == 'tool_call_update':
+            update = obj['params']['update']
+            if update.get('status') == 'completed':
+                tool = update.get('kind') or 'tool'
         elif self.kind == 'claude' and event == 'user':
             if any(b.get('type') == 'tool_result' and not b.get('is_error')
                    for b in (obj.get('message') or {}).get('content', []) if isinstance(b, dict)):

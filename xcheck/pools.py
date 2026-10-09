@@ -1,7 +1,7 @@
 """Quota-pool locks held by the process that spends.
 
 One run at a time may spend from a quota pool (codex, claude, grok,
-agy-gemini, agy-3p), so a capacity reading is not invalidated by another run
+agy-gemini), so a capacity reading is not invalidated by another run
 drawing from the same meter. Lanes of the same run share their pool; runs on
 disjoint pools proceed in parallel.
 
@@ -75,6 +75,31 @@ def acquire(root: Path, pool: str, run_id: str, deadline: float | None, on_wait=
         raise
     busy.close()
     return None
+
+
+def join(root: Path, pool: str, run_id: str) -> Held | None:
+    """Take a shared hold on a pool this run already holds; None otherwise.
+
+    For a spender that cannot inherit the runner's descriptor (acpx passes its
+    agent only stdio). Never waits and never admits: the pool must be busy and
+    owned by `run_id`, checked under `gate`, so a wrapper started after its
+    run's holders died cannot share a pool another run has since taken."""
+    d = root / ".pools" / pool
+    try:
+        busy = open(d / "busy", "a+")
+    except OSError:
+        return None
+    try:
+        with open(d / "gate", "a+") as gate:
+            fcntl.flock(gate, fcntl.LOCK_EX)
+            if _read(d / "owner") != run_id or _try(busy, fcntl.LOCK_EX):
+                busy.close()  # not ours, or nobody holds it any more
+                return None
+            fcntl.flock(busy, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return Held(busy)
+    except BaseException:
+        busy.close()
+        raise
 
 
 def _try(fh, op: int) -> bool:

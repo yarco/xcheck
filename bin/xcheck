@@ -13,6 +13,7 @@
   xcheck models [--provider ID] [--json] discover recent zero-price coding models
   xcheck install              publish a read-only copy as `xcheck` on PATH (+ Codex rule)
   xcheck lane   --base B --lane NAME   (internal: run one lane)
+  xcheck hold   --pool P --run B -- CMD (internal: an Agy lane's agent command)
 
 See Multi-Agent Cross-Check Protocol.md for the protocol.
 """
@@ -79,6 +80,11 @@ def main() -> int:
     md.add_argument("--limit", type=int, default=20, help="maximum rows, undated offers then latest releases (default 20)")
     md.add_argument("--json", action="store_true", help="metadata with sources, provider docs and auth variable names")
     sub.add_parser("install")
+    hd = sub.add_parser("hold")  # internal: acpx's agent command for an Agy lane
+    hd.add_argument("--pool", required=True)
+    hd.add_argument("--run", required=True)
+    hd.add_argument("--log", type=Path)
+    hd.add_argument("argv", nargs=argparse.REMAINDER)
     ln = sub.add_parser("lane")
     ln.add_argument("--base", required=True, type=Path)
     ln.add_argument("--lane", required=True)
@@ -153,6 +159,9 @@ def main() -> int:
             dest = install.install()
             print(f"xcheck: installed {dest}\n  {install.LINK} → it\n  Codex rule: {install.RULES}")
             return 0
+        if a.cmd == "hold":
+            argv = a.argv[1:] if a.argv[:1] == ["--"] else a.argv
+            return lane.hold(a.pool, a.run, a.log, argv)
         if a.cmd == "lane":
             return lane.run_lane(a.base.resolve(), a.lane)
     except (run.RunError, validate.PacketError, ValueError) as e:

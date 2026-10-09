@@ -71,7 +71,7 @@ class ReportStartup(unittest.TestCase):
             with self.assertRaises(lane._Stop):
                 lane.grok_startup_check(Path('/tmp'))
 
-    def doctor(self, probe, listing_failure=False, suffix=False):
+    def doctor(self, probe, listing_failure=False, suffix=False, acp_models=None):
         helps = {tuple(cmd): (support.FIX / 'cli-help' / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
         def fake_run(cmd, **_):
@@ -85,9 +85,19 @@ class ReportStartup(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 1 if listing_failure else 0, '\n'.join(pins), '')
         with patch.object(install, 'source_root', return_value=support.REPO), \
                 patch.object(install, 'installed_digest', return_value=install.digest(support.REPO)), \
-                patch.object(run.subprocess, 'run', side_effect=fake_run), redirect_stdout(io.StringIO()) as out:
+                patch.object(run.subprocess, 'run', side_effect=fake_run), \
+                patch.object(adapters, 'unavailable', return_value=None), \
+                patch.object(run, 'agy_acp_models', return_value=acp_models if acp_models is not None else
+                             [peer.model for peer in adapters.DEFAULT_ROSTER if peer.kind == 'agy']), \
+                redirect_stdout(io.StringIO()) as out:
             code = run.doctor()
         return code, out.getvalue()
+
+    def test_doctor_fails_an_agy_pin_the_acp_server_does_not_advertise(self):
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"fixture"}', ''),
+                                 acp_models=['gemini-3.8-flash-high'])
+        self.assertEqual(code, 1, text)
+        self.assertIn('agy model gemini-pro-agent NOT advertised by the ACP server', text)
 
     def test_doctor_fails_live_startup_even_when_all_flags_and_pins_exist(self):
         code, text = self.doctor(subprocess.CompletedProcess([], 1, '',

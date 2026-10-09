@@ -410,13 +410,14 @@ def _agy(lane: Lane) -> dict[str, float]:
 
 
 def agy_windows(data: dict, model: str) -> dict[str, float]:
-    """The lane's family (Gemini or third-party) has a 5 h and a weekly bucket.
+    """The ACP lane's Gemini pool has a 5 h and a weekly bucket.
     A disabled 5 h bucket (its fraction is meaningless while the weekly one is
     exhausted) is left out; a missing bucket is an error."""
-    family = "gemini" if model.startswith("gemini-") else "3p"
+    if not model.startswith("gemini-"):
+        raise ValueError("Agy's ACP server supports only Gemini selectors")
     buckets = {b["id"]: b for g in data["groups"] for b in g.get("buckets") or []}
     windows = {}
-    for name in (f"{family}-5h", f"{family}-weekly"):
+    for name in ("gemini-5h", "gemini-weekly"):
         b = buckets[name]
         if not b.get("disabled"):
             windows[name] = 100.0 * float(b["remaining_fraction"])

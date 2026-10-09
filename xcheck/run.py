@@ -120,7 +120,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         for name in run.lanes:
             d = run.lane_dir(name)
             d.mkdir(parents=True)
-            lane_view = "tui" if run.lanes[name].kind in adapters.APP_ONLY else view
+            lane_view = adapters.view_for(run.lanes[name].kind, view)
             (d / "message.txt").write_text(_message(lane_view, web, run.lanes[name].kind), encoding="utf-8")
         run.save()
     except BaseException:
@@ -423,8 +423,29 @@ def render_status(run: Run) -> str:
 
 
 # Each kind's own `models` listing; opencode is resolved per provider below.
-MODEL_LISTS = {"grok": ["grok", "models"], "agy": ["agy", "models"],
-               "devin": ["devin", "models", "list"]}
+MODEL_LISTS = {"grok": ["grok", "models"], "devin": ["devin", "models", "list"]}
+AGY_PROBE_MODEL = "xcheck-doctor-no-such-model"
+
+
+def agy_acp_models() -> list[str] | None:
+    """The model ids Antigravity's ACP server advertises, without a turn: an
+    unknown --model makes acpx stop after session/new and list them."""
+    from .lane import lane_env
+    with tempfile.TemporaryDirectory(prefix="xcheck-agy-doctor-") as tmp:
+        work, home = Path(tmp) / "work", adapters._agy_home(Path(tmp) / "home", web=False)
+        work.mkdir()
+        (home / "config" / "mcp_config.json").write_text('{"mcpServers": {}}')
+        cmd = [shutil.which("acpx") or "acpx", "--agent", adapters._acpx_quote(str(adapters.AGY_ACP_SERVER)), "--cwd", str(work),
+               "--model", AGY_PROBE_MODEL, "--approve-all", "--no-terminal", "--no-fs", "--format", "json",
+               "exec", "x"]
+        try:
+            spec = adapters.Launch(cmd, None, env_set={"GEMINI_HOME": str(home), "TMPDIR": str(home / "tmp")})
+            out = subprocess.run(cmd, cwd=work, env=lane_env(spec, work),
+                                 capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    found = re.search(r"Available models: ([^\"\n]+)", out.stdout + out.stderr)
+    return [m.strip() for m in found.group(1).split(",")] if found else None
 
 
 def doctor() -> int:
@@ -470,7 +491,21 @@ def doctor() -> int:
                 listings[tuple(cmd)] = ""
         return listings[tuple(cmd)]
 
+    agy = adapters.Lane("agy", "gemini-3.8-flash-high")
+    blocked = adapters.unavailable(agy)
+    stamp = adapters.AGY_ACP_DIR / "VERSION"
+    version = stamp.read_text().strip() if stamp.is_file() else "unknown (run agy-acp-server-update)"
+    print(f"FAIL agy: {blocked}" if blocked else f"ok   agy: acpx, ACP server {version} and Keychain login present")
+    bad += bool(blocked)
+    acp_models = None if blocked else agy_acp_models()
     for lane in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN):
+        if lane.kind == "agy":
+            ok = acp_models is not None and lane.model in acp_models
+            print(f"{'ok  ' if ok else 'FAIL'} agy model {lane.model} "
+                  + ("advertised by the ACP server" if ok else
+                     "NOT advertised by the ACP server" if acp_models is not None else "unchecked: no ACP model list"))
+            bad += not ok
+            continue
         cmd = MODEL_LISTS.get(lane.kind)
         if lane.kind == "opencode":
             provider = lane.model.split("/", 1)[0] if "/" in lane.model else "opencode"

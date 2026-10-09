@@ -46,7 +46,8 @@ TAIL_LINES = 40
 # its own configured authentication. User preferences such as
 # GROK_TELEMETRY_* stay.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
-                  "OPENCODE")  # an opencode orchestrator's session; any config override breaks the free tier
+                  "OPENCODE",  # an opencode orchestrator's session; any config override breaks the free tier
+                  "ACPX_")  # acpx promotes ACPX_AUTH_<X> to <X> in the agent's environment
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
 SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
                "GROK_SANDBOX",  # the operator's default profile; the adapter picks the lane's
@@ -170,7 +171,7 @@ def _run_lane(base: Path, name: str) -> int:
     work, message = workspace(name), d / "message.txt"
     final, stream_path, err_path = d / "final.md", d / "stream.jsonl", d / "stderr.log"
     log = d / "harness.log"  # the harness's own debug log: where root causes are found
-    view = "tui" if lane.kind in adapters.APP_ONLY else run.view
+    view = adapters.view_for(lane.kind, run.view)
     idle = idle_for(run.idle, view)
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM):
         signal.signal(sig, _raise_stop)
@@ -188,6 +189,9 @@ def _run_lane(base: Path, name: str) -> int:
         return _finish(run, name, started, "skipped",
                        f"auth-required: {', '.join(missing)} is empty in the environment xcheck ran in",
                        None, reader, err_path)
+    blocked = adapters.unavailable(lane)
+    if blocked:
+        return _finish(run, name, started, "skipped", blocked, None, reader, err_path)
     # One run at a time spends from a pool; wait here (no orchestrator turns).
     held = pools.acquire(ROOT, lane.pool, str(run.base), time.monotonic() + run.cap if run.cap is not None else None,
                          on_wait=lambda owner: print(
@@ -345,6 +349,26 @@ def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log:
         status = "failed"
         reason = "the app ended without writing ANSWER.md; last screen: " + " / ".join(tail[-4:])
     return _finish(run, name, started, status, reason, code, reader, screen, tail=tail)
+
+
+def hold(pool: str, run_id: str, log: Path | None, argv: list[str]) -> int:
+    """Join this run's hold on `pool`, then exec `argv` holding it.
+
+    acpx gives the agent it starts only stdin, stdout and stderr, so the
+    runner's inherited pool descriptor stops at acpx. This wrapper is acpx's
+    agent command: it takes its own shared hold (only while this run still owns
+    the pool), keeps it across exec, and sends the agent's stderr to the lane's
+    harness log."""
+    held = pools.join(ROOT, pool, run_id)
+    if held is None:
+        print(f"xcheck hold: pool {pool} is no longer held by {run_id}; not starting the agent", file=sys.stderr)
+        return 75
+    os.set_inheritable(held.fileno(), True)
+    if log is not None:
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.dup2(fd, 2)
+        os.close(fd)
+    os.execv(argv[0], argv)
 
 
 def _consume(reader: adapters.Reader, raw: bytes, progress=None) -> None:

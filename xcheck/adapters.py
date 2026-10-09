@@ -1,8 +1,9 @@
 """Per-harness knowledge: how to start a lane, and how to read what it streams.
 
 Every flag here was checked against the installed CLI's own help and a real
-smoke run (codex-cli 0.157.1, Claude Code 2.1.283, grok 1.0.41, agy 1.2.12).
-`xcheck doctor` re-checks that each flag still appears in `--help`.
+smoke run (codex-cli 0.157.1, Claude Code 2.1.283, grok 1.0.41, acpx 0.19.4 with
+the Antigravity ACP server 1.3.0). `xcheck doctor` re-checks that each flag
+still appears in `--help`.
 
 Stream lanes print their answer as a final message; the lane runner extracts
 that text from the harness's structured stream. Grok may write scratch files
@@ -12,15 +13,15 @@ in its workspace while reviewing.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin")
-
-# Quota pool per kind; Agy has two independently metered families.
-AGY_GEMINI_PREFIX = "gemini-"
-
 
 @dataclass(frozen=True)
 class Lane:
@@ -40,7 +41,7 @@ class Lane:
     @property
     def pool(self) -> str:
         if self.kind == "agy":
-            return "agy-gemini" if self.model.startswith(AGY_GEMINI_PREFIX) else "agy-3p"
+            return "agy-gemini"
         if self.kind == "opencode" and "/" in self.model:
             provider = self.model.split('/', 1)[0]
             return "opencode" if provider == "opencode" else f"opencode-{provider}"
@@ -58,7 +59,7 @@ DEFAULT_ROSTER = (
     Lane("codex", "gpt-6.1-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
-    Lane("agy", "gemini-3.1-pro-high"),
+    Lane("agy", "gemini-pro-agent"),  # the ACP server's id for Gemini 3.1 Pro (High)
     Lane("agy", "gemini-3.8-flash-high"),
 )
 
@@ -86,6 +87,8 @@ def parse_lane(spec: str) -> Lane:
     if len(parts) not in (2, 3) or parts[0] not in KINDS or not parts[1]:
         raise ValueError(f"lane spec must be kind:model[:effort], kind in {KINDS}: {spec!r}")
     kind, model = parts[0], parts[1]
+    if kind == "agy" and not model.startswith("gemini-"):
+        raise ValueError("Agy's ACP server supports only Gemini selectors")
     effort = parts[2] if len(parts) == 3 else ""
     ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind == "opencode" else r"[A-Za-z0-9][A-Za-z0-9._-]*"
     for part in (model, effort):
@@ -143,6 +146,8 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
         if not web:
             argv.append("--disable-web-search")
         return Launch(argv, None, env_set=GROK_ENV)
+    if lane.kind == "agy":
+        return _agy_launch(lane, work, message, log, web)
     if lane.kind == "opencode":
         argv = [*opencode_sandbox(work), "opencode", "run", "--auto", *_opencode_model(lane),
                 "--dir", str(work), "--format", "json", message.read_text(encoding="utf-8").strip()]
@@ -282,21 +287,142 @@ def claude_mcp_allow(web: bool = True) -> list[str]:
 
 CLAUDE_ENV = {"DISABLE_AUTOUPDATER": "1"}
 
-# Kinds whose headless (print) mode cannot be trusted with tools: Agy ends the
-# whole turn, answer included, the moment print mode soft-denies a tool
-# confirmation (a sandbox-blocked command, a write). Its app with
-# --dangerously-skip-permissions never asks, so Agy always runs as its app.
-# Devin `-p` prints plain text; the stream reader only parses JSON, so the
-# answer is ANSWER.md from the app, like Agy.
-APP_ONLY = {"agy", "devin"}
+# Agy runs through acpx and Antigravity's own ACP server, the headless form
+# Antigravity ships for IDEs: `agy -p` ends the turn on any soft-denied tool and
+# the app needs a committed ANSWER.md. The chain, outermost first:
+#   acpx --no-terminal --no-fs   transport only; no client-side fs or shell
+#   xcheck hold                  re-joins this run's pool (acpx passes only stdio)
+#   sandbox-exec -f agy.sb       writes only to the workspace and lane home
+#   agy_acp_server.par           Google's server; it logs in with agy's OAuth client
+# The server's own terminal sandbox exists only for oauth-business admin
+# controls, so the Seatbelt profile is the write boundary. Everything the server
+# reads from GEMINI_HOME is the lane's: auth type, MCP list, no hooks; the login
+# itself stays in the Keychain (service gemini, account antigravity-acp). Its
+# temp files go to the lane home, and uvx-started MCP servers use a uv cache
+# only Agy lanes share (ROOT/.cache/agy-uv), never the operator's.
+# Kept current by agy-acp-server-update; XCHECK_AGY_ACP_DIR points tests at a fake.
+AGY_ACP_DIR = Path(os.environ.get("XCHECK_AGY_ACP_DIR") or Path.home() / ".local/lib/antigravity-acp")
+AGY_ACP_SERVER = AGY_ACP_DIR / "agy_acp_server.par"
+AGY_LOGIN = ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity-acp"]
+ACPX_CONFIG = Path.home() / ".acpx" / "config.json"
+# Keys in acpx's own config that would change a lane: a timeout cancels quiet
+# reviewers, auth re-injects scrubbed credentials, MCP or agent entries change
+# what runs, default permissions change what is approved.
+ACPX_FORBIDDEN = ("timeout", "auth", "authPolicy", "mcpServers", "agents", "defaultPermissions",
+                  "nonInteractivePermissions", "promptRetries")
+# Review MCP servers the ACP server cannot start: fff rejects the `server/discover`
+# probe the server sends before `initialize`, which fails the whole turn; qmd
+# over HTTP never finishes connecting, and the server waits for every server.
+AGY_MCP_EXCLUDED = {"fff", "qmd"}
+AGY_LANE_ENV = {"TMPDIR", "UV_CACHE_DIR", "UV_TOOL_DIR"}  # set by the lane; never a server's own
+BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
+
+
+def _agy_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    from .files import ROOT  # files imports this module
+    d = log.parent
+    home = _agy_home(d / "gemini-home", web)
+    uv = ROOT / ".cache" / "agy-uv"
+    uv.mkdir(parents=True, exist_ok=True)
+    profile = _agy_profile(d / "agy.sb", work, home, uv)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool, "--run", str(d.parent.parent),
+             "--log", str(log), "--", "/usr/bin/sandbox-exec", "-f", str(profile), str(AGY_ACP_SERVER)]
+    argv = [
+        shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+        "--cwd", str(work), "--model", lane.model,
+        # The server refuses every write and tool without it; --no-terminal and
+        # --no-fs leave only the server's own tools, inside the Seatbelt profile.
+        "--approve-all", "--no-terminal", "--no-fs", "--prompt-retries", "0",
+        "--format", "json", "exec", "--file", str(message),
+    ]
+    return Launch(argv, None, env_set={"GEMINI_HOME": str(home), "XCHECK_ROOT": str(ROOT),
+                                       "TMPDIR": str(home / "tmp"), "UV_CACHE_DIR": str(uv),
+                                       "UV_TOOL_DIR": str(uv / "tools")})
+
+
+def _acpx_quote(arg: str) -> str:
+    """One argv word for acpx's --agent splitter (POSIX-style quotes)."""
+    return arg if re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]+", arg) else "'" + arg.replace("'", "'\"'\"'") + "'"
+
+
+def _agy_home(home: Path, web: bool) -> Path:
+    """The lane's GEMINI_HOME: auth type and review MCP servers only. The server
+    reads HTTP servers from `url` and starts any entry with a `command`,
+    `disabled` or not, so entries are written in that shape here."""
+    (home / "antigravity-acp").mkdir(parents=True, exist_ok=True)
+    (home / "config").mkdir(exist_ok=True)
+    (home / "tmp").mkdir(exist_ok=True)
+    (home / "antigravity-acp" / "settings.json").write_text(json.dumps({"auth": {"type": "oauth-personal"}}))
+    servers = {}
+    for name, server in _claude_review_servers(web).items():
+        if name in AGY_MCP_EXCLUDED:
+            continue
+        if server.get("type") == "http":
+            servers[name] = {"url": server["url"]}
+        elif isinstance(server.get("command"), str):
+            # The lane decides where a server may write; a server's own cache
+            # or temp setting would point outside the Seatbelt profile.
+            env = {k: v for k, v in (server.get("env") or {}).items() if k not in AGY_LANE_ENV}
+            servers[name] = {"command": server["command"], "args": list(server.get("args") or []),
+                             **({"env": env} if env else {})}
+    (home / "config" / "mcp_config.json").write_text(json.dumps({"mcpServers": servers}, indent=1))
+    return home
+
+
+def _agy_profile(path: Path, work: Path, home: Path, uv: Path) -> Path:
+    """Seatbelt: everything allowed except writes outside the workspace, the
+    lane home, the Agy uv cache, devices and the login Keychain (the server
+    rewrites its token there on every start)."""
+    allowed = [os.path.realpath(p) for p in (work, home, uv)] + [
+        "/dev", str(Path.home() / "Library" / "Keychains")]
+    path.write_text("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n"
+                    # Seatbelt accepts UTF-8 paths, not JSON's \uXXXX escapes.
+                    + "".join(f"  (subpath {json.dumps(p, ensure_ascii=False)})\n" for p in allowed) + ")\n")
+    return path
+
+
+def unavailable(lane: Lane) -> str | None:
+    """Why this lane cannot start here, before admission; None when it can."""
+    if lane.kind != "agy":
+        return None
+    if not shutil.which("acpx"):
+        return "startup-unavailable: acpx is not on PATH; install it with npm install -g acpx"
+    if not AGY_ACP_SERVER.is_file():
+        return f"startup-unavailable: {AGY_ACP_SERVER} is missing; run agy-acp-server-update"
+    try:
+        config = json.loads(ACPX_CONFIG.read_text()) if ACPX_CONFIG.exists() else {}
+    except (OSError, ValueError) as e:
+        return f"startup-unavailable: {ACPX_CONFIG} is unreadable ({e}); fix or remove it"
+    if not isinstance(config, dict):
+        return f"startup-unavailable: {ACPX_CONFIG} must contain a JSON object; fix or remove it"
+    if set_keys := [k for k in ACPX_FORBIDDEN if k in config]:
+        return f"startup-unavailable: {ACPX_CONFIG} sets {', '.join(set_keys)}; xcheck lanes need acpx defaults"
+    login = subprocess.run(AGY_LOGIN, capture_output=True).returncode
+    if login == 36:
+        return "auth-required: the login keychain is locked; run keychain-unlock-gui at the screen"
+    if login:
+        return ("auth-required: no Antigravity ACP login in the Keychain (service gemini, account "
+                "antigravity-acp); sign in once by running any acpx prompt against the server and "
+                "opening the link it prints")
+    return None
+
+# Devin `-p` prints plain text and the stream reader only parses JSON, so Devin
+# always runs as its app and answers in ANSWER.md. Agy runs only through its ACP
+# server (see _agy_launch): it has no app view here.
+APP_ONLY = {"devin"}
+STREAM_ONLY = {"agy"}
+
+
+def view_for(kind: str, view: str) -> str:
+    """The view a lane of `kind` actually runs in, given the run's view."""
+    return "tui" if kind in APP_ONLY else "stream" if kind in STREAM_ONLY else view
 
 # Terminal limit banners an app draws and then sits on, each seen on a real
-# screen: Agy "⚠ Individual quota reached. … Resets in 62h37m38s." (a per-model
-# cap its family meter does not show), Claude "You've hit your limit · resets
-# 7pm (America/Los_Angeles)", Codex "You hit your weekly limit." tui.py counts
-# them for diagnosis only. Quoted banners and silent work are indistinguishable
-# from a stopped app without a native failure signal.
-APP_LIMIT = re.compile(r"^\W*(?:Individual quota reached|You(?:['’]ve)? hit your (?:weekly )?limit)\b")
+# screen: Claude "You've hit your limit · resets 7pm (America/Los_Angeles)",
+# Codex "You hit your weekly limit." tui.py counts them for diagnosis only.
+# Quoted banners and silent work are indistinguishable from a stopped app
+# without a native failure signal.
+APP_LIMIT = re.compile(r"^\W*You(?:['’]ve)? hit your (?:weekly )?limit\b")
 
 
 def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
@@ -331,12 +457,6 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
             *([] if web else ["--disable-web-search"]), message,
         ]
         return Launch(argv, None, env_set=GROK_ENV)
-    if lane.kind == "agy":
-        argv = [
-            "agy", "--sandbox", "--dangerously-skip-permissions", "--mode", "accept-edits",
-            "--model", lane.model, "--log-file", str(log), "-i", message,
-        ]
-        return Launch(argv, None)
     if lane.kind == "opencode":
         if lane.effort:
             raise ValueError(OPENCODE_APP_EFFORT.format(effort=lane.effort))
@@ -370,8 +490,11 @@ HELP_COMMANDS = {
              "--tools", "--no-subagents", "--no-plan", "--sandbox",
              "--always-approve", "--output-format", "streaming-json", "--disable-web-search",
              "--debug-file"]),
-    "agy": (["agy", "--help"], ["--sandbox", "--dangerously-skip-permissions", "--mode",
-            "--model", "--log-file", "--prompt-interactive"]),
+    # agy itself only serves the capacity meter (`agy -p /usage`); lanes run acpx.
+    "agy": (["agy", "--help"], ["--output-format", "--print-timeout"]),
+    "acpx": (["acpx", "--help"], ["--agent", "--cwd", "--model", "--approve-all", "--no-terminal",
+             "--no-fs", "--prompt-retries", "--format"]),
+    "acpx exec": (["acpx", "exec", "--help"], ["--file"]),
     "opencode run": (["opencode", "run", "--help"], ["--auto", "--model", "--format", "--variant", "--dir"]),
     "opencode": (["opencode", "--help"], ["--auto", "--model", "--prompt"]),
     "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
@@ -395,6 +518,8 @@ class Reader:
     _notice: str | None = None  # Codex error notifications can be reconnect progress
     diagnostics: list[dict] = field(default_factory=list)
     _mcp_calls: dict[str, dict] = field(default_factory=dict)
+    _prompt_id: object = None  # agy: the JSON-RPC id of acpx's session/prompt
+    _failure: str | None = None  # agy: an error that ends the turn unless it completes anyway
 
     def notes(self) -> list[str]:
         notes = []
@@ -419,6 +544,15 @@ class Reader:
             self.text = "".join(self._buf) or self._last
         elif self.kind == "opencode":
             self.text = "\n".join(self._buf)
+        elif self.kind == "agy":
+            self.text = "".join(self._buf)
+            head = self.text.lstrip()
+            # The server reports an MCP server that will not start as the whole
+            # answer of a turn that still ends end_turn.
+            if re.fullmatch(r"The MCP server '[^'\n]+' failed to initialize[^\n]*", head.strip()):
+                self.error = _clip(head.splitlines()[0], 300)
+            elif not self.completed and self._failure:
+                self.error = self._failure
         if self.kind == "codex" and not self.text.strip() and not self.error:
             self.error = self._notice
 
@@ -506,6 +640,39 @@ class Reader:
             else:
                 self.error = f"Grok ended without completing the review: {reason or 'missing stopReason'}"
             return f"· end {reason}"
+        return None
+
+    # -- agy: acpx `--format json` is the raw ACP JSON-RPC stream in both
+    # directions. Only the response to acpx's own session/prompt request ends
+    # the turn; the answer is the text after the last tool call. An error
+    # response (acpx's own carry id null) is kept as the failure reason and
+    # decides only if no completion follows, since agent-to-client requests
+    # share the id space.
+    def _agy(self, o: dict) -> str | None:
+        if o.get("method") == "session/prompt" and "id" in o:
+            self._prompt_id = o["id"]
+            return None
+        update = (o.get("params") or {}).get("update") or {}
+        kind = update.get("sessionUpdate")
+        if kind == "agent_message_chunk":
+            self._buf.append((update.get("content") or {}).get("text", ""))
+            return None
+        if kind == "tool_call":
+            self._buf.clear()
+            return f"> {_clip(update.get('title') or update.get('kind') or 'tool', 120)}"
+        result = o.get("result")
+        if (self._prompt_id is not None and isinstance(result, dict)
+                and "stopReason" in result and o.get("id") == self._prompt_id):
+            reason = result["stopReason"]
+            if reason == "end_turn":
+                self.completed = True
+            else:
+                self.error = f"Agy ended without completing the review: {reason}"
+            return f"· end {reason}"
+        error = o.get("error")
+        if isinstance(error, dict) and o.get("id") in (None, self._prompt_id):
+            self._failure = _clip(str(error.get("message") or error), 300)
+            return f"! {self._failure}"
         return None
 
     # -- opencode: `run --format json` parts. The answer is the text after the
