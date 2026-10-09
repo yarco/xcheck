@@ -1,9 +1,8 @@
 """Per-harness knowledge: how to start a lane, and how to read what it streams.
 
-Every flag here was checked against the installed CLI's own help and a real
-smoke run (codex-cli 0.157.1, Claude Code 2.1.283, grok 1.0.41, acpx 0.19.4 with
-the Antigravity ACP server 1.3.0). `xcheck doctor` re-checks that each flag
-still appears in `--help`.
+Every flag here was checked against CLI help and smoke runs. Codex ACP was
+verified with codex-cli 0.162.0, the reviewed codex-acp 2.1.1 automation build,
+and acpx 0.19.4. `xcheck doctor` re-checks flags against installed help.
 
 Stream lanes print their answer as a final message; the lane runner extracts
 that text from the harness's structured stream. Grok may write scratch files
@@ -116,15 +115,7 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
     """Headless command for one lane (stream view). `work` is its workspace,
     `log` its forensic log."""
     if lane.kind == "codex":
-        argv = [
-            "codex", "exec", "--skip-git-repo-check", "--ephemeral",
-            "-s", "read-only", "-C", str(work),
-            "-m", lane.model, "-c", f'model_reasoning_effort="{lane.effort}"',
-            "-c", f'web_search="{"live" if web else "disabled"}"',
-            "-c", "check_for_update_on_startup=false",
-            "--json", "-o", str(final), "-",
-        ]
-        return Launch(argv, message)
+        return _codex_launch(lane, work, message, log, web)
     if lane.kind == "claude":
         tools = "Read,WebSearch,WebFetch" if web else "Read"
         argv = [
@@ -157,6 +148,57 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
     if lane.kind == "opencode":
         return _opencode_launch(lane, work, message, log)
     raise ValueError(f"{lane.kind} has no headless form; it runs as its app (tui)")
+
+
+CODEX_ACP_VERSION = "2.1.1"  # re-verify permissions and native events before changing
+
+
+def _codex_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    from .files import ROOT
+    base = str(log.parent.parent.parent)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", base, "--log", str(log), "--", shutil.which("codex-acp") or "codex-acp"]
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), "--model", lane.model, "--deny-all", "--auth-policy", "skip",
+            "--no-terminal", "--no-fs", "--prompt-retries", "0", "--format", "json", "exec",
+            "--config-option", "mode=read-only", "--config-option", f"reasoning_effort={lane.effort}",
+            "--file", str(message)]
+    return Launch(argv, None, env_set={
+        "XCHECK_ROOT": str(ROOT), "XCHECK_CODEX_RUN": base,
+        "XCHECK_CODEX_BINARY": shutil.which("codex") or "codex",
+        # Node drops inherited descriptors again when the adapter spawns Codex.
+        # The installed xcheck entry point rejoins the same pool before exec.
+        "CODEX_PATH": str(BIN), "INITIAL_AGENT_MODE": "read-only", "NO_BROWSER": "1",
+        "CODEX_ACP_EPHEMERAL": "1",
+        "CODEX_CONFIG": json.dumps({"model": lane.model, "model_reasoning_effort": lane.effort,
+                                     "sandbox_mode": "read-only", "approval_policy": "never",
+                                     "web_search": "live" if web else "disabled",
+                                     "check_for_update_on_startup": False,
+                                     "history": {"persistence": "none"}}),
+        "APP_SERVER_LOGS": str(log.parent / "codex-logs"),
+    })
+
+
+def codex_acp_problem() -> str | None:
+    """Only the explicitly installed, audited adapter; never an npm caret launch."""
+    if not shutil.which("codex") or not shutil.which("codex-acp"):
+        return ("startup-unavailable: codex and the reviewed codex-acp automation build must be on PATH; "
+                "see integrations/codex-acp/README.md (stock npm is insufficient)")
+    from .lane import lane_env
+    try:
+        out = subprocess.run([shutil.which("codex-acp"), "--automation-capabilities"],
+                             env=lane_env(Launch([], None, env_set={"CODEX_PATH": os.devnull}), Path.cwd()),
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"startup-unavailable: codex-acp capability probe failed ({type(exc).__name__})"
+    try:
+        features = json.loads(out.stdout)
+    except ValueError:
+        features = None
+    if out.returncode or features != {"version": CODEX_ACP_VERSION, "ephemeralSessions": True, "failedTurnErrors": True}:
+        return (f"startup-unavailable: codex-acp needs the reviewed {CODEX_ACP_VERSION} automation build "
+                "(ephemeral sessions and failed-turn errors); stock npm releases lack these controls")
+    return None
 
 
 def _opencode_model(lane: Lane) -> list[str]:
@@ -426,6 +468,8 @@ def unavailable(lane: Lane) -> str | None:
         return f"startup-unavailable: {ACPX_CONFIG} must contain a JSON object; fix or remove it"
     if set_keys := [k for k in ACPX_FORBIDDEN if k in config]:
         return f"startup-unavailable: {ACPX_CONFIG} sets {', '.join(set_keys)}; xcheck lanes need acpx defaults"
+    if lane.kind == "codex":
+        return codex_acp_problem()
     if lane.kind in ("devin", "opencode"):
         return None if shutil.which(lane.kind) else f"startup-unavailable: {lane.kind} is not on PATH"
     login = subprocess.run(AGY_LOGIN, capture_output=True).returncode
@@ -437,7 +481,7 @@ def unavailable(lane: Lane) -> str | None:
                 "opening the link it prints")
     return None
 
-STREAM_ONLY = {"agy", "devin", "opencode"}
+STREAM_ONLY = {"codex", "agy", "devin", "opencode"}
 
 
 def view_for(kind: str, view: str) -> str:
@@ -446,7 +490,7 @@ def view_for(kind: str, view: str) -> str:
 
 # Terminal limit banners an app draws and then sits on, each seen on a real
 # screen: Claude "You've hit your limit · resets 7pm (America/Los_Angeles)",
-# Codex "You hit your weekly limit." tui.py counts them for diagnosis only.
+# tui.py counts them for diagnosis only.
 # Quoted banners and silent work are indistinguishable from a stopped app
 # without a native failure signal.
 APP_LIMIT = re.compile(r"^\W*You(?:['’]ve)? hit your (?:weekly )?limit\b")
@@ -464,16 +508,6 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
             "--model", lane.model, "--effort", lane.effort, "--debug-file", str(log), message,
         ]
         return Launch(argv, None, env_set=CLAUDE_ENV)
-    if lane.kind == "codex":
-        argv = [
-            "codex", "-s", "workspace-write", "-a", "never", "-C", str(work),
-            "-m", lane.model, "-c", f'model_reasoning_effort="{lane.effort}"',
-            "-c", 'history.persistence="none"', "-c", "check_for_update_on_startup=false",
-            # The app's web switch is --search; the config key stays for "off".
-            *(["--search"] if web else ["-c", 'web_search="disabled"']),
-            message,
-        ]
-        return Launch(argv, None)
     if lane.kind == "grok":
         # The app ignores --tools (user-guide 14). Review-only file/action
         # limits are instructions; Bash and MCP run without prompts.
@@ -490,11 +524,7 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
 # Flags each adapter relies on, for `xcheck doctor` (help-text drift check).
 # Hidden-but-accepted flags are never used, so every entry must be listed.
 HELP_COMMANDS = {
-    "codex exec": (["codex", "exec", "--help"], ["--skip-git-repo-check", "--ephemeral",
-                   "--sandbox", "--cd", "--model", "--config", "--json",
-                   "--output-last-message"]),
-    "codex": (["codex", "--help"], ["--sandbox", "--ask-for-approval", "--cd", "--model",
-              "--config", "--search"]),
+    "codex app-server": (["codex", "app-server", "--help"], ["--stdio"]),
     "claude": (["claude", "--help"], ["--print", "--restricted", "--mcp-config", "--permission-mode", "--tools", "--allowedTools", "--add-dir",
                "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
                "--permission-prompts", "--include-partial-messages", "--debug-file",
@@ -529,11 +559,11 @@ class Reader:
     _buf: list[str] = field(default_factory=list)
     _last: str = ""  # grok: the last complete assistant message
     completed: bool = False
-    _notice: str | None = None  # Codex error notifications can be reconnect progress
     diagnostics: list[dict] = field(default_factory=list)
     _mcp_calls: dict[str, dict] = field(default_factory=dict)
     _prompt_id: object = None  # ACP: the JSON-RPC id of acpx's session/prompt
     _failure: str | None = None  # ACP: an error that ends the turn unless it completes anyway
+    _client_requests: set = field(default_factory=set)  # ACP request ids are scoped to each direction
 
     def notes(self) -> list[str]:
         notes = []
@@ -552,9 +582,7 @@ class Reader:
         return (self._acp if self.kind in STREAM_ONLY else getattr(self, f"_{self.kind}"))(obj)
 
     def finish(self, final_file: Path) -> None:
-        if self.kind == "codex" and not self.text.strip() and final_file.is_file():
-            self.text = final_file.read_text(encoding="utf-8", errors="replace")
-        elif self.kind == "grok":
+        if self.kind == "grok":
             self.text = "".join(self._buf) or self._last
         elif self.kind in STREAM_ONLY:
             self.text = "".join(self._buf)
@@ -565,30 +593,6 @@ class Reader:
                 self.error = _clip(head.splitlines()[0], 300)
             elif not self.completed and self._failure:
                 self.error = self._failure
-        if self.kind == "codex" and not self.text.strip() and not self.error:
-            self.error = self._notice
-
-    # -- codex: native agent_message takes precedence over the -o fallback.
-    def _codex(self, o: dict) -> str | None:
-        t = o.get("type")
-        item = o.get("item") or {}
-        if t == "turn.completed":
-            self.completed = True
-        if t == "error":
-            self._notice = o.get("message")
-            return f"! {self._notice}"
-        if t == "turn.failed":
-            self.error = (o.get("error") or {}).get("message") or self._notice or "turn.failed"
-            return f"! turn failed: {self.error}"
-        if t == "item.started" and item.get("type") == "command_execution":
-            return f"$ {item.get('command', '')}"
-        if t == "item.completed" and item.get("type") == "agent_message":
-            self.text = item.get("text", "")
-            return _clip(item.get("text", ""))
-        if t == "item.completed" and item.get("type") in ("reasoning", "web_search"):
-            return f"· {item.get('type')}"
-        return None
-
     # -- claude: stream-json; the `result` event carries the final text.
     def _claude(self, o: dict) -> str | None:
         t = o.get("type")
@@ -664,6 +668,12 @@ class Reader:
         if o.get("method") == "session/prompt" and "id" in o:
             self._prompt_id = o["id"]
             return None
+        if self.kind == "codex":
+            if "method" in o and "id" in o:
+                self._client_requests.add(o["id"])
+            elif "id" in o and o["id"] in self._client_requests:
+                self._client_requests.remove(o["id"])
+                return None
         update = (o.get("params") or {}).get("update") or {}
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
@@ -683,7 +693,11 @@ class Reader:
             return f"· end {reason}"
         error = o.get("error")
         if isinstance(error, dict) and o.get("id") in (None, self._prompt_id):
-            self._failure = _clip(str(error.get("message") or error), 300)
+            detail = error.get("data") if self.kind == "codex" else None
+            self._failure = _clip(str((detail.get("message") if isinstance(detail, dict) else detail)
+                                     or error.get("message") or error), 300)
+            if self.kind == "codex" and self._prompt_id is not None and o.get("id") == self._prompt_id:
+                self.error = self._failure
             if (self.kind == "opencode" and self._prompt_id is not None
                     and o.get("id") == self._prompt_id and (error.get("data") or {}).get("service") == "session"):
                 self.error = self._failure

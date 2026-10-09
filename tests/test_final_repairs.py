@@ -46,37 +46,17 @@ class FinalReaderRepairs(unittest.TestCase):
                 reader = adapters.Reader('codex')
                 progress = Mock()
                 progress.observe.side_effect = error
-                lane._consume(reader, json.dumps(dict(type='item.completed',
-                              item=dict(type='agent_message', text=GOOD))).encode(), progress)
-                lane._consume(reader, json.dumps(dict(type='turn.completed')).encode(), progress)
+                lane._consume(reader, json.dumps(chunk(GOOD)).encode(), progress)
+                reader.feed(PROMPT)
+                lane._consume(reader, json.dumps(rpc(id=3, result={'stopReason': 'end_turn'})).encode(), progress)
+                reader.finish(Path('/nonexistent'))
                 self.assertEqual(progress.observe.call_count, 2)
                 self.assertEqual(reader.text, GOOD)
                 self.assertIsNone(reader.error)
                 self.assertTrue(reader.completed)
                 self.assertEqual(validate.check(reader.text, support.CONTRACT)[0], 'done')
 
-    def test_codex_native_answer_survives_empty_whitespace_and_partial_o_file(self):
-        for partial in ('', ' \n\t', 'PARTIAL answer'):
-            with self.subTest(partial=partial), support.tempfile.TemporaryDirectory() as tmp:
-                final = Path(tmp) / 'final.md'
-                final.write_text(partial)
-                reader = adapters.Reader('codex')
-                reader.feed(dict(type='error', message='Reconnecting... 1/5'))
-                reader.feed(dict(type='item.completed', item=dict(type='agent_message', text=GOOD)))
-                reader.feed(dict(type='turn.completed'))
-                reader.finish(final)
-                self.assertEqual(reader.text, GOOD)
-                self.assertIsNone(reader.error)
-                self.assertTrue(reader.completed)
 
-    def test_codex_file_fallback_still_requires_answer_validation(self):
-        with support.tempfile.TemporaryDirectory() as tmp:
-            final = Path(tmp) / 'final.md'
-            final.write_text('PARTIAL answer')
-            reader = adapters.Reader('codex')
-            reader.feed(dict(type='turn.completed'))
-            reader.finish(final)
-            self.assertEqual(validate.check(reader.text, support.CONTRACT)[0], 'invalid')
 
     def test_grok_only_successful_native_turn_is_completion(self):
         for reason in ('max_tokens', 'max_turn_requests', 'refusal', 'cancelled', 'tool_use', 'unknown', None):
@@ -100,14 +80,6 @@ class FinalLifecycleRepairs(unittest.TestCase):
     make_writable = staticmethod(runtime.RuntimeHandoff.make_writable)
     assert_settled = runtime.RuntimeHandoff.assert_settled
     launch_detached = runtime.RuntimeHandoff.launch_detached
-    def test_unflushed_codex_file_keeps_native_review(self):
-        result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'codex:gpt-6.1-sol:high', '--mode', 'headless', '--skip-capacity',
-                             mode='codex-unflushed', timeout=15)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
-        self.assertEqual(row['status'], 'done', row)
-        self.assert_settled(row, 'codex')
 
     def test_server_exit_without_native_completion_cannot_publish_done(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
@@ -122,20 +94,20 @@ class FinalLifecycleRepairs(unittest.TestCase):
 
     def test_quiet_quoted_limit_survives_old_heuristic_and_native_exit_fails(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'codex:gpt-6.1-sol:high', '--mode', 'headless', '--view', 'tui',
+                             'claude:claude-opus-5-5:high', '--mode', 'headless', '--view', 'tui',
                              '--skip-capacity', mode='quoted-limit-silent', delay=18, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'done', row)
-        self.assert_settled(row, "codex")
+        self.assert_settled(row, "claude")
         self.base = support.EndToEnd.second_base(self)
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'codex:gpt-6.1-sol:high', '--mode', 'headless', '--view', 'tui',
+                             'claude:claude-opus-5-5:high', '--mode', 'headless', '--view', 'tui',
                              '--skip-capacity', mode='native-limit-exit', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'failed', row)
-        self.assert_settled(row, "codex")
+        self.assert_settled(row, "claude")
 
     def test_dead_opencode_stream_runner_is_stopped_on_reattach(self):
         lane_dir = self.launch_detached(mode='hang')
@@ -199,7 +171,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
                 with self.subTest(view=view, fault=fault):
                     if index:
                         self.base = support.EndToEnd.second_base(self)
-                    name = 'codex-gpt-6.1-sol-high' if view == 'tui' else 'opencode-space-bunny-free'
+                    name = 'claude-opus-5-5-high' if view == 'tui' else 'opencode-space-bunny-free'
                     directory = self.base / 'lanes' / name
                     directory.mkdir(parents=True)
                     (directory / 'message.txt').write_text('Review the packet')
@@ -208,7 +180,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
                     for p in ('PACKET.md', 'PROMPT.md'):
                         shutil.copy2(self.base / p, snapshot / p)
                     shutil.copytree(self.base / 'evidence', snapshot / 'evidence')
-                    current = files.Run(self.base, {name: adapters.parse_lane('codex:gpt-6.1-sol:high' if view == 'tui' else 'opencode:opencode/space-bunny-free')},
+                    current = files.Run(self.base, {name: adapters.parse_lane('claude:claude-opus-5-5:high' if view == 'tui' else 'opencode:opencode/space-bunny-free')},
                                         support.CONTRACT, False, 0, None, 'headless', 'other', 'now', {}, {},
                                         view=view, capacity=False)
                     current.save()
@@ -237,7 +209,7 @@ sys.exit(lane.run_lane(Path(sys.argv[2]), sys.argv[3]))
                         with self.assertRaises(ProcessLookupError):
                             os.kill(pid, 0)
                         self.assertIsNone(unrelated.poll())
-                        held = pools.acquire(self.root, 'codex' if view == 'tui' else 'opencode', 'next-run', time.monotonic() + 1)
+                        held = pools.acquire(self.root, 'claude' if view == 'tui' else 'opencode', 'next-run', time.monotonic() + 1)
                         self.assertIsNotNone(held)
                         if held:
                             held.release()

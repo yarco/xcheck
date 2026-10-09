@@ -28,11 +28,7 @@ class Activity:
             if isinstance(session, str):
                 self.data['session_id'] = session
         tool = None
-        if self.kind == 'codex' and event == 'item.completed':
-            item = obj.get('item') or {}
-            if item.get('type') in ('command_execution', 'mcp_tool_call', 'web_search'):
-                tool = item['type']
-        elif self.kind in STREAM_ONLY and event == 'tool_call_update':
+        if self.kind in STREAM_ONLY and event == 'tool_call_update':
             update = obj['params']['update']
             if update.get('status') == 'completed':
                 tool = update.get('kind') or 'tool'

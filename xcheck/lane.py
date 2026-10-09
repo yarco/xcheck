@@ -21,7 +21,7 @@ from contextlib import ExitStack
 
 import shutil
 
-from . import activity, adapters, capacity, pools, trust, tui, validate
+from . import activity, adapters, capacity, pools, tui, validate
 from .files import ROOT, Run, atomic_write, defer_stop, end_group, fresh_answer, hold_life, now, signal_group, workspace
 
 TUI_IDLE = 0  # terminal silence does not establish model or tool inactivity
@@ -47,11 +47,13 @@ TAIL_LINES = 40
 # GROK_TELEMETRY_* stay.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE",  # an opencode orchestrator's session; any config override breaks the free tier
-                  "ACPX_")  # acpx promotes ACPX_AUTH_<X> to <X> in the agent's environment
+                  "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_")  # adapter and client overrides must not reach a peer
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
 SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
                "GROK_SANDBOX",  # the operator's default profile; the adapter picks the lane's
-               "OLDPWD"}
+               "OLDPWD", "CODEX_PATH", "CODEX_CONFIG", "INITIAL_AGENT_MODE",
+               "DEFAULT_AUTH_REQUEST", "MODEL_PROVIDER", "APP_SERVER_LOGS", "NO_BROWSER",
+               "CODEX_SESSION_ID", "CODEX_THREAD_ID"}
 
 
 def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
@@ -327,7 +329,6 @@ def _stage(run: Run, work: Path) -> None:
 def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log: Path,
              started: float, reader: adapters.Reader, held, idle: int) -> int:
     """The harness's own interactive app, in a pty this runner owns (Herdr wall)."""
-    trust.ensure(lane.kind, work)  # no "trust this folder?" screen, ever
     spec = adapters.tui(lane, work, message.read_text(encoding="utf-8").strip(), log, run.web)
     os.set_inheritable(held.fileno(), True)  # the app holds the pool while it can spend
     answer, screen = work / "ANSWER.md", d / "screen.log"
@@ -372,6 +373,14 @@ def hold(pool: str, run_id: str, log: Path | None, argv: list[str]) -> int:
         os.dup2(fd, 2)
         os.close(fd)
     os.execv(argv[0], argv)
+
+
+def codex_app_server() -> int:
+    """CODEX_PATH target: keep the actual spender in this run's existing pool."""
+    binary, base = os.environ.get("XCHECK_CODEX_BINARY"), os.environ.get("XCHECK_CODEX_RUN")
+    if not binary or not base:
+        raise ValueError("app-server is an internal Codex ACP custody entry point")
+    return hold("codex", base, None, [binary, "app-server", "--stdio"])
 
 
 def _consume(reader: adapters.Reader, raw: bytes, progress=None) -> None:

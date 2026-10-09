@@ -18,7 +18,6 @@ import os
 import pathlib
 import sys
 import tempfile
-import tomllib
 import unittest
 
 os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = str(pathlib.Path(tempfile.gettempdir()) / "xcheck-hypothesis")
@@ -26,7 +25,7 @@ os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = str(pathlib.Path(tempfile.gettempdi
 from hypothesis import given, settings, strategies as st  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from xcheck import adapters, trust, validate  # noqa: E402
+from xcheck import adapters, validate  # noqa: E402
 
 SETTINGS = settings(database=None, deadline=None, max_examples=200)
 
@@ -185,54 +184,6 @@ class GrokReaderLaws(unittest.TestCase):
             events += [{"type": "text", "data": n}, {"type": "usage"}]
         events += [{"type": "tool_call", "toolName": "read_file", "rawInput": {}}, {"type": "end"}]
         self.assertEqual(feed_grok(events), "")
-
-
-@st.composite
-def codex_configs(draw):
-    """(text, path, canonical): canonical is the layout Codex itself writes."""
-    suffix = draw(st.from_regex(r"[a-z][a-z0-9_-]{0,30}", fullmatch=True))
-    path = "/private/tmp/agent-offload/.lanes/" + suffix
-    state = draw(st.sampled_from([None, "trusted", "untrusted"]))
-    extra = draw(st.booleans())
-    if draw(st.booleans()):
-        lines = [f'[projects."{path}"]']
-        if state is not None:
-            lines.append(f'trust_level = "{state}"')
-        if extra:
-            lines.append('model = "keep-me"')
-        return "\n".join(lines) + "\n", path, True
-    quote = draw(st.sampled_from(['"', "'"]))
-    space = draw(st.sampled_from(["", " ", "\t"]))
-    newline = draw(st.sampled_from(["\n", "\r\n"]))
-    lines = [f"{space}[{space}projects{space}.{space}{quote}{path}{quote}{space}]{space}"]
-    if state is not None:
-        value_quote = draw(st.sampled_from(['"', "'"]))
-        lines.append(f"{space}trust_level{space}={space}{value_quote}{state}{value_quote}")
-    if extra:
-        lines.append('model = "keep-me"')
-    return newline.join(lines) + (newline if draw(st.booleans()) else ""), path, False
-
-
-class CodexTrustLaws(unittest.TestCase):
-    """Either only the named project's trust changes, or nothing is written.
-    The canonical layout (what Codex and xcheck write) is always updated."""
-
-    @given(codex_configs())
-    @SETTINGS
-    def test_only_the_named_project_trust_changes_or_the_update_is_refused(self, config):
-        text, path, canonical = config
-        expected = tomllib.loads(text)
-        expected["projects"][path]["trust_level"] = "trusted"
-        try:
-            updated = trust._codex(text, [path])
-        except ValueError:
-            self.assertFalse(canonical, "a canonical table must be updated")
-            return
-        self.assertEqual(tomllib.loads(updated), expected)
-        self.assertEqual(trust._codex(updated, [path]), updated)
-
-
-
 
 
 class FreeLaneLaws(unittest.TestCase):

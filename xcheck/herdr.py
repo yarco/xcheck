@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
+from pathlib import Path
 
 MIN_WIDTH, MIN_HEIGHT = 176, 14
 WALL_RATIO = 0.62  # existing (orchestrator) pane keeps 62%
-THREAD_ID_MIN = 20  # Codex elides a title's thread id to 29 characters
+CONTEXT_HELPER = Path.home() / ".agents" / "bin" / "herdr-caller-context"
 
 
 class HerdrError(Exception):
@@ -38,9 +38,11 @@ class HerdrPlacementError(HerdrError):
         self.launched = launched
 
 
-def _herdr(*args: str, timeout: float = 15) -> dict:
+def _herdr(*args: str, ctx: dict, timeout: float = 15) -> dict:
     try:
-        p = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=timeout)
+        env = {**os.environ, "HERDR_SOCKET_PATH": ctx["socket"]}
+        p = subprocess.run(["herdr", "--session", ctx["session"], *args],
+                           env=env, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise HerdrError(f"herdr {' '.join(args[:2])}: {e}") from e
     if p.returncode != 0:
@@ -49,43 +51,26 @@ def _herdr(*args: str, timeout: float = 15) -> dict:
 
 
 def caller() -> dict | None:
-    """The caller's pane context, or None when Herdr placement is not possible.
-
-    A shell in a Herdr pane names its pane in HERDR_PANE_ID. A Codex app
-    attached to Codex's shared app-server daemon runs its tool shells as
-    daemon children, outside the pane, so they carry no HERDR_* at all; the
-    app itself still sits in the pane and writes its thread id into the
-    pane's title (`tui.terminal_title` includes "thread-id"), so the pane is
-    the one whose title holds a prefix of the shell's CODEX_THREAD_ID.
-    """
-    pane = os.environ.get("HERDR_PANE_ID") if os.environ.get("HERDR_ENV") == "1" else None
+    """Use the canonical verifier; never infer ownership from env or titles."""
     try:
-        pane = pane or _codex_pane(os.environ.get("CODEX_THREAD_ID", ""))
-        if not pane:
+        out = subprocess.run([str(CONTEXT_HELPER)], stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=30)
+        verdict = json.loads(out.stdout)
+        binding = verdict.get("binding") or {}
+        if out.returncode or verdict.get("state") != "verified":
             return None
-        area = _herdr("pane", "layout", "--pane", pane)["layout"]["area"]
+        if not all(isinstance(binding.get(k), str) and binding[k]
+                   for k in ("pane_id", "socket_path", "session", "terminal_id")):
+            return None
+        ctx = {"pane": binding["pane_id"], "socket": binding["socket_path"],
+               "session": binding["session"]}
+        area = _herdr("pane", "layout", "--pane", ctx["pane"], ctx=ctx)["layout"]["area"]
         if area["width"] < MIN_WIDTH or area["height"] < MIN_HEIGHT:
             return None
-    except (HerdrError, KeyError, TypeError, json.JSONDecodeError):
+    except (OSError, subprocess.TimeoutExpired, HerdrError, KeyError, TypeError,
+            AttributeError, json.JSONDecodeError):
         return None
-    return {"pane": pane}
-
-
-def _codex_pane(thread: str) -> str | None:
-    """The one pane whose title carries this Codex thread id, else None."""
-    if not thread:
-        return None
-    hits = {p["pane_id"] for p in _herdr("pane", "list")["panes"]
-            if _titles_thread(p.get("terminal_title_stripped") or "", thread)}
-    return hits.pop() if len(hits) == 1 else None
-
-
-def _titles_thread(title: str, thread: str) -> bool:
-    for token in re.split(r"[\s|]+", title):
-        token = token.rstrip(".\u2026")
-        if len(token) >= THREAD_ID_MIN and thread.startswith(token):
-            return True
-    return False
+    return ctx
 
 
 def place(ctx: dict, lanes: list[str], cwd: str, command_for, created) -> None:
@@ -97,31 +82,31 @@ def place(ctx: dict, lanes: list[str], cwd: str, command_for, created) -> None:
     n = len(lanes)
     if not n:
         return
-    first = _split(ctx["pane"], "right", WALL_RATIO, cwd)
+    first = _split(ctx["pane"], "right", WALL_RATIO, cwd, ctx)
     created(lanes[0], first)
-    _start(first, lanes[0], command_for)
+    _start(first, lanes[0], command_for, ctx)
     # Each `split down` of the first pane inserts the new pane directly below
     # it, so create rows for the remaining lanes in reverse to read top-down.
     for k, lane in enumerate(reversed(lanes[1:]), start=1):
-        pane = _split(first, "down", round((n - k) / (n - k + 1), 3), cwd)
+        pane = _split(first, "down", round((n - k) / (n - k + 1), 3), cwd, ctx)
         created(lane, pane)
-        _start(pane, lane, command_for)
+        _start(pane, lane, command_for, ctx)
 
 
-def _start(pane: str, lane: str, command_for) -> None:
+def _start(pane: str, lane: str, command_for, ctx: dict) -> None:
     try:
-        _herdr("pane", "rename", pane, f"xcheck:{lane}")
+        _herdr("pane", "rename", pane, f"xcheck:{lane}", ctx=ctx)
     except HerdrError as e:
         raise HerdrPlacementError(lane, False, f"pane rename rejected for {lane}: {e}") from e
     try:
-        _herdr("pane", "run", pane, "exec " + command_for(lane))
+        _herdr("pane", "run", pane, "exec " + command_for(lane), ctx=ctx)
     except HerdrError as e:
         raise HerdrPlacementError(lane, None, f"pane run failed for {lane} (delivery uncertain): {e}") from e
 
 
-def _split(target: str, direction: str, ratio: float, cwd: str) -> str:
+def _split(target: str, direction: str, ratio: float, cwd: str, ctx: dict) -> str:
     r = _herdr("pane", "split", "--pane", target, "--direction", direction,
-               "--ratio", str(ratio), "--cwd", cwd, "--no-focus")
+               "--ratio", str(ratio), "--cwd", cwd, "--no-focus", ctx=ctx)
     try:
         return r["pane"]["pane_id"]
     except KeyError as e:

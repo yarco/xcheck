@@ -34,9 +34,8 @@ def defer_stop():
 
 
 def workspace(lane: str) -> Path:
-    """A lane's working directory: the same path every run, so apps that trust
-    folders by exact path (Codex, Agy) are told once, never asked again. The
-    lane's pool lock makes it exclusive; the runner restages it each run."""
+    """A lane's stable working directory, exclusive under its pool lock.
+    The runner restages the immutable packet here each run."""
     return Path(os.path.realpath(ROOT)) / ".lanes" / lane
 
 

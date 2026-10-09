@@ -16,6 +16,24 @@ kind = Path(sys.argv[0]).name
 mode = os.environ.get("FAKE_MODE", "ok")
 argv = sys.argv[1:]
 
+if kind == "codex-acp":
+    if "--automation-capabilities" in argv:
+        print(json.dumps({"version": os.environ.get("FAKE_CODEX_ACP_VERSION", "2.1.1"),
+                          "ephemeralSessions": True, "failedTurnErrors": True}))
+        sys.exit(0)
+    if "--version" in argv:
+        print("@agentclientprotocol/codex-acp " + os.environ.get("FAKE_CODEX_ACP_VERSION", "2.1.1"))
+        sys.exit(0)
+    import subprocess
+    # Like Node, this second spawn drops the adapter's inherited pool fd.
+    child = subprocess.Popen([os.environ["CODEX_PATH"], "app-server"],
+                             stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, close_fds=True)
+    sys.exit(child.wait())
+
+if kind == "codex" and "--help" in argv:
+    print("--stdio")
+    sys.exit(0)
+
 if kind == "grok" and mode == "socket-symlink" and argv[argv.index("--sandbox") + 1] != "off":
     sys.stderr.write((Path(__file__).resolve().parent.parent / "fixtures/grok-sandbox-refusal.stderr").read_text())
     sys.exit(1)
@@ -66,7 +84,7 @@ if kind == "acpx":
         send({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
               "params": {"sessionId": "s", "prompt": [{"type": "text", "text": prompt}]}})
 
-    settings = [("model", model)] if any(Path(a).name == "opencode" for a in agent_argv) else []
+    settings = [("model", model)] if any(Path(a).name in ("opencode", "codex-acp") for a in agent_argv) else []
     settings += [tuple(argv[i + 1].split("=", 1)) for i, arg in enumerate(argv) if arg == "--config-option"]
 
     def configure():
@@ -112,7 +130,8 @@ if kind == "acpx":
     sys.exit(1)
 
 # Native ACP servers; both join pool custody, and Agy also runs in Seatbelt.
-if kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in argv and "--help" not in argv):
+if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in argv and "--help" not in argv)
+        or (kind == "codex" and os.environ.get("XCHECK_CODEX_RUN") and "app-server" in argv)):
     configured = {}
     if kind == "devin":
         selected = argv[argv.index("--model") + 1]
@@ -128,8 +147,8 @@ if kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in a
         if msg.get("method") == "initialize":
             emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1}})
         elif msg.get("method") == "session/new":
-            if kind == "opencode":
-                offered = OPENCODE_MODELS
+            if kind in ("opencode", "codex"):
+                offered = OPENCODE_MODELS if kind == "opencode" else ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"]
                 emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "configOptions": [
                     {"id": "model", "type": "select", "currentValue": offered[0], "options": [{"value": m} for m in offered]}]}})
                 continue
@@ -173,16 +192,19 @@ if kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in a
                 sys.exit(0)
             if mode in ("hang", "slow"):
                 time.sleep(60 if mode == "hang" else 4)
+            if mode == "reconnect" and kind == "codex":
+                update({"sessionUpdate": "session_info_update", "_meta": {"codex": {"error": {
+                    "message": "Reconnecting... 1/5", "willRetry": True, "turnId": "turn-fixture"}}}})
             update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Reading the packet."}})
             update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Running view_file", "kind": "read",
                     "rawInput": {"command": "SECRET command"}})
             update({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})
             emit({"jsonrpc": "2.0", "id": 7, "method": "session/request_permission",
                   "params": {"sessionId": "s", "toolCall": {"toolCallId": "t2"}}})
-            if mode in ("buffered-work", "mixed-duration"):
+            if mode == "buffered-work" or (mode == "mixed-duration" and kind != "codex"):
                 time.sleep(float(os.environ.get("FAKE_DELAY", "7")))
             if mode in ("error", "error-retry", "rate-limit-retry", "error-no-newline"):
-                message = UPSTREAM_LIMIT if kind == "opencode" else "Individual quota reached"
+                message = UPSTREAM_LIMIT if kind == "opencode" else "usage limit reached" if kind == "codex" else "Individual quota reached"
                 emit({"jsonrpc": "2.0", "id": pid, "error": {"code": -32603, "message": message,
                       "data": {"service": "session", "errorName": "APIError"}}})
                 continue

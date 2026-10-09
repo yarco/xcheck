@@ -81,7 +81,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
 
     ctx = herdr.caller() if mode in ("auto", "herdr") else None
     if mode == "herdr" and ctx is None:
-        raise RunError("Herdr placement unavailable (no caller pane: HERDR_PANE_ID or a Codex title with its thread id; tab size; or control)")
+        raise RunError("Herdr placement unavailable (caller-context helper did not verify a complete binding, tab too small, or server unreadable)")
     if orch == "grok" and ctx is None:
         # Grok's sandbox covers its whole process tree; headless lanes would
         # inherit it. Herdr panes are spawned by the Herdr server, outside it.
@@ -446,7 +446,7 @@ def agy_acp_models() -> list[str] | None:
 
 def doctor() -> int:
     """Check every adapter flag against the installed CLI's own help, and the
-    model pins against the CLIs' model lists. Config keys (codex -c ...) and
+    model pins against the CLIs' model lists. Config keys (including CODEX_CONFIG) and
     argument values are pinned by unit tests and smoke runs. Grok additionally
     probes the configured native startup without invoking a model."""
     from . import install
@@ -473,6 +473,10 @@ def doctor() -> int:
     with tempfile.TemporaryDirectory(prefix="xcheck-grok-doctor-") as tmp:
         problem = grok_startup_check(Path(tmp))
     print(f"FAIL grok: {problem}" if problem else "ok   grok: startup with --sandbox off (zero inference)")
+    bad += bool(problem)
+    problem = adapters.unavailable(adapters.DEFAULT_ROSTER[0])
+    print(f"FAIL codex: {problem}" if problem else
+          f"ok   codex: installed codex-acp {adapters.CODEX_ACP_VERSION} and Codex CLI present")
     bad += bool(problem)
     # opencode pins list under their provider (`opencode models <provider>`),
     # not one shared listing.

@@ -85,10 +85,6 @@ class LaneNames(unittest.TestCase):
 class Readers(unittest.TestCase):
     """Real streams captured from the installed CLIs."""
 
-    def test_codex_final_comes_from_o_file(self):
-        r = read_fixture("codex", "codex-ok.jsonl", FIX / "codex-ok.final.md")
-        self.assertEqual(r.text.strip().splitlines(), ["PLUM-42", "RESULT_COMPLETE"])
-        self.assertIsNone(r.error)
 
     def test_claude_result_event(self):
         r = read_fixture("claude", "claude-ok.jsonl")
@@ -105,32 +101,14 @@ class Readers(unittest.TestCase):
         self.assertNotIn("I'll read", r.text)
 
     def test_errors_are_structured(self):
-        self.assertIn("not supported", read_fixture("codex", "codex-error.jsonl").error)
-        quota = read_fixture("codex", "codex-quota.jsonl")  # a real exhausted 5 h window
-        self.assertIn("hit your usage limit", quota.error)
-        self.assertEqual(quota.text, "")
         claude = read_fixture("claude", "claude-error.jsonl")
         self.assertIn("issue with the selected model", claude.error)
         self.assertEqual(claude.text, "")  # the error message is not an answer
         self.assertIn("unknown model id", read_fixture("grok", "grok-error.jsonl").error)
 
 
-class CodexLane(unittest.TestCase):
-    def test_web_is_an_explicit_config_value_and_exec_has_no_search_flag(self):
-        for web, value in ((False, 'web_search="disabled"'), (True, 'web_search="live"')):
-            argv = adapters.launch(Lane("codex", "gpt-6.1-sol", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), web).argv
-            self.assertIn(value, argv)
-            self.assertIn("check_for_update_on_startup=false", argv)
-            self.assertNotIn("--search", argv)
 
 
-class ReviewsAreNotPersisted(unittest.TestCase):
-    def test_codex_and_claude_lanes_keep_no_session(self):
-        # Grok and Agy have no such switch; their session stores keep a copy.
-        codex = adapters.launch(Lane("codex", "gpt-6.1-sol", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), False)
-        claude = adapters.launch(Lane("claude", "claude-opus-5-5", "high"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), False)
-        self.assertIn("--ephemeral", codex.argv)
-        self.assertIn("--no-session-persistence", claude.argv)
 
 
 class GrokReader(unittest.TestCase):
@@ -323,7 +301,7 @@ class GrokLane(unittest.TestCase):
                                     ("grok", "grok-4.7", "low")):
             lane = Lane(kind, model, effort)
             stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
-            app = adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
+            app = [] if lane.kind in adapters.STREAM_ONLY else adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
             if kind == "codex":
                 self.assertNotIn("--ignore-user-config", stream)
             elif kind == "claude":
@@ -342,7 +320,7 @@ class ClaudeMcp(unittest.TestCase):
             lane = Lane("claude", "claude-sonnet-5", "low")
             with patch.object(adapters, "CLAUDE_JSON", cfg):
                 stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
-                app = adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
+                app = [] if lane.kind in adapters.STREAM_ONLY else adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
             for argv in (stream, app):
                 registered = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
                 self.assertEqual(set(registered), {"qmd", "keenable-free"})
@@ -490,37 +468,54 @@ class HerdrOwnership(unittest.TestCase):
         from xcheck import herdr
         self.herdr = herdr
 
-    def test_caller_needs_a_readable_layout_of_sufficient_size(self):
-        with patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "caller"}):
+    BINDING = {"pane_id": "caller", "socket_path": "/fixture/server.sock", "session": "verified",
+               "terminal_id": "fixture-terminal"}
+    CONTEXT = {"pane": "caller", "socket": "/fixture/server.sock", "session": "verified"}
+
+    def probe(self, state="verified", code=0, binding=None):
+        return subprocess.CompletedProcess([], code, json.dumps({"state": state,
+            "binding": self.BINDING if binding is None else binding}), "")
+
+    def test_caller_needs_a_verified_binding_and_readable_layout_of_sufficient_size(self):
+        with patch.object(self.herdr.subprocess, "run", return_value=self.probe()):
             for layout in (None, {}, {"area": {"width": 100, "height": 64}}, {"area": {"width": 210}}):
                 with self.subTest(layout=layout), patch.object(self.herdr, "_herdr", return_value={"layout": layout}):
                     self.assertIsNone(self.herdr.caller())
             with patch.object(self.herdr, "_herdr", return_value={"layout": {"area": {"width": 210, "height": 64}}}):
-                self.assertEqual(self.herdr.caller(), {"pane": "caller"})
+                self.assertEqual(self.herdr.caller(), self.CONTEXT)
 
-    def test_a_daemon_attached_codex_is_found_by_the_thread_id_in_its_pane_title(self):
-        # Codex's shared app-server runs tool shells outside the pane: no HERDR_*.
-        thread = "01a0e86e-f3a3-7591-a4c6-b827a74c7aa9"
-        panes = [{"pane_id": "shell", "terminal_title_stripped": "user@host:~/work"},
-                 {"pane_id": "other", "terminal_title_stripped": "Fix CI | main | 01a0e86e-0000-7591-a4c6-b827a..."},
-                 {"pane_id": "codex", "terminal_title_stripped": "Audit CUF | main | 01a0e86e-f3a3-7591-a4c6-b827a..."}]
+    def test_unverified_or_incomplete_identity_never_reads_or_controls_a_pane(self):
+        for state, code in (("unconfirmed", 2), ("ambiguous", 3), ("outside", 4), ("verified", 64)):
+            with self.subTest(state=state), patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "wrong"}), \
+                    patch.object(self.herdr.subprocess, "run", return_value=self.probe(state, code)), \
+                    patch.object(self.herdr, "_herdr") as api:
+                self.assertIsNone(self.herdr.caller())
+                api.assert_not_called()
+        for missing in self.BINDING:
+            binding = {k: v for k, v in self.BINDING.items() if k != missing}
+            with self.subTest(missing=missing), patch.object(self.herdr.subprocess, "run", return_value=self.probe(binding=binding)), \
+                    patch.object(self.herdr, "_herdr") as api:
+                self.assertIsNone(self.herdr.caller())
+                api.assert_not_called()
 
-        def fake(*args, **_):
-            return {"panes": panes} if args[:2] == ("pane", "list") else {"layout": {"area": {"width": 210, "height": 64}}}
+    def test_verified_binding_overrides_stale_inherited_context(self):
+        with patch.dict(os.environ, {"HERDR_PANE_ID": "wrong", "HERDR_SOCKET_PATH": "/wrong/socket"}), \
+                patch.object(self.herdr.subprocess, "run", return_value=self.probe()), \
+                patch.object(self.herdr, "_herdr", return_value={"layout": {"area": {"width": 210, "height": 64}}}) as api:
+            self.assertEqual(self.herdr.caller(), self.CONTEXT)
+            self.assertEqual(api.call_args.kwargs["ctx"], self.CONTEXT)
+            self.assertEqual(api.call_args.args, ("pane", "layout", "--pane", "caller"))
 
-        env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
-        with patch.dict(os.environ, {**env, "CODEX_THREAD_ID": thread}, clear=True), \
-                patch.object(self.herdr, "_herdr", side_effect=fake) as call:
-            self.assertEqual(self.herdr.caller(), {"pane": "codex"})
-            self.assertEqual(call.call_args.args, ("pane", "layout", "--pane", "codex"))
-            panes.append(dict(panes[2], pane_id="twin"))  # never guess between two
-            self.assertIsNone(self.herdr.caller())
-            panes[2:] = [{"pane_id": "codex", "terminal_title_stripped": "Audit CUF | 01a0e86e-f3a3..."}]
-            self.assertIsNone(self.herdr.caller())  # too short to identify a thread
+    def test_api_operations_route_to_the_verified_server(self):
+        with patch.dict(os.environ, {"HERDR_SOCKET_PATH": "/wrong/socket"}), \
+                patch.object(self.herdr.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, '{"result": {}}', "")) as api:
+            self.herdr._herdr("pane", "layout", "--pane", "caller", ctx=self.CONTEXT)
+            self.assertEqual(api.call_args.args[0], ["herdr", "--session", "verified", "pane", "layout", "--pane", "caller"])
+            self.assertEqual(api.call_args.kwargs["env"]["HERDR_SOCKET_PATH"], "/fixture/server.sock")
 
     def test_runner_replaces_the_pane_shell_so_the_pane_closes_with_it(self):
         with patch.object(self.herdr, "_herdr", return_value={}) as call:
-            self.herdr._start("p2", "lane-a", lambda lane: f"runner {lane}")
+            self.herdr._start("p2", "lane-a", lambda lane: f"runner {lane}", self.CONTEXT)
         self.assertEqual(call.call_args_list[-1].args, ("pane", "run", "p2", "exec runner lane-a"))
         self.assertFalse(hasattr(self.herdr, "close"))  # nothing closes a pane by id
 
@@ -835,65 +830,6 @@ class Installation(unittest.TestCase):
         self.assertIn("grok: missing ['--sandbox']", output.getvalue())
 
 
-class TrustFiles(unittest.TestCase):
-    def setUp(self):
-        self.dir = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.dir)
-        os.environ["CODEX_CONFIG"] = str(self.dir / "config.toml")
-        self.addCleanup(os.environ.pop, "CODEX_CONFIG")
-        from xcheck import trust
-        self.trust = trust
-
-    def test_codex_both_spellings_other_config_kept_and_idempotent(self):
-        cfg = self.dir / "config.toml"
-        cfg.write_text('model = "x"\n\n[projects."/private/tmp/agent-offload/.lanes/a"]\ntrust_level = "untrusted"\n')
-        self.assertTrue(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
-        text = cfg.read_text()
-        self.assertIn('model = "x"', text)
-        self.assertEqual(text.count('trust_level = "trusted"'), 2)
-        self.assertNotIn("untrusted", text)
-        self.assertIn('[projects."/tmp/agent-offload/.lanes/a"]', text)
-        self.assertFalse(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
-
-    def test_codex_existing_section_without_trust_gets_trusted(self):
-        cfg = self.dir / "config.toml"
-        cfg.write_text('[projects."/private/tmp/agent-offload/.lanes/a"]\nmodel = "x"\n'
-                       '[projects."/another"]\ntrust_level = "untrusted"\n')
-        self.assertTrue(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
-        text = cfg.read_text()
-        section = text.split('[projects."/another"]')[0]
-        self.assertIn('trust_level = "trusted"', section)
-        self.assertIn('model = "x"', section)
-        self.assertIn('[projects."/another"]\ntrust_level = "untrusted"', text)
-        self.assertFalse(self.trust.ensure("codex", Path("/private/tmp/agent-offload/.lanes/a")))
-
-    def test_claude_and_grok_need_nothing(self):
-        self.assertFalse(self.trust.ensure("claude", Path("/private/tmp/x")))
-        self.assertFalse((self.dir / "config.toml").exists())
-
-    def test_codex_canonical_tables_update_and_other_layouts_are_refused(self):
-        p = "/private/tmp/agent-offload/.lanes/a"
-        for original in (f'[projects."{p}"]\n', f'[projects."{p}"]\ntrust_level = "untrusted"\n',
-                         f'[projects."{p}"]\nmodel = "x"\n[projects."/unrelated"]\ntrust_level = "untrusted"\n'):
-            with self.subTest(original=original):
-                expected = tomllib.loads(original)
-                expected["projects"][p]["trust_level"] = "trusted"
-                updated = self.trust._codex(original, [p])
-                self.assertEqual(tomllib.loads(updated), expected)
-                self.assertEqual(self.trust._codex(updated, [p]), updated)
-        for original in (f"[projects.'{p}']\ntrust_level = 'untrusted'\n",
-                         f'  [ projects . "{p}" ]\ntrust_level = "untrusted"\n'):
-            with self.subTest(original=original), self.assertRaises(ValueError):
-                self.trust._codex(original, [p])
-
-    def test_codex_unsupported_layout_is_never_written(self):
-        p = "/private/tmp/agent-offload/.lanes/a"
-        cfg = self.dir / "config.toml"
-        original = f'projects = {{ "{p}" = {{ trust_level = "untrusted" }} }}\n'
-        cfg.write_text(original)
-        with self.assertRaisesRegex(ValueError, "unsupported Codex project table"):
-            self.trust.ensure("codex", Path(p))
-        self.assertEqual(cfg.read_text(), original)
 
 
 class Validation(unittest.TestCase):
@@ -1005,7 +941,7 @@ class EndToEnd(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
         self.bin = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.bin)
-        for k in (*adapters.KINDS, "acpx", "security"):
+        for k in (*adapters.KINDS, "acpx", "codex-acp", "security"):
             (self.bin / k).symlink_to(REPO / "tests" / "fake" / "harness")
         acp = self.root / "agy-acp"
         acp.mkdir()
@@ -1184,6 +1120,15 @@ class EndToEnd(unittest.TestCase):
                 break
             time.sleep(0.1)
         pids = json.loads(pids_file.read_text())
+        # Wait for the server to enter its deliberately silent turn. A killed
+        # stdout consumer during ACP setup can correctly stop acpx before spend.
+        stream = pids_file.with_name("stream.jsonl")
+        until = time.monotonic() + 5
+        while time.monotonic() < until:
+            if stream.exists() and '"method": "session/prompt"' in stream.read_text():
+                break
+            time.sleep(0.05)
+        self.assertIn('"method": "session/prompt"', stream.read_text())
         os.kill(int((self.base / "supervisor.pid").read_text()), signal.SIGKILL)
         os.kill(pids["runner"], signal.SIGKILL)
         time.sleep(0.5)
@@ -1277,34 +1222,44 @@ class EndToEnd(unittest.TestCase):
                 break
             time.sleep(0.1)
         pids = json.loads(pids_file.read_text())
+        # Wait for the server to enter its deliberately silent turn. A killed
+        # stdout consumer during ACP setup can correctly stop acpx before spend.
+        stream = pids_file.with_name("stream.jsonl")
+        until = time.monotonic() + 5
+        while time.monotonic() < until:
+            if stream.exists() and '"method": "session/prompt"' in stream.read_text():
+                break
+            time.sleep(0.05)
+        self.assertIn('"method": "session/prompt"', stream.read_text())
         os.kill(int((self.base / "supervisor.pid").read_text()), signal.SIGKILL)
         os.kill(pids["runner"], signal.SIGKILL)
-        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(pids["harness"])], capture_output=True))
+        from xcheck.files import end_group
+        self.addCleanup(end_group, pids["harness"])
         self.detach(other, "codex:gpt-6.1-sol:high", "ok")
         time.sleep(4)
         view = other / "lanes" / "codex-gpt-6.1-sol-high" / "view.log"
         self.assertIn("waiting for pool codex", view.read_text())
         self.assertFalse((other / "lanes" / "codex-gpt-6.1-sol-high" / "exit.json").exists())
-        os.kill(pids["harness"], signal.SIGKILL)  # the orphan is gone: the pool frees
+        os.killpg(pids["harness"], signal.SIGKILL)  # stop the whole ACP chain before releasing custody
         self.assertEqual(self.lane_exit(other, "codex-gpt-6.1-sol-high")["status"], "done")
 
     def test_tui_answer_closes_background_group_before_releasing_pool(self):
         from xcheck import pools
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
-                        "--lanes", "codex:gpt-6.1-sol:high", "--mode", "headless",
+                        "--lanes", "claude:claude-opus-5-5:high", "--mode", "headless",
                         "--view", "tui", "--skip-capacity", mode="bg-child")
-        work = self.root / ".lanes" / "codex-gpt-6.1-sol-high"
+        work = self.root / ".lanes" / "claude-opus-5-5-high"
         child = int((work / "background-child.pid").read_text())
         self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
-        self.assertEqual(self.lane_exit(self.base, "codex-gpt-6.1-sol-high")["status"], "done")
-        held = pools.acquire(self.root, "codex", "next-run", time.monotonic() + 1)
+        self.assertEqual(self.lane_exit(self.base, "claude-opus-5-5-high")["status"], "done")
+        held = pools.acquire(self.root, "claude", "next-run", time.monotonic() + 1)
         self.assertIsNotNone(held, "a surviving background child kept the quota lock")
         if held:
             held.release()
 
     def run_tui(self, mode, extra=()):
-        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh"
+        lanes = "claude:claude-opus-5-5:high,grok:grok-4.7:xhigh"
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--view", "tui", "--skip-capacity", *extra, mode=mode)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
@@ -1328,17 +1283,6 @@ class EndToEnd(unittest.TestCase):
         for name in rows:
             self.assertIn("fine but no proof", (self.base / f"RESULT-{name}.md").read_text())
 
-    def test_tui_lanes_are_trusted_before_they_start(self):
-        self.run_tui("ok")
-        codex = (self.root / "codex-config.toml").read_text()
-        work = os.path.realpath(self.root / ".lanes" / "codex-gpt-6.1-sol-high")
-        self.assertIn(f'[projects."{work}"]\ntrust_level = "trusted"', codex)
-        before = (self.root / "codex-config.toml").read_text()
-        other = self.second_base()
-        p = self.xcheck("run", "--base", str(other), "--orch", "other", "--lanes", "codex:gpt-6.1-sol:high",
-                        "--mode", "headless", "--view", "tui", "--skip-capacity")
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual((self.root / "codex-config.toml").read_text(), before)  # idempotent
 
     def test_tui_lanes_publish_answer_md_and_are_closed(self):
         t0 = time.time()

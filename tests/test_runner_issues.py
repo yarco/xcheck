@@ -394,7 +394,7 @@ class ReportRuntime(unittest.TestCase):
                 if view == 'tui':
                     self.base = support.EndToEnd.second_base(self)
                 result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                                     'codex:gpt-6.1-sol:high' if view == 'tui' else 'opencode:opencode/space-bunny-free', '--mode', 'headless',
+                                     'claude:claude-opus-5-5:high' if view == 'tui' else 'opencode:opencode/space-bunny-free', '--mode', 'headless',
                                      '--view', view, '--skip-capacity',
                                      mode='terminal-hang' if view == 'stream' else 'ok', timeout=15)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -403,4 +403,4 @@ class ReportRuntime(unittest.TestCase):
                 self.assertEqual(row['reason'], 'RESULT_COMPLETE')
                 self.assertEqual(row['exit_code'], -15)
                 self.assertIsNone(row['error'])
-                self.assert_settled(row, 'codex' if view == 'tui' else 'opencode')
+                self.assert_settled(row, 'claude' if view == 'tui' else 'opencode')

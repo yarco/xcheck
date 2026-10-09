@@ -80,6 +80,7 @@ def main() -> int:
     md.add_argument("--limit", type=int, default=20, help="maximum rows, undated offers then latest releases (default 20)")
     md.add_argument("--json", action="store_true", help="metadata with sources, provider docs and auth variable names")
     sub.add_parser("install")
+    sub.add_parser("app-server", help=argparse.SUPPRESS)  # codex-acp's CODEX_PATH target
     hd = sub.add_parser("hold")  # internal: acpx's agent command for an ACP lane
     hd.add_argument("--pool", required=True)
     hd.add_argument("--run", required=True)
@@ -162,6 +163,8 @@ def main() -> int:
         if a.cmd == "hold":
             argv = a.argv[1:] if a.argv[:1] == ["--"] else a.argv
             return lane.hold(a.pool, a.run, a.log, argv)
+        if a.cmd == "app-server":
+            return lane.codex_app_server()
         if a.cmd == "lane":
             return lane.run_lane(a.base.resolve(), a.lane)
     except (run.RunError, validate.PacketError, ValueError) as e:
