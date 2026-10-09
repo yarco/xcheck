@@ -18,8 +18,8 @@ xcheck doctor        # verify the installed copy, flags, and model pins
 `install` also writes `~/.codex/rules/xcheck.rules`, which lets a Codex
 orchestrator run the installed `xcheck` (`run`, `wait`, `status`, `activity`,
 `cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt. At launch,
-`xcheck` records Codex lane workspaces as trusted. Agy and Devin lanes need `acpx`
-(`npm install -g acpx`) and their native ACP server (Devin's `acp` subcommand or Antigravity's separately installed server; see the protocol note). Lane shells run
+`xcheck` records Codex lane workspaces as trusted. Agy, Devin and OpenCode lanes need `acpx`
+(`npm install -g acpx`) and their native ACP server (Devin/OpenCode's `acp` subcommands or Antigravity's separately installed server; see the protocol note). Lane shells run
 through your zsh rc files; if
 yours load secrets, they must skip that load when the lane guard variable is
 set, or keys will reach peers with shell access (the protocol note covers the

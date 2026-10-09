@@ -27,7 +27,7 @@ KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin")
 class Lane:
     kind: str
     model: str
-    effort: str = ""  # empty for agy/devin (the selector carries it); optional opencode --variant
+    effort: str = ""  # empty for agy/devin; optional OpenCode ACP effort
 
     @property
     def name(self) -> str:
@@ -101,6 +101,10 @@ def parse_lane(spec: str) -> Lane:
     return Lane(kind, model, effort)
 
 
+class Unavailable(Exception):
+    """A lane cannot start here; found while building its command, before spend."""
+
+
 @dataclass
 class Launch:
     argv: list[str]
@@ -151,36 +155,50 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
     if lane.kind == "devin":
         return _devin_launch(lane, work, message, log, web)
     if lane.kind == "opencode":
-        argv = [*opencode_sandbox(work), "opencode", "run", "--auto", *_opencode_model(lane),
-                "--dir", str(work), "--format", "json", message.read_text(encoding="utf-8").strip()]
-        return Launch(argv, None, env_set=_opencode_env(lane))
+        return _opencode_launch(lane, work, message, log)
     raise ValueError(f"{lane.kind} has no headless form; it runs as its app (tui)")
-
-
-# OpenCode's free tier serves only its stock tool set: any permission rule
-# (even `bash: deny`) is refused with 403 FreeTierError. So the tools stay
-# stock and `--auto` answers every permission ask (an unanswered ask in `run`
-# waits forever). A Seatbelt deny-write wrap was tried; `sandbox_apply` on
-# that profile fails in the lane process (exit 71) even when a trivial
-# allow-default profile applies, so the wrap is not used. The write
-# boundary is the review instruction plus OpenCode's cwd.
-def opencode_sandbox(work: Path) -> list[str]:
-    return []
-
-
-# `--variant` exists only on `opencode run`; the app has no effort flag.
-OPENCODE_APP_EFFORT = "opencode's app takes no effort (--variant is `opencode run` only); drop ':{effort}' or use --mode headless"
 
 
 def _opencode_model(lane: Lane) -> list[str]:
     model = lane.model if "/" in lane.model else f"opencode/{lane.model}"
-    return ["-m", model, *(["--variant", lane.effort] if lane.effort else [])]
+    return ["--model", model]
+
+
+def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path) -> Launch:
+    from .files import ROOT
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", str(log.parent.parent.parent), "--log", str(log), "--",
+             shutil.which("opencode") or "opencode", "acp", "--cwd", str(work)]
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), *_opencode_model(lane), "--approve-all", "--auth-policy", "skip",
+            "--no-terminal", "--no-fs", "--prompt-retries", "0", "--format", "json", "exec",
+            "--config-option", "mode=build"]
+    spec = Launch(argv, None, env_set={**_opencode_env(lane), "XCHECK_ROOT": str(ROOT)})
+    effort = lane.effort
+    if not effort:
+        # Unset, ACP selects the model's first (lowest) variant; `default`
+        # leaves the provider's own effort. Models without variants have no
+        # effort option to set.
+        from .lane import lane_env
+        from .models import client_metadata
+        model = _opencode_model(lane)[1]
+        try:
+            metadata = client_metadata(refresh=False, env=lane_env(spec, work), cwd=work)
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            raise Unavailable(f"startup-unavailable: `opencode models --verbose` failed ({_clip(str(e), 200)})") from e
+        if model not in metadata:
+            raise Unavailable(f"startup-unavailable: {model} is not in `opencode models --verbose`; "
+                              "connect its provider or pick a listed model")
+        if metadata[model].get("variants"):
+            effort = "default"
+    argv.extend([*(["--config-option", f"effort={effort}"] if effort else []), "--file", str(message)])
+    return spec
 
 
 def missing_keys(lane: Lane) -> list[str]:
     """Provider keys this lane cannot run without that are empty here. Without
-    one, `opencode run` fails with a bare "Unexpected server error"; a launchd
-    session exports ZAI_API_KEY empty."""
+    one the provider fails only at the first request with a bare server error;
+    a launchd session exports ZAI_API_KEY empty."""
     import os
     if lane.kind == "opencode" and lane.model.split("/", 1)[0].startswith("zai") and "/" in lane.model:
         return [n for n in ("ZAI_API_KEY",) if not os.environ.get(n)]
@@ -408,8 +426,8 @@ def unavailable(lane: Lane) -> str | None:
         return f"startup-unavailable: {ACPX_CONFIG} must contain a JSON object; fix or remove it"
     if set_keys := [k for k in ACPX_FORBIDDEN if k in config]:
         return f"startup-unavailable: {ACPX_CONFIG} sets {', '.join(set_keys)}; xcheck lanes need acpx defaults"
-    if lane.kind == "devin":
-        return None if shutil.which("devin") else "startup-unavailable: devin is not on PATH"
+    if lane.kind in ("devin", "opencode"):
+        return None if shutil.which(lane.kind) else f"startup-unavailable: {lane.kind} is not on PATH"
     login = subprocess.run(AGY_LOGIN, capture_output=True).returncode
     if login == 36:
         return "auth-required: the login keychain is locked; run keychain-unlock-gui at the screen"
@@ -419,7 +437,7 @@ def unavailable(lane: Lane) -> str | None:
                 "opening the link it prints")
     return None
 
-STREAM_ONLY = {"agy", "devin"}
+STREAM_ONLY = {"agy", "devin", "opencode"}
 
 
 def view_for(kind: str, view: str) -> str:
@@ -466,12 +484,6 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
             *([] if web else ["--disable-web-search"]), message,
         ]
         return Launch(argv, None, env_set=GROK_ENV)
-    if lane.kind == "opencode":
-        if lane.effort:
-            raise ValueError(OPENCODE_APP_EFFORT.format(effort=lane.effort))
-        argv = [*opencode_sandbox(work), "opencode", str(work), "--auto", *_opencode_model(lane),
-                "--prompt", message]
-        return Launch(argv, None, env_set=_opencode_env(lane))
     raise ValueError(f"unknown kind {lane.kind}")
 
 
@@ -496,8 +508,8 @@ HELP_COMMANDS = {
     "acpx": (["acpx", "--help"], ["--agent", "--cwd", "--model", "--approve-all", "--no-terminal",
              "--no-fs", "--prompt-retries", "--format", "--deny-all", "--auth-policy"]),
     "acpx exec": (["acpx", "exec", "--help"], ["--file", "--config-option"]),
-    "opencode run": (["opencode", "run", "--help"], ["--auto", "--model", "--format", "--variant", "--dir"]),
-    "opencode": (["opencode", "--help"], ["--auto", "--model", "--prompt"]),
+    "opencode acp": (["opencode", "acp", "--help"], ["--cwd"]),
+    "opencode models": (["opencode", "models", "--help"], ["--verbose"]),
     "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
                "--respect-workspace-trust"]),
     "devin acp": (["devin", "acp", "--help"], ["--model"]),
@@ -544,8 +556,6 @@ class Reader:
             self.text = final_file.read_text(encoding="utf-8", errors="replace")
         elif self.kind == "grok":
             self.text = "".join(self._buf) or self._last
-        elif self.kind == "opencode":
-            self.text = "\n".join(self._buf)
         elif self.kind in STREAM_ONLY:
             self.text = "".join(self._buf)
             head = self.text.lstrip()
@@ -674,27 +684,11 @@ class Reader:
         error = o.get("error")
         if isinstance(error, dict) and o.get("id") in (None, self._prompt_id):
             self._failure = _clip(str(error.get("message") or error), 300)
+            if (self.kind == "opencode" and self._prompt_id is not None
+                    and o.get("id") == self._prompt_id and (error.get("data") or {}).get("service") == "session"):
+                self.error = self._failure
             return f"! {self._failure}"
         return None
-
-    # -- opencode: `run --format json` parts. The answer is the text after the
-    # last tool call, so narration between tool calls is never the answer.
-    def _opencode(self, o: dict) -> str | None:
-        t, part = o.get("type"), o.get("part") or {}
-        if t == "step_finish" and part.get("reason") in ("stop", "length"):
-            self.completed = True
-        if t == "text":
-            self._buf.append(part.get("text", ""))
-            return _clip(part.get("text", ""))
-        if t == "tool_use":
-            self._buf.clear()
-            return f"> {part.get('tool')} {_clip(json.dumps((part.get('state') or {}).get('input')), 100)}"
-        if t == "error":
-            err = o.get("error") or {}
-            self.error = (err.get("data") or {}).get("message") or err.get("name") or "error"
-            return f"! {self.error}"
-        return None
-
 
 def _clip(s: str, n: int = 160) -> str:
     s = re.sub(r"\s+", " ", s or "").strip()

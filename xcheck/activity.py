@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .files import atomic_write, is_alive, now, workspace
+from .adapters import STREAM_ONLY
 
 
 class Activity:
@@ -17,23 +18,21 @@ class Activity:
 
     def observe(self, obj):
         event = obj.get('type')
-        if self.kind in ('agy', 'devin'):  # ACP JSON-RPC: name the update, call or response
+        if self.kind in STREAM_ONLY:  # ACP JSON-RPC: name the update, call or response
             update = (obj.get('params') or {}).get('update') or {}
             event = update.get('sessionUpdate') or obj.get('method') or ('error' if 'error' in obj else 'result')
         at = now()
         self.data.update(events=self.data['events'] + 1, last_event=event, observed_at=at)
-        if self.kind == 'opencode' and isinstance(obj.get('sessionID'), str):
-            self.data['session_id'] = obj['sessionID']
+        if self.kind == 'opencode':
+            session = (obj.get('params') or {}).get('sessionId') or (obj.get('result') or {}).get('sessionId')
+            if isinstance(session, str):
+                self.data['session_id'] = session
         tool = None
-        if self.kind == 'opencode' and event == 'tool_use':
-            part = obj.get('part') or {}
-            if (part.get('state') or {}).get('status') == 'completed':
-                tool = part.get('tool')
-        elif self.kind == 'codex' and event == 'item.completed':
+        if self.kind == 'codex' and event == 'item.completed':
             item = obj.get('item') or {}
             if item.get('type') in ('command_execution', 'mcp_tool_call', 'web_search'):
                 tool = item['type']
-        elif self.kind in ('agy', 'devin') and event == 'tool_call_update':
+        elif self.kind in STREAM_ONLY and event == 'tool_call_update':
             update = obj['params']['update']
             if update.get('status') == 'completed':
                 tool = update.get('kind') or 'tool'

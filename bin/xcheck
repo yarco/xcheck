@@ -13,7 +13,7 @@
   xcheck models [--provider ID] [--json] discover recent zero-price coding models
   xcheck install              publish a read-only copy as `xcheck` on PATH (+ Codex rule)
   xcheck lane   --base B --lane NAME   (internal: run one lane)
-  xcheck hold   --pool P --run B -- CMD (internal: an Agy lane's agent command)
+  xcheck hold   --pool P --run B -- CMD (internal: an ACP lane's agent command)
 
 See Multi-Agent Cross-Check Protocol.md for the protocol.
 """
@@ -80,7 +80,7 @@ def main() -> int:
     md.add_argument("--limit", type=int, default=20, help="maximum rows, undated offers then latest releases (default 20)")
     md.add_argument("--json", action="store_true", help="metadata with sources, provider docs and auth variable names")
     sub.add_parser("install")
-    hd = sub.add_parser("hold")  # internal: acpx's agent command for an Agy lane
+    hd = sub.add_parser("hold")  # internal: acpx's agent command for an ACP lane
     hd.add_argument("--pool", required=True)
     hd.add_argument("--run", required=True)
     hd.add_argument("--log", type=Path)

@@ -249,7 +249,7 @@ class FreeLaneLaws(unittest.TestCase):
         self.assertEqual(lane.model, model)
         self.assertEqual(lane.effort, effort)
         args = adapters._opencode_model(lane)
-        self.assertEqual(args[args.index("-m") + 1], model)
+        self.assertEqual(args[args.index("--model") + 1], model)
         self.assertNotIn(":", lane.name)
         self.assertNotIn("/", lane.name)
 

@@ -149,9 +149,9 @@ def fetch(url: str, *, as_json: bool = True):
     return json.loads(body) if as_json else body
 
 
-def client_metadata() -> dict:
-    listing = subprocess.run(["opencode", "models", "--verbose", "--refresh"],
-                             capture_output=True, text=True, timeout=60, check=True)
+def client_metadata(*, refresh: bool = True, env: dict | None = None, cwd: Path | None = None) -> dict:
+    listing = subprocess.run(["opencode", "models", "--verbose", *(["--refresh"] if refresh else [])],
+                             env=env, cwd=cwd, capture_output=True, text=True, timeout=60, check=True)
     decoder = json.JSONDecoder()
     remaining = listing.stdout.strip()
     result = {}

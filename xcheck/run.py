@@ -88,15 +88,11 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         raise RunError("a Grok orchestrator must use Herdr mode (headless lanes would run in its sandbox)")
     mode = "herdr" if ctx else "headless"
     view = ("tui" if mode == "herdr" else "stream") if view == "auto" else view
-    for l in lanes:
-        if l.kind == "opencode" and l.effort and view == "tui":
-            raise RunError(adapters.OPENCODE_APP_EFFORT.format(effort=l.effort))
     try:
         (base / ".launched").mkdir()
     except FileExistsError:
         raise RunError(f"{base} was already launched; use `xcheck wait` or a fresh BASE")
-    # Zero means each runner chooses its own view's default. Agy always uses
-    # its app, even when the run's other lanes use the stream view.
+    # Zero means each runner chooses its own view's default.
     idle = idle or 0
 
     try:

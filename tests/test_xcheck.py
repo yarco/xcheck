@@ -156,37 +156,36 @@ class OpencodeLane(unittest.TestCase):
     LANE = Lane("opencode", "muse-spark-1.3-contributor-free")
 
     def test_answer_is_the_text_after_the_last_tool_call(self):
+        r = read_fixture("opencode", "opencode-acp-ok.jsonl")
+        self.assertTrue(r.completed)
+        self.assertIn("VERDICT", r.text)
+        self.assertIn("Darwin", r.text)
+        self.assertNotIn("Reading the packet", r.text)
         r = adapters.Reader("opencode")
-        for line in (REPO / "tests" / "fixtures" / "opencode-ok.jsonl").read_text().splitlines():
-            r.feed(json.loads(line))
-        r.finish(Path("/nonexistent"))
-        self.assertEqual(r.text, "1) VERDICT: readable.\n6) PROOF: MANIFEST_TAIL_TOKEN: 0123abcd\nRESULT_COMPLETE")
-        r = adapters.Reader("opencode")
-        r.feed({"type": "error", "error": {"name": "APIError", "data": {"message": "free usage exceeded"}}})
+        r.feed({"id": 3, "method": "session/prompt"})
+        r.feed({"id": 3, "error": {"message": "free usage exceeded", "data": {"service": "session"}}})
         self.assertEqual(r.error, "free usage exceeded")
 
     def test_stock_tools_auto_approved_without_a_seatbelt_wrap(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        from xcheck import models
+        with tempfile.TemporaryDirectory() as tmp, patch.object(models, "client_metadata", return_value={
+                "opencode/muse-spark-1.3-contributor-free": {"variants": {"high": {}}}}):
             work, msg = Path(tmp).resolve(), Path(tmp) / "m.txt"
             msg.write_text("review\n")
-            for argv in (adapters.launch(self.LANE, work, msg, work / "f", work / "l", True).argv,
-                         adapters.tui(self.LANE, work, "review", work / "l", True).argv):
-                self.assertEqual(argv[0], "opencode")
-                self.assertNotIn("sandbox-exec", argv)
-                self.assertIn("--auto", argv)
-                self.assertIn("opencode/muse-spark-1.3-contributor-free", argv)
-                self.assertNotIn("--agent", argv)
+            argv = adapters.launch(self.LANE, work, msg, work / "f", work / "l", True).argv
+            self.assertIn("--approve-all", argv)
+            self.assertIn("--no-terminal", argv)
+            self.assertIn("--no-fs", argv)
+            self.assertIn("opencode/muse-spark-1.3-contributor-free", argv)
+            self.assertIn("opencode", argv[argv.index("--agent") + 1])
         glm = Lane("opencode", "zai-coding-plan/glm-5.3", "high")
         with tempfile.TemporaryDirectory() as tmp:
             work, msg = Path(tmp).resolve(), Path(tmp) / "m.txt"
             msg.write_text("review\n")
             argv = adapters.launch(glm, work, msg, work / "f", work / "l", True).argv
             self.assertIn("zai-coding-plan/glm-5.3", argv)
-            self.assertIn("--variant", argv)
-            self.assertEqual(argv[argv.index("--variant") + 1], "high")
-            # The app has no --variant: an explicit effort is refused, never dropped.
-            with self.assertRaisesRegex(ValueError, "--variant is `opencode run` only"):
-                adapters.tui(glm, work, "review", work / "l", True)
+            self.assertIn("effort=high", argv)
+            self.assertEqual(adapters.view_for("opencode", "tui"), "stream")
 
     def test_opt_in_has_no_protocol_meter(self):
         from xcheck import capacity
@@ -1073,12 +1072,13 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse((self.base / ".launched").exists())
         self.assertEqual({r["status"] for r in self.run_lanes().values()}, {"done"})
 
-    def test_opencode_effort_in_the_app_view_is_refused_before_launch(self):
+    def test_opencode_effort_uses_the_acp_stream_in_the_app_placement(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
-                        "--view", "tui", "--skip-capacity", "--lanes", "opencode:zai-coding-plan/glm-5.3:high")
-        self.assertEqual(p.returncode, 2)
-        self.assertIn("--variant is `opencode run` only", p.stderr)
-        self.assertFalse((self.base / ".launched").exists())
+                        "--view", "tui", "--skip-capacity", "--lanes", "opencode:opencode/muse-spark-1.3-contributor-free:high")
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
+        self.assertEqual(row["status"], "done", row)
+        self.assertTrue((self.base / "lanes" / row["lane"] / "stream.jsonl").exists())
 
     def test_orchestrator_kind_is_never_a_peer(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",
@@ -1304,7 +1304,7 @@ class EndToEnd(unittest.TestCase):
             held.release()
 
     def run_tui(self, mode, extra=()):
-        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,opencode:muse-spark-1.3-contributor-free"
+        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh"
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--view", "tui", "--skip-capacity", *extra, mode=mode)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)

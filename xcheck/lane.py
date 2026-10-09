@@ -218,7 +218,10 @@ def _run_lane(base: Path, name: str) -> int:
         if view == "tui":
             return _run_tui(run, name, lane, d, work, message, log, started, reader, held, idle)
 
-        spec = adapters.launch(lane, work, message, final, log, run.web)
+        try:
+            spec = adapters.launch(lane, work, message, final, log, run.web)
+        except adapters.Unavailable as e:
+            return _finish(run, name, started, "skipped", str(e), None, reader, err_path)
         env = lane_env(spec, work)
         status, reason, code = None, "", None
         with ExitStack() as stack:

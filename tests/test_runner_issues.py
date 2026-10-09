@@ -20,6 +20,9 @@ import test_xcheck as support
 import test_runtime_e2e as runtime
 from xcheck import adapters, capacity, install, lane, run
 
+# The fake OpenCode server's native upstream rate-limit error (tests/fake/harness).
+UPSTREAM_LIMIT = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
+
 
 class ReportStartup(unittest.TestCase):
     def probe(self, result):
@@ -204,8 +207,11 @@ class ReportMeters(unittest.TestCase):
         self.assertIn('run grok once', reading.note)
         self.assertNotIn('fixture-token', reading.note)
 
-    def test_qwen_real_retryable_error_is_neither_answer_nor_completion(self):
-        reader = support.read_fixture('opencode', 'opencode-qwen-rate-limit.jsonl')
+    def test_retryable_upstream_error_is_neither_answer_nor_completion(self):
+        reader = adapters.Reader('opencode')
+        reader.feed({'id': 3, 'method': 'session/prompt'})
+        reader.feed({'id': 3, 'error': {'message': UPSTREAM_LIMIT,
+                                     'data': {'service': 'session', 'errorName': 'APIError'}}})
         self.assertIn('temporarily rate-limited upstream', reader.error)
         self.assertEqual(reader.text, '')
         self.assertFalse(reader.completed)
@@ -367,15 +373,14 @@ class ReportRuntime(unittest.TestCase):
         self.assertIn('MCP startup optional-fake: needs-auth', row['reason'])
         self.assertEqual(row['diagnostics'][0]['kind'], 'mcp_startup')
 
-    def test_real_retryable_qwen_error_stops_child_and_releases_its_pool(self):
+    def test_retryable_upstream_error_stops_child_and_releases_its_pool(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
                              'opencode:openrouter/qwen/qwen3.8-27b:free', '--mode', 'headless',
                              '--view', 'stream', '--skip-capacity', mode='rate-limit-retry', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
-        event = json.loads((support.FIX / 'opencode-qwen-rate-limit.jsonl').read_text())
         self.assertEqual(row['status'], 'failed', row)
-        self.assertEqual(row['reason'], event['error']['data']['message'])
+        self.assertEqual(row['reason'], UPSTREAM_LIMIT)
         self.assertEqual(row['error'], row['reason'])
         self.assertFalse((self.base / f"RESULT-{row['lane']}.md").exists())
         self.assert_settled(row, 'opencode-openrouter')
@@ -389,7 +394,7 @@ class ReportRuntime(unittest.TestCase):
                 if view == 'tui':
                     self.base = support.EndToEnd.second_base(self)
                 result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                                     'opencode:opencode/space-bunny-free', '--mode', 'headless',
+                                     'codex:gpt-6.1-sol:high' if view == 'tui' else 'opencode:opencode/space-bunny-free', '--mode', 'headless',
                                      '--view', view, '--skip-capacity',
                                      mode='terminal-hang' if view == 'stream' else 'ok', timeout=15)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -398,4 +403,4 @@ class ReportRuntime(unittest.TestCase):
                 self.assertEqual(row['reason'], 'RESULT_COMPLETE')
                 self.assertEqual(row['exit_code'], -15)
                 self.assertIsNone(row['error'])
-                self.assert_settled(row)
+                self.assert_settled(row, 'codex' if view == 'tui' else 'opencode')

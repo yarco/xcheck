@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import test_xcheck as support
 import test_runtime_e2e as runtime
+from test_agy_acp import PROMPT, chunk, rpc
 from xcheck import adapters, files, pools, run, validate
 
 GOOD = f"1) VERDICT: The reviewed contract holds.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n"
@@ -108,33 +109,33 @@ class FinalLifecycleRepairs(unittest.TestCase):
         self.assertEqual(row['status'], 'done', row)
         self.assert_settled(row, 'codex')
 
-    def test_zero_exit_without_native_completion_cannot_publish_done(self):
+    def test_server_exit_without_native_completion_cannot_publish_done(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
                              'opencode:opencode/space-bunny-free', '--mode', 'headless', '--skip-capacity',
                              mode='text-only', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'failed', row)
-        self.assertIn('without native completion', row['reason'])
+        self.assertEqual(row['reason'], 'agent disconnected')  # acpx's own error for the lost server
         self.assertIn('RESULT_COMPLETE', (self.base / f"RESULT-{row['lane']}.md").read_text())
         self.assert_settled(row)
 
     def test_quiet_quoted_limit_survives_old_heuristic_and_native_exit_fails(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'opencode:opencode/space-bunny-free', '--mode', 'headless', '--view', 'tui',
+                             'codex:gpt-6.1-sol:high', '--mode', 'headless', '--view', 'tui',
                              '--skip-capacity', mode='quoted-limit-silent', delay=18, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'done', row)
-        self.assert_settled(row)
+        self.assert_settled(row, "codex")
         self.base = support.EndToEnd.second_base(self)
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'opencode:opencode/space-bunny-free', '--mode', 'headless', '--view', 'tui',
+                             'codex:gpt-6.1-sol:high', '--mode', 'headless', '--view', 'tui',
                              '--skip-capacity', mode='native-limit-exit', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'failed', row)
-        self.assert_settled(row)
+        self.assert_settled(row, "codex")
 
     def test_dead_opencode_stream_runner_is_stopped_on_reattach(self):
         lane_dir = self.launch_detached(mode='hang')
@@ -198,7 +199,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
                 with self.subTest(view=view, fault=fault):
                     if index:
                         self.base = support.EndToEnd.second_base(self)
-                    name = 'opencode-space-bunny-free'
+                    name = 'codex-gpt-6.1-sol-high' if view == 'tui' else 'opencode-space-bunny-free'
                     directory = self.base / 'lanes' / name
                     directory.mkdir(parents=True)
                     (directory / 'message.txt').write_text('Review the packet')
@@ -207,7 +208,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
                     for p in ('PACKET.md', 'PROMPT.md'):
                         shutil.copy2(self.base / p, snapshot / p)
                     shutil.copytree(self.base / 'evidence', snapshot / 'evidence')
-                    current = files.Run(self.base, {name: adapters.parse_lane('opencode:opencode/space-bunny-free')},
+                    current = files.Run(self.base, {name: adapters.parse_lane('codex:gpt-6.1-sol:high' if view == 'tui' else 'opencode:opencode/space-bunny-free')},
                                         support.CONTRACT, False, 0, None, 'headless', 'other', 'now', {}, {},
                                         view=view, capacity=False)
                     current.save()
@@ -236,7 +237,7 @@ sys.exit(lane.run_lane(Path(sys.argv[2]), sys.argv[3]))
                         with self.assertRaises(ProcessLookupError):
                             os.kill(pid, 0)
                         self.assertIsNone(unrelated.poll())
-                        held = pools.acquire(self.root, 'opencode', 'next-run', time.monotonic() + 1)
+                        held = pools.acquire(self.root, 'codex' if view == 'tui' else 'opencode', 'next-run', time.monotonic() + 1)
                         self.assertIsNotNone(held)
                         if held:
                             held.release()
@@ -303,10 +304,8 @@ class FinalSettlementRepairs(unittest.TestCase):
                     self.base = support.EndToEnd.second_base(self)
                 current = self.current()
                 name = next(iter(current.lanes))
-                events = [dict(type='text', part=dict(text=GOOD)),
-                          dict(type='step_finish', part=dict(reason='stop'))]
-                if failure:
-                    events.append(dict(type='error', error=dict(data=dict(message='upstream failure'))))
+                events = [PROMPT, chunk(GOOD), rpc(id=3, error=dict(message='upstream failure', data=dict(service='session')))
+                          if failure else rpc(id=3, result=dict(stopReason='end_turn'))]
                 (current.lane_dir(name) / 'stream.jsonl').write_text('\n'.join(map(json.dumps, events)))
                 with patch.object(run, 'fresh_answer', return_value=None):
                     run._settle_dead_runner(current, name)
