@@ -110,7 +110,7 @@ class Launch:
 
 def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: bool) -> Launch:
     """Headless command for one lane (stream view). `work` is its workspace,
-    `log` its forensic log. Agy has no headless form: see `tui`."""
+    `log` its forensic log."""
     if lane.kind == "codex":
         argv = [
             "codex", "exec", "--skip-git-repo-check", "--ephemeral",
@@ -148,6 +148,8 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
         return Launch(argv, None, env_set=GROK_ENV)
     if lane.kind == "agy":
         return _agy_launch(lane, work, message, log, web)
+    if lane.kind == "devin":
+        return _devin_launch(lane, work, message, log, web)
     if lane.kind == "opencode":
         argv = [*opencode_sandbox(work), "opencode", "run", "--auto", *_opencode_model(lane),
                 "--dir", str(work), "--format", "json", message.read_text(encoding="utf-8").strip()]
@@ -213,16 +215,10 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
 GROK_ENV = {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"}
 GROK_SANDBOX_ARGS = ("--sandbox", "off")
 
-# Devin: override any shell default for DEVIN_PERMISSION_MODE. The
-# lane must accept workspace edits (ANSWER.md) without a prompt. accept-edits
-# still prompts for every shell command, web fetch and MCP call, and a prompt
-# hangs the app (I3), so the overlay allows those tools by rule; edits outside
-# the workspace keep prompting. Packet mode denies fetches instead.
-# --sandbox / DEVIN_SANDBOX isolate the exec-tool child from
-# ~/.local/share/devin/credentials.toml, which made the app ask to "use local
-# credentials". Stored login is the auth; the review instruction is the write
-# boundary.
-DEVIN_ENV = {"DEVIN_PERMISSION_MODE": "accept-edits"}
+# Native accept-edits keeps the app path's workspace-edit permissions. Rules
+# approve shell/MCP/fetch; acpx denies any remaining permission request. The
+# shell's workspace limit is still an instruction, as it was in the app path.
+DEVIN_ENV = {"DEVIN_PERMISSION_MODE": "accept-edits", "DEVIN_REFUSAL_FALLBACK": "", "DEVIN_SANDBOX": "false"}
 DEVIN_USER_CONFIG = Path.home() / ".config/devin/config.json"
 
 
@@ -232,7 +228,7 @@ DEVIN_FETCH = ["Fetch(https://*/*)", "Fetch(http://*/*)"]
 
 def _devin_config(path: Path, web: bool) -> Path:
     """Operator config with hooks removed, beside the harness log.
-    --config replaces the whole file: stripping login/setup made the app
+    --config replaces the whole file: stripping login/setup made the client
     ask to use local credentials. Empty hooks only, so moshi/Herdr
     PermissionRequest cannot hang the lane (I3). Never --cloud."""
     src: dict = {}
@@ -247,6 +243,21 @@ def _devin_config(path: Path, web: bool) -> Path:
         perms["deny"] = [*perms.get("deny", []), *DEVIN_FETCH]
     path.write_text(json.dumps(src), encoding="utf-8")
     return path
+
+
+def _devin_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    from .files import ROOT
+    config = _devin_config(log.with_name("devin-config.json"), web)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", str(log.parent.parent.parent), "--log", str(log), "--",
+             shutil.which("devin") or "devin", "--config", str(config), "--permission-mode", "accept-edits",
+             "--respect-workspace-trust", "false", "acp", "--model", lane.model]
+    # ACP collapses SWE-2 variants to swe-2-high plus thought_level. Passing
+    # swe-2-max through acpx's --model rejects it or resets the native effort.
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), "--deny-all", "--auth-policy", "skip", "--no-terminal", "--no-fs",
+            "--prompt-retries", "0", "--format", "json", "exec", "--config-option", "mode=accept-edits", "--file", str(message)]
+    return Launch(argv, None, env_set={**DEVIN_ENV, "DEVIN_MODEL": lane.model, "XCHECK_ROOT": str(ROOT)})
 
 # Claude reviews register only local readers and the two keyless retrieval
 # endpoints. --allowedTools pre-approves calls; it is not a tool allowlist.
@@ -383,11 +394,11 @@ def _agy_profile(path: Path, work: Path, home: Path, uv: Path) -> Path:
 
 def unavailable(lane: Lane) -> str | None:
     """Why this lane cannot start here, before admission; None when it can."""
-    if lane.kind != "agy":
+    if lane.kind not in STREAM_ONLY:
         return None
     if not shutil.which("acpx"):
         return "startup-unavailable: acpx is not on PATH; install it with npm install -g acpx"
-    if not AGY_ACP_SERVER.is_file():
+    if lane.kind == "agy" and not AGY_ACP_SERVER.is_file():
         return f"startup-unavailable: {AGY_ACP_SERVER} is missing; run agy-acp-server-update"
     try:
         config = json.loads(ACPX_CONFIG.read_text()) if ACPX_CONFIG.exists() else {}
@@ -397,6 +408,8 @@ def unavailable(lane: Lane) -> str | None:
         return f"startup-unavailable: {ACPX_CONFIG} must contain a JSON object; fix or remove it"
     if set_keys := [k for k in ACPX_FORBIDDEN if k in config]:
         return f"startup-unavailable: {ACPX_CONFIG} sets {', '.join(set_keys)}; xcheck lanes need acpx defaults"
+    if lane.kind == "devin":
+        return None if shutil.which("devin") else "startup-unavailable: devin is not on PATH"
     login = subprocess.run(AGY_LOGIN, capture_output=True).returncode
     if login == 36:
         return "auth-required: the login keychain is locked; run keychain-unlock-gui at the screen"
@@ -406,16 +419,12 @@ def unavailable(lane: Lane) -> str | None:
                 "opening the link it prints")
     return None
 
-# Devin `-p` prints plain text and the stream reader only parses JSON, so Devin
-# always runs as its app and answers in ANSWER.md. Agy runs only through its ACP
-# server (see _agy_launch): it has no app view here.
-APP_ONLY = {"devin"}
-STREAM_ONLY = {"agy"}
+STREAM_ONLY = {"agy", "devin"}
 
 
 def view_for(kind: str, view: str) -> str:
     """The view a lane of `kind` actually runs in, given the run's view."""
-    return "tui" if kind in APP_ONLY else "stream" if kind in STREAM_ONLY else view
+    return "stream" if kind in STREAM_ONLY else view
 
 # Terminal limit banners an app draws and then sits on, each seen on a real
 # screen: Claude "You've hit your limit · resets 7pm (America/Los_Angeles)",
@@ -463,14 +472,6 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
         argv = [*opencode_sandbox(work), "opencode", str(work), "--auto", *_opencode_model(lane),
                 "--prompt", message]
         return Launch(argv, None, env_set=_opencode_env(lane))
-    if lane.kind == "devin":
-        argv = [
-            "devin", "--config", str(_devin_config(log.with_name("devin-config.json"), web)),
-            "--permission-mode", "accept-edits",
-            "--respect-workspace-trust", "false", "--model", lane.model,
-            "--", message,
-        ]
-        return Launch(argv, None, env_set={**DEVIN_ENV, "DEVIN_MODEL": lane.model})
     raise ValueError(f"unknown kind {lane.kind}")
 
 
@@ -493,12 +494,13 @@ HELP_COMMANDS = {
     # agy itself only serves the capacity meter (`agy -p /usage`); lanes run acpx.
     "agy": (["agy", "--help"], ["--output-format", "--print-timeout"]),
     "acpx": (["acpx", "--help"], ["--agent", "--cwd", "--model", "--approve-all", "--no-terminal",
-             "--no-fs", "--prompt-retries", "--format"]),
-    "acpx exec": (["acpx", "exec", "--help"], ["--file"]),
+             "--no-fs", "--prompt-retries", "--format", "--deny-all", "--auth-policy"]),
+    "acpx exec": (["acpx", "exec", "--help"], ["--file", "--config-option"]),
     "opencode run": (["opencode", "run", "--help"], ["--auto", "--model", "--format", "--variant", "--dir"]),
     "opencode": (["opencode", "--help"], ["--auto", "--model", "--prompt"]),
     "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
                "--respect-workspace-trust"]),
+    "devin acp": (["devin", "acp", "--help"], ["--model"]),
 }
 
 
@@ -518,8 +520,8 @@ class Reader:
     _notice: str | None = None  # Codex error notifications can be reconnect progress
     diagnostics: list[dict] = field(default_factory=list)
     _mcp_calls: dict[str, dict] = field(default_factory=dict)
-    _prompt_id: object = None  # agy: the JSON-RPC id of acpx's session/prompt
-    _failure: str | None = None  # agy: an error that ends the turn unless it completes anyway
+    _prompt_id: object = None  # ACP: the JSON-RPC id of acpx's session/prompt
+    _failure: str | None = None  # ACP: an error that ends the turn unless it completes anyway
 
     def notes(self) -> list[str]:
         notes = []
@@ -535,7 +537,7 @@ class Reader:
 
     def feed(self, obj: dict) -> str | None:
         """Consume one stream object; return a short human line for the view."""
-        return getattr(self, f"_{self.kind}")(obj)
+        return (self._acp if self.kind in STREAM_ONLY else getattr(self, f"_{self.kind}"))(obj)
 
     def finish(self, final_file: Path) -> None:
         if self.kind == "codex" and not self.text.strip() and final_file.is_file():
@@ -544,12 +546,12 @@ class Reader:
             self.text = "".join(self._buf) or self._last
         elif self.kind == "opencode":
             self.text = "\n".join(self._buf)
-        elif self.kind == "agy":
+        elif self.kind in STREAM_ONLY:
             self.text = "".join(self._buf)
             head = self.text.lstrip()
             # The server reports an MCP server that will not start as the whole
             # answer of a turn that still ends end_turn.
-            if re.fullmatch(r"The MCP server '[^'\n]+' failed to initialize[^\n]*", head.strip()):
+            if self.kind == "agy" and re.fullmatch(r"The MCP server '[^'\n]+' failed to initialize[^\n]*", head.strip()):
                 self.error = _clip(head.splitlines()[0], 300)
             elif not self.completed and self._failure:
                 self.error = self._failure
@@ -642,13 +644,13 @@ class Reader:
             return f"· end {reason}"
         return None
 
-    # -- agy: acpx `--format json` is the raw ACP JSON-RPC stream in both
+    # -- ACP lanes: acpx `--format json` is the raw ACP JSON-RPC stream in both
     # directions. Only the response to acpx's own session/prompt request ends
     # the turn; the answer is the text after the last tool call. An error
     # response (acpx's own carry id null) is kept as the failure reason and
     # decides only if no completion follows, since agent-to-client requests
     # share the id space.
-    def _agy(self, o: dict) -> str | None:
+    def _acp(self, o: dict) -> str | None:
         if o.get("method") == "session/prompt" and "id" in o:
             self._prompt_id = o["id"]
             return None
@@ -667,7 +669,7 @@ class Reader:
             if reason == "end_turn":
                 self.completed = True
             else:
-                self.error = f"Agy ended without completing the review: {reason}"
+                self.error = f"{self.kind.title()} ended without completing the review: {reason}"
             return f"· end {reason}"
         error = o.get("error")
         if isinstance(error, dict) and o.get("id") in (None, self._prompt_id):

@@ -39,17 +39,22 @@ if kind == "acpx":
     import shlex
     import subprocess
     if "--help" in argv:
-        print("--agent --cwd --model --approve-all --no-terminal --no-fs --prompt-retries --format --file")
+        print("--agent --cwd --model --approve-all --deny-all --auth-policy --no-terminal --no-fs --prompt-retries --format --file --config-option")
         sys.exit(0)
     agent = subprocess.Popen(shlex.split(argv[argv.index("--agent") + 1]), cwd=argv[argv.index("--cwd") + 1],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    model = argv[argv.index("--model") + 1]
+    agent_argv = shlex.split(argv[argv.index("--agent") + 1])
+    model = argv[argv.index("--model") + 1] if "--model" in argv else agent_argv[agent_argv.index("--model") + 1]
     prompt = Path(argv[argv.index("--file") + 1]).read_text() if "--file" in argv else argv[-1]
 
     def send(msg):
         emit(msg)
         agent.stdin.write(json.dumps(msg) + "\n")
         agent.stdin.flush()
+
+    def send_prompt():
+        send({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+              "params": {"sessionId": "s", "prompt": [{"type": "text", "text": prompt}]}})
 
     send({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1}})
     for line in agent.stdout:
@@ -63,19 +68,28 @@ if kind == "acpx":
                 emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message":
                       f'Cannot apply --model "{model}": Available models: {", ".join(offered)}'}})
                 sys.exit(1)
-            send({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
-                  "params": {"sessionId": "s", "prompt": [{"type": "text", "text": prompt}]}})
+            if "--config-option" in argv:
+                key, value = argv[argv.index("--config-option") + 1].split("=", 1)
+                send({"jsonrpc": "2.0", "id": 5, "method": "session/set_config_option",
+                      "params": {"sessionId": "s", "configId": key, "value": value}})
+            else:
+                send_prompt()
+        elif msg.get("id") == 5 and "result" in msg:
+            send_prompt()
         elif msg.get("method") == "session/request_permission":
-            send({"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": {"outcome": "selected", "optionId": "allow"}}})
+            send({"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": {"outcome": "selected", "optionId": "deny" if "--deny-all" in argv else "allow"}}})
         elif msg.get("id") == 2:
             sys.exit(0 if "result" in msg else 1)
     emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "agent disconnected"}})
     sys.exit(1)
 
-# Antigravity's ACP server, run by acpx through `xcheck hold` and sandbox-exec.
-if kind == "agy_acp_server.par":
+# Native ACP servers; both join pool custody, and Agy also runs in Seatbelt.
+if kind == "agy_acp_server.par" or (kind == "devin" and "acp" in argv and "--help" not in argv):
+    if kind == "devin":
+        selected = argv[argv.index("--model") + 1]
     if os.environ.get("FAKE_ENV_DUMP"):
-        Path("env.agy.json").write_text(json.dumps(dict(os.environ)))  # Seatbelt: only the workspace
+        path = Path("env.agy.json") if kind == "agy_acp_server.par" else Path(os.environ["FAKE_ENV_DUMP"]).with_suffix(".devin.json")
+        path.write_text(json.dumps(dict(os.environ)))  # Agy's Seatbelt: only the workspace
 
     def update(u):
         emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": u}})
@@ -86,14 +100,17 @@ if kind == "agy_acp_server.par":
             emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1}})
         elif msg.get("method") == "session/new":
             emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "models": {
-                "currentModelId": "gemini-3.8-flash-high", "availableModels": [
+                "currentModelId": selected if kind == "devin" else "gemini-3.8-flash-high", "availableModels":
+                    [{"modelId": selected}] if kind == "devin" else [
                     {"modelId": "gemini-3.8-flash-high"}, {"modelId": "gemini-pro-agent"}]}}})
+        elif msg.get("method") == "session/set_config_option":
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"configOptions": []}})
         elif msg.get("method") == "session/prompt":
             pid = msg["id"]
             tail = [l for l in Path("evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
             reply = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {tail}\nRESULT_COMPLETE\n"
             if mode == "custody":  # what the spender holds, sees and may write
-                busy = Path(os.environ["XCHECK_ROOT"]) / ".pools" / "agy-gemini" / "busy"
+                busy = Path(os.environ["XCHECK_ROOT"]) / ".pools" / ("devin" if kind == "devin" else "agy-gemini") / "busy"
                 held = []
                 for fd in range(3, 256):
                     try:
@@ -109,6 +126,9 @@ if kind == "agy_acp_server.par":
                 Path("probe.json").write_text(json.dumps({
                     "holds_busy": held, "wrote_outside": wrote_outside,
                     "gemini_home": os.environ.get("GEMINI_HOME"),
+                    "devin_mode": os.environ.get("DEVIN_PERMISSION_MODE"),
+                    "devin_fallback": os.environ.get("DEVIN_REFUSAL_FALLBACK"),
+                    "devin_sandbox": os.environ.get("DEVIN_SANDBOX"),
                     "acpx_env": sorted(k for k in os.environ if k.startswith("ACPX_"))}))
             if mode in ("hang", "slow"):
                 time.sleep(60 if mode == "hang" else 4)

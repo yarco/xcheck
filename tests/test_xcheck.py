@@ -226,7 +226,7 @@ class SleepingMac(unittest.TestCase):
 class DevinLane(unittest.TestCase):
     LANE = Lane("devin", "swe-2-max")
 
-    def test_app_only_accepts_edits_inside_sandbox_never_cloud(self):
+    def test_acp_review_keeps_the_native_model_pin_and_login_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp).resolve()
             log = work / "l"
@@ -237,21 +237,27 @@ class DevinLane(unittest.TestCase):
                 "shell": {"setup_complete": True},
             }))
             with patch.object(adapters, "DEVIN_USER_CONFIG", user):
-                argv = adapters.tui(self.LANE, work, "review", log, True).argv
-            self.assertEqual(argv[0], "devin")
+                spec = adapters.launch(self.LANE, work, work / "message", work / "final", log, True)
+            import shlex
+            argv = shlex.split(spec.argv[spec.argv.index("--agent") + 1])
+            self.assertIn("hold", argv)
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "accept-edits")
             self.assertNotIn("--sandbox", argv)
             self.assertEqual(argv[argv.index("--respect-workspace-trust") + 1], "false")
             self.assertEqual(argv[argv.index("--model") + 1], "swe-2-max")
             self.assertNotIn("--cloud", argv)
-            self.assertEqual(argv[-2:], ["--", "review"])
+            self.assertNotIn("--agent-type", argv)
+            self.assertIn("mode=accept-edits", spec.argv)
+            self.assertNotIn("--model", spec.argv)
+            self.assertIn("--deny-all", spec.argv)
+            self.assertEqual(spec.env_set["DEVIN_REFUSAL_FALLBACK"], "")
             overlay = log.with_name("devin-config.json")
             self.assertFalse((work / ".xcheck-devin-config.json").exists())
             cfg = json.loads(overlay.read_text())
             self.assertEqual(cfg["hooks"], {})
             self.assertEqual(cfg["devin"], {"org_id": "org-test"})
             self.assertEqual(cfg["shell"], {"setup_complete": True})
-            self.assertIn("devin", adapters.APP_ONLY)
+            self.assertEqual(adapters.view_for("devin", "tui"), "stream")
 
     def test_overlay_pre_approves_what_accept_edits_would_prompt_for(self):
         # accept-edits prompts for shell, fetch and MCP; a prompt hangs the lane (I3)
@@ -261,14 +267,14 @@ class DevinLane(unittest.TestCase):
             user.write_text(json.dumps({"permissions": {"allow": ["Exec(ls)"], "deny": ["Exec(sudo)"]}}))
             # both overlays land beside the log: read each right after its call
             with patch.object(adapters, "DEVIN_USER_CONFIG", user):
-                adapters.tui(self.LANE, work, "review", work / "live", True)
+                adapters._devin_config(work / "devin-config.json", True)
             live = json.loads((work / "devin-config.json").read_text())["permissions"]
             self.assertEqual(live["allow"][0], "Exec(ls)")
             for rule in ("exec", "mcp__*", "Fetch(https://*/*)"):
                 self.assertIn(rule, live["allow"])
             self.assertEqual(live["deny"], ["Exec(sudo)"])
             with patch.object(adapters, "DEVIN_USER_CONFIG", user):
-                adapters.tui(self.LANE, work, "review", work / "packet", False)
+                adapters._devin_config(work / "devin-config.json", False)
             packet = json.loads((work / "devin-config.json").read_text())["permissions"]
             self.assertIn("exec", packet["allow"])
             self.assertNotIn("Fetch(https://*/*)", packet["allow"])

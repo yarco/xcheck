@@ -8,7 +8,7 @@ Arguments:
 Options:
   -V, --version                           output the version number
   --agent <command>                       Raw ACP agent command (escape hatch)
-  --cwd <dir>                             Working directory (default: "/private/tmp")
+  --cwd <dir>                             Working directory (default: "/tmp/review-workspace")
   --auth-policy <policy>                  Authentication policy: skip or fail when auth is required
   --approve-all                           Auto-approve all permission requests
   --approve-reads                         Auto-approve read/search requests and prompt for writes
