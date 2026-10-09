@@ -4,7 +4,7 @@ Each pool has one free meter that runs no inference:
 
   codex   `codex app-server` JSON-RPC `account/rateLimits/read`  (5 h and weekly windows)
   claude  Anthropic OAuth usage endpoint, token from the login keychain
-  grok    Grok CLI billing, credits view (the TUI's "weekly limit left")
+  grok    credits meter: CLI billing view, else GetGrokCreditsConfig used-percent
   agy     `agy -p /usage --output-format json` (a client-side command: zero turns)
   opencode opt-in (no protocol meter)
   devin   opt-in (no protocol meter)
@@ -24,6 +24,7 @@ import os
 import re
 import select
 import signal
+import struct
 import subprocess
 import time
 import urllib.error
@@ -249,6 +250,11 @@ def _claude_manual() -> dict[str, float] | None:
 # ------------------------------------------------------------------ grok
 
 
+GROK_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+GROK_WEB_CREDITS_URL = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
+GROK_REJECTED = "Grok token rejected: run grok once to refresh it, or grok login"
+
+
 def _grok(lane: Lane) -> dict[str, float]:
     try:
         records = json.loads((Path.home() / ".grok" / "auth.json").read_text(encoding="utf-8"))
@@ -259,13 +265,23 @@ def _grok(lane: Lane) -> dict[str, float]:
         raise LoginRequired("no Grok login: run grok login")
     key = max(logins, key=lambda r: str(r.get("create_time", "")))["key"]
     # A rejected token may only be stale: running `grok` once refreshes it.
-    windows = grok_windows(_get("https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+    windows = grok_windows(_get(GROK_CREDITS_URL,
                                {"Authorization": f"Bearer {key}", "X-XAI-Token-Auth": "xai-grok-cli"},
-                               "Grok token rejected: run grok once to refresh it, or grok login"))
+                               GROK_REJECTED))
+    if windows:
+        return windows
+    # The CLI credits view can name the weekly period and the balances without
+    # a usage percent. Balances are not a quota. The same token's credits
+    # config, the one behind /usage, still carries the used-percent.
+    windows = grok_web_windows(_post(GROK_WEB_CREDITS_URL, {
+        "Authorization": f"Bearer {key}", "Origin": "https://grok.com",
+        "Referer": "https://grok.com/?_s=usage", "Accept": "*/*",
+        "Content-Type": "application/grpc-web+proto", "x-grpc-web": "1",
+        "x-user-agent": "connect-es/2.1.1",
+    }, b"\x00\x00\x00\x00\x00", GROK_REJECTED))
     if not windows:
-        # The native unified-billing response can contain only period and
-        # balance fields. Zero prepaid/on-demand balances establish no quota.
-        raise ValueError("Grok credits view supplied neither creditUsagePercent nor GrokBuild usagePercent; "
+        raise ValueError("Grok credits view supplied neither creditUsagePercent nor GrokBuild usagePercent, "
+                         "and GetGrokCreditsConfig supplied no used-percent; "
                          "quota reserve cannot be verified. Check Grok /usage and recheck "
                          "xcheck capacity --lanes grok:grok-4.7:xhigh before a fresh run")
     return windows
@@ -281,6 +297,98 @@ def grok_windows(payload: dict) -> dict[str, float]:
     if config.get("creditUsagePercent") is not None:
         windows[f"{period or 'period'} credits"] = 100.0 - float(config["creditUsagePercent"])
     return windows  # keep every window until judge validates it, then takes the minimum
+
+
+def grok_web_windows(data: bytes) -> dict[str, float]:
+    """Used-percent from GetGrokCreditsConfig. Left = 100 − the highest one.
+
+    A gRPC-web data frame holds the credits config. Each fixed32 whose field
+    number is 1 and whose value is inside 0..100 is a used-percent, and the
+    worse one binds. The trailer frame is status only. A frame that is not a
+    clean protobuf message, or a message with no in-range percent, supplies
+    nothing: bytes are not scanned for a percent, and balances are not consulted.
+    """
+    frames: list[bytes] = []
+    index = 0
+    while index + 5 <= len(data):
+        length = int.from_bytes(data[index + 1:index + 5], "big")
+        end = index + 5 + length
+        if end > len(data):
+            return {}
+        if data[index] & 0x80 == 0:
+            frames.append(data[index + 5:end])
+        index = end
+    if index != len(data):
+        return {}
+    used: list[float] = []
+    for frame in frames:
+        found = _grok_used_percents(frame)
+        if found is None:
+            return {}
+        used.extend(found)
+    if not used:
+        return {}
+    return {"weekly credits": 100.0 - max(used)}
+
+
+def _grok_used_percents(data: bytes, depth: int = 0) -> list[float] | None:
+    """Field-1 used-percents, or None when this buffer is not a clean message.
+
+    Length-delimited bytes that are not themselves a clean message are opaque.
+    They contribute no percent and do not fail the message around them.
+    """
+    found: list[float] = []
+    index = 0
+    while index < len(data):
+        parsed = _varint(data, index)
+        if parsed is None or parsed[0] == 0:
+            return None
+        key, index = parsed
+        field, wire = key >> 3, key & 0x07
+        if wire == 0:
+            nxt = _varint(data, index)
+            if nxt is None:
+                return None
+            _, index = nxt
+        elif wire == 1:
+            if index + 8 > len(data):
+                return None
+            index += 8
+        elif wire == 2:
+            nxt = _varint(data, index)
+            if nxt is None:
+                return None
+            length, index = nxt
+            end = index + length
+            if end > len(data):
+                return None
+            if depth < 4:
+                nested = _grok_used_percents(data[index:end], depth + 1)
+                if nested is not None:
+                    found.extend(nested)
+            index = end
+        elif wire == 5:
+            if index + 4 > len(data):
+                return None
+            value = struct.unpack_from("<f", data, index)[0]
+            index += 4
+            if field == 1 and math.isfinite(value) and 0.0 <= value <= 100.0:
+                found.append(float(value))
+        else:
+            return None
+    return found
+
+
+def _varint(data: bytes, index: int) -> tuple[int, int] | None:
+    value = shift = 0
+    while index < len(data) and shift < 64:
+        byte = data[index]
+        index += 1
+        value |= (byte & 0x7F) << shift
+        if byte & 0x80 == 0:
+            return value, index
+        shift += 7
+    return None
 
 
 # ------------------------------------------------------------------ agy
@@ -319,10 +427,20 @@ def agy_windows(data: dict, model: str) -> dict[str, float]:
 
 
 def _get(url: str, headers: dict, rejected: str, *, timeout: float = TIMEOUT) -> dict:
-    req = urllib.request.Request(url, headers={**headers, "User-Agent": "xcheck-capacity/2"})
+    return json.loads(_read(url, headers, rejected, timeout=timeout))
+
+
+def _post(url: str, headers: dict, body: bytes, rejected: str, *, timeout: float = TIMEOUT) -> bytes:
+    return _read(url, headers, rejected, body=body, timeout=timeout)
+
+
+def _read(url: str, headers: dict, rejected: str, *, body: bytes | None = None,
+          timeout: float = TIMEOUT) -> bytes:
+    req = urllib.request.Request(url, data=body, headers={**headers, "User-Agent": "xcheck-capacity/2"},
+                                 method="POST" if body is not None else "GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+            return r.read()
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise LoginRequired(rejected) from None

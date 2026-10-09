@@ -1,12 +1,14 @@
 """Regressions from the settled 2026-10-02 runner report; no live inference.
 
-Grok fixture: same-day native credits view, quota/balance fields only.
+Grok fixtures: a CLI credits view with balance fields only, and a
+GetGrokCreditsConfig frame captured 2026-10-09 (used-percent 2), stored as hex.
 Qwen fixture: acceptance run's native error, without identifiers or headers.
 """
 
 import json
 import io
 import os
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -109,15 +111,20 @@ class ReportStartup(unittest.TestCase):
 
 
 class ReportMeters(unittest.TestCase):
-    def grok_reading(self, payload):
+    def grok_reading(self, payload, web=b''):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home / '.grok').mkdir()
             (home / '.grok/auth.json').write_text(json.dumps({'test': {'key': 'fixture-token'}}))
             with patch.object(capacity.Path, 'home', return_value=home), \
-                    patch.object(capacity, '_get', return_value=payload) as get:
+                    patch.object(capacity, '_get', return_value=payload) as get, \
+                    patch.object(capacity, '_post', return_value=web) as post:
                 reading = capacity.read(adapters.Lane('grok', 'grok-4.7', 'xhigh'))
-            get.assert_called_once()  # no alternate meter or retry
+            get.assert_called_once()
+            if capacity.grok_windows(payload):
+                post.assert_not_called()
+            else:
+                post.assert_called_once()
             return reading
 
     def test_grok_missing_percentages_names_the_native_meter_gap(self):
@@ -127,6 +134,7 @@ class ReportMeters(unittest.TestCase):
         self.assertFalse(reading.ok)
         self.assertIn('creditUsagePercent', reading.note)
         self.assertIn('GrokBuild usagePercent', reading.note)
+        self.assertIn('GetGrokCreditsConfig', reading.note)
         self.assertIn('xcheck capacity', reading.note)
         self.assertNotIn('fixture-token', reading.note)
 
@@ -135,6 +143,56 @@ class ReportMeters(unittest.TestCase):
         self.assertEqual(self.grok_reading(payload).status, 'eligible')
         payload['config']['creditUsagePercent'] = 95
         self.assertEqual(self.grok_reading(payload).status, 'reserve-low')
+
+    def test_grok_web_credits_config_supplies_the_missing_percent(self):
+        payload = json.loads((support.FIX / 'capacity/grok-no-quota.json').read_text())
+        web = bytes.fromhex((support.FIX / 'capacity/grok-web-credits.hex').read_text())
+        reading = self.grok_reading(payload, web)
+        self.assertEqual(reading.status, 'eligible', reading.note)
+        self.assertIn('98% left', reading.note)
+        self.assertEqual(capacity.grok_web_windows(web), {'weekly credits': 98.0})
+        self.assertEqual(capacity.grok_web_windows(b''), {})
+        self.assertEqual(capacity.grok_web_windows(b'not a frame'), {})
+        worse = bytes([0x0D]) + struct.pack('<f', 2.0) + bytes([0x0D]) + struct.pack('<f', 40.0)
+        worse = bytes([0]) + len(worse).to_bytes(4, 'big') + worse
+        self.assertEqual(capacity.grok_web_windows(worse), {'weekly credits': 60.0})
+
+    def test_grok_web_unclean_frame_supplies_no_percent(self):
+        # Illegal wire type, then a field-1 float of 0. Scanning ahead would
+        # read that as 100% left and admit the lane.
+        dirty_body = bytes([0x0F, 0x0D]) + struct.pack('<f', 0.0)
+        dirty = bytes([0]) + len(dirty_body).to_bytes(4, 'big') + dirty_body
+        self.assertEqual(capacity.grok_web_windows(dirty), {})
+        clean_body = bytes([0x0D]) + struct.pack('<f', 0.0)
+        clean = bytes([0]) + len(clean_body).to_bytes(4, 'big') + clean_body
+        self.assertEqual(capacity.grok_web_windows(clean), {'weekly credits': 100.0})
+        garbage = bytes([0x0F, 0x0D]) + struct.pack('<f', 0.0)
+        body = bytes([0x0D]) + struct.pack('<f', 40.0) + bytes([0x12, len(garbage)]) + garbage
+        frame = bytes([0]) + len(body).to_bytes(4, 'big') + body
+        self.assertEqual(capacity.grok_web_windows(frame), {'weekly credits': 60.0})
+
+    def test_grok_web_used_percent_still_applies_the_reserve(self):
+        payload = json.loads((support.FIX / 'capacity/grok-no-quota.json').read_text())
+        # Field 1, wire type 5: a used-percent of 95, inside one data frame.
+        body = bytes([0x0D]) + struct.pack('<f', 95.0)
+        frame = bytes([0]) + len(body).to_bytes(4, 'big') + body
+        reading = self.grok_reading(payload, frame)
+        self.assertEqual(reading.status, 'reserve-low', reading.note)
+        self.assertIn('5% left', reading.note)
+
+    def test_rejected_grok_web_token_is_auth_required(self):
+        payload = json.loads((support.FIX / 'capacity/grok-no-quota.json').read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / '.grok').mkdir()
+            (home / '.grok/auth.json').write_text(json.dumps({'test': {'key': 'fixture-token'}}))
+            with patch.object(capacity.Path, 'home', return_value=home), \
+                    patch.object(capacity, '_get', return_value=payload), \
+                    patch.object(capacity, '_post', side_effect=capacity.LoginRequired(capacity.GROK_REJECTED)):
+                reading = capacity.read(adapters.Lane('grok', 'grok-4.7', 'xhigh'))
+        self.assertEqual(reading.status, 'auth-required')
+        self.assertIn('run grok once', reading.note)
+        self.assertNotIn('fixture-token', reading.note)
 
     def test_qwen_real_retryable_error_is_neither_answer_nor_completion(self):
         reader = support.read_fixture('opencode', 'opencode-qwen-rate-limit.jsonl')
