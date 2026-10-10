@@ -1,0 +1,16 @@
+{"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "acpx", "version": "0.19.4"}}}
+{"jsonrpc": "2.0", "id": 0, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true, "mcpCapabilities": {"http": true, "sse": true}, "auth": {}}, "authMethods": [{"id": "cached_token", "name": "cached_token"}]}}
+{"jsonrpc": "2.0", "method": "_x.ai/mcp/servers_updated", "params": {"mcpServers": [{"name": "qmd", "source": "local", "type": "http", "url": "http://127.0.0.1:8181/mcp"}, {"name": "semble", "source": "local", "type": "stdio"}, {"name": "deepwiki", "source": "local", "type": "http", "url": "https://mcp.deepwiki.com/mcp"}]}}
+{"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {"cwd": "/lane/workspace", "mcpServers": [], "_meta": {"claudeCode": {"options": {"model": "grok-4.7"}}}}}
+{"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1", "models": {"currentModelId": "grok-4.7", "availableModels": [{"modelId": "grok-4.7", "name": "Grok 4.7"}]}, "configOptions": [{"id": "reasoning_effort", "type": "select", "currentValue": "xhigh", "options": [{"value": "low"}, {"value": "medium"}, {"value": "high"}, {"value": "xhigh"}]}]}}
+{"jsonrpc": "2.0", "id": 2, "method": "session/set_config_option", "params": {"sessionId": "s1", "configId": "reasoning_effort", "value": "xhigh"}}
+{"jsonrpc": "2.0", "id": 2, "result": {"configOptions": [{"id": "reasoning_effort", "type": "select", "currentValue": "xhigh", "options": []}]}}
+{"jsonrpc": "2.0", "method": "_x.ai/mcp/server_status", "params": {"sessionId": "s1", "name": "qmd", "source": "local", "status": "ready", "reason": "initialized"}}
+{"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "s1", "prompt": [{"type": "text", "text": "review packet"}]}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "I will read the packet first"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "I'll read the packet."}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "read_file", "rawInput": {"target_file": "/lane/workspace/PACKET.md"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed", "kind": "read"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "session_info_update", "title": "Grok Review Packet"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: MANIFEST_TAIL_TOKEN: 0123abcd\nRESULT_COMPLETE\n"}}}}
+{"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn", "_meta": {"sessionId": "s1", "totalTokens": 20149, "modelId": "grok-4.7"}}}

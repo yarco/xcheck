@@ -62,6 +62,36 @@ class Reader(unittest.TestCase):
         r = read([PROMPT, rpc(id=2, result={"stopReason": "end_turn"}), chunk("draft")])
         self.assertFalse(r.completed)
 
+    def test_an_error_reply_to_an_agent_request_never_ends_the_turn(self):
+        # The agent's request reuses the prompt's id; the client's error reply
+        # answers the agent request, not the prompt.
+        r = read([PROMPT, rpc(id=3, method="session/request_permission", params={"sessionId": "s"}),
+                  rpc(id=3, error={"code": -32603, "message": "permission denied"}),
+                  chunk("the answer"), rpc(id=3, result={"stopReason": "end_turn"})])
+        self.assertTrue(r.completed)
+        self.assertIsNone(r.error)
+        self.assertEqual(r.text, "the answer")
+
+    def test_an_error_answering_the_prompt_is_terminal_at_once(self):
+        # No result can legally follow an RPC error for the same request, so
+        # the runner may kill the harness without waiting for a timeout.
+        for kind in ("agy", "devin", "opencode", "grok"):
+            with self.subTest(kind=kind):
+                r = adapters.Reader(kind)
+                r.feed(PROMPT)
+                r.feed(rpc(id=3, error={"code": -32603, "message": "upstream refused"}))
+                self.assertEqual(r.error, "upstream refused")
+
+    def test_an_acpx_level_error_stays_deferred_to_completion(self):
+        # id null is acpx's own carry (agent disconnected); a completion may
+        # still supersede it, so it is not the live error.
+        r = adapters.Reader("agy")
+        r.feed(PROMPT)
+        r.feed(rpc(id=None, error={"code": -32603, "message": "agent disconnected"}))
+        self.assertIsNone(r.error)
+        r.finish(Path("/nonexistent"))
+        self.assertEqual(r.error, "agent disconnected")
+
     def test_completion_requires_an_observed_non_null_prompt_id(self):
         for response in (rpc(result={"stopReason": "end_turn"}),
                          rpc(id=None, result={"stopReason": "end_turn"})):
@@ -77,11 +107,18 @@ class Reader(unittest.TestCase):
         self.assertIsNone(r.error)
         self.assertEqual(support.validate.check(r.text, support.CONTRACT)[0], "done")
 
-    def test_an_error_on_a_shared_id_yields_to_a_later_completion(self):
-        r = read([PROMPT, rpc(id=3, error={"code": -32601, "message": "Method not found"}),
-                  chunk("answer"), rpc(id=3, result={"stopReason": "end_turn"})])
-        self.assertTrue(r.completed)
-        self.assertIsNone(r.error)
+    def test_an_untracked_error_on_the_prompt_id_is_terminal(self):
+        # A shared-id error is ambiguous only while an agent request holds the
+        # id — those replies are consumed by correlation. An untracked error
+        # answering the client's prompt admits no later result for that
+        # request, so it is terminal at once, not at stream end; the runner's
+        # error-first check makes it the lane's failure.
+        r = adapters.Reader("agy")
+        r.feed(PROMPT)
+        r.feed(rpc(id=3, error={"code": -32601, "message": "Method not found"}))
+        self.assertEqual(r.error, "Method not found")
+        r.feed(rpc(id=3, result={"stopReason": "end_turn"}))
+        self.assertEqual(r.error, "Method not found")
 
     def test_an_acpx_error_without_completion_is_the_failure(self):
         r = read([PROMPT, chunk("partial"), rpc(id=None, error={"code": -32070, "message": "agent disconnected"})])

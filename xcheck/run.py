@@ -450,7 +450,7 @@ def doctor() -> int:
     argument values are pinned by unit tests and smoke runs. Grok additionally
     probes the configured native startup without invoking a model."""
     from . import install
-    from .lane import grok_startup_check
+    from .lane import grok_admission_check
     bad = 0
     root, current = install.source_root(), install.installed_digest()
     source = install.digest(root) if root and root.is_dir() else None
@@ -471,7 +471,7 @@ def doctor() -> int:
         print(f"{'FAIL' if missing else 'ok  '} {kind}: " + (f"missing {missing}" if missing else f"{len(flags)} flags present"))
         bad += bool(missing)
     with tempfile.TemporaryDirectory(prefix="xcheck-grok-doctor-") as tmp:
-        problem = grok_startup_check(Path(tmp))
+        problem = grok_admission_check(Path(tmp))
     print(f"FAIL grok: {problem}" if problem else "ok   grok: startup with --sandbox off (zero inference)")
     bad += bool(problem)
     problem = adapters.unavailable(adapters.DEFAULT_ROSTER[0])

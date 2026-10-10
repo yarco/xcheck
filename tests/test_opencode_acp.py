@@ -30,8 +30,12 @@ class Reader(unittest.TestCase):
         self.assertFalse(reader.completed)
 
     def test_shared_id_error_without_session_provenance_can_still_complete(self):
+        # A shared id is safe only while the agent's request owns it: the
+        # client's error reply is correlated to that request and the later
+        # prompt result completes. An untracked prompt-id error is terminal.
         reader = adapters.Reader("opencode")
-        for event in (PROMPT, rpc(id=3, error={"message": "client permission denied"}), chunk("answer"),
+        for event in (PROMPT, rpc(id=3, method="session/request_permission", params={"sessionId": "s"}),
+                      rpc(id=3, error={"message": "client permission denied"}), chunk("answer"),
                       rpc(id=3, result={"stopReason": "end_turn"})):
             reader.feed(event)
         reader.finish(Path("/nonexistent"))

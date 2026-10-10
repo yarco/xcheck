@@ -1,0 +1,7 @@
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"auth":{}},"authMethods":[{"id":"cached_token","name":"cached_token"}]}}
+{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/lane/workspace","mcpServers":[]}}
+{"jsonrpc":"2.0","id":1,"result":{"sessionId":"s1","models":{"currentModelId":"grok-4.7","availableModels":[{"modelId":"grok-4.7"}]}}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[{"type":"text","text":"review packet"}]}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I'll read the packet."}}}}
+{"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"unknown model id: grok-9.9"}}

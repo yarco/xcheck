@@ -43,8 +43,7 @@ TAIL_LINES = 40
 # default socket, so the lane points HERDR_SOCKET_PATH at a path that cannot
 # exist and every herdr call inside a lane finds no server.
 # Provider API keys are removed unless the selected OpenCode provider needs
-# its own configured authentication. User preferences such as
-# GROK_TELEMETRY_* stay.
+# its own configured authentication.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE",  # an opencode orchestrator's session; any config override breaks the free tier
                   "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_",  # adapter and client overrides must not reach a peer
@@ -55,21 +54,28 @@ SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_"
                   # ANTHROPIC_API_KEY is already caught by the *_API_KEY suffix
                   # rule; CLAUDE_CODE_* covers the USE_BEDROCK/VERTEX switches.
                   "ANTHROPIC_", "AGENT_PROXY_", "CCR_", "CLAUDE_GATEWAY_")
+SCRUB_KIND = {"grok": ("GROK_",)}
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
 SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
-               "GROK_SANDBOX",  # the operator's default profile; the adapter picks the lane's
                "OLDPWD", "CODEX_PATH", "CODEX_CONFIG", "INITIAL_AGENT_MODE",
                "DEFAULT_AUTH_REQUEST", "MODEL_PROVIDER", "APP_SERVER_LOGS", "NO_BROWSER",
                "CODEX_SESSION_ID", "CODEX_THREAD_ID",
                # Vertex/Bedrock region selectors without an ANTHROPIC_/CLAUDE_CODE_
                # prefix; inert once the USE_* switches are scrubbed, but they name
                # paid endpoints so they stay out of a subscription lane anyway.
-               "CLOUD_ML_REGION", "GOOGLE_CLOUD_PROJECT"}
+               "CLOUD_ML_REGION", "GOOGLE_CLOUD_PROJECT",
+               # GROK_* names that reconfigure or redirect a Grok subprocess:
+               # inert to the named peers, but a peer's shell tool could pass
+               # them to a nested grok. Harmless operator pins still inherit.
+               "GROK_SANDBOX", "GROK_HOME", "GROK_AUTH_PATH", "GROK_CONFIG",
+               "GROK_CONFIG_DIR", "GROK_MANAGED_CONFIG_DIR", "GROK_AGENT_PROFILE",
+               "GROK_MODEL", "GROK_REASONING_EFFORT", "GROK_TOOLS"}
 
 
 def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
+    prefixes = SCRUB_PREFIXES + SCRUB_KIND.get(spec.kind, ())
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_NAMES
+           if not k.startswith(prefixes) and k not in SCRUB_NAMES
            and not k.endswith("_API_KEY")}
     # The inherited PWD names the orchestrator's directory, and opencode roots
     # its file tools and shell there instead of at its real cwd.
@@ -82,30 +88,49 @@ def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
     return env
 
 
-def grok_startup_check(work: Path) -> str | None:
-    """Probe the configured native startup without a session or inference.
+def _grok_version_probe(work: Path) -> tuple[str | None, str | None]:
+    """Zero-inference native probe. Returns (parsed version, problem).
 
     Grok applies the sandbox before its `version` subcommand, unlike --version
     and --help. Never expose stdout from other commands as a diagnostic.
     """
     spec = adapters.Launch(["grok", *adapters.GROK_SANDBOX_ARGS, "--cwd", str(work),
-                            "version", "--json"], None, env_set=adapters.GROK_ENV)
+                            "version", "--json"], None, env_set=adapters.GROK_ENV, kind="grok")
     try:
         out = subprocess.run(spec.argv, cwd=work, env=lane_env(spec, work),
                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"startup-unavailable: Grok startup probe: {exc}; repair startup and recheck xcheck doctor"
+        return None, f"startup-unavailable: Grok startup probe: {exc}; repair startup and recheck xcheck doctor"
     detail = "; ".join(out.stderr.strip().splitlines()[-4:])[:1200]
     if out.returncode or "sandbox could not be applied" in out.stderr:
-        return (f"startup-unavailable: Grok startup probe exited {out.returncode}: "
-                f"{detail or 'no stderr'}; repair native startup and recheck xcheck doctor")
+        return None, (f"startup-unavailable: Grok startup probe exited {out.returncode}: "
+                      f"{detail or 'no stderr'}; repair native startup and recheck xcheck doctor")
     try:
         payload = json.loads(out.stdout)
         if isinstance(payload, dict) and isinstance(payload.get("currentVersion"), str) and payload["currentVersion"]:
-            return None
+            return payload["currentVersion"], None
     except ValueError:
         pass
-    return "startup-unavailable: Grok startup probe returned no native version JSON; check grok version --help and xcheck doctor"
+    return None, "startup-unavailable: Grok startup probe returned no native version JSON; check grok version --help and xcheck doctor"
+
+
+def grok_startup_check(work: Path) -> str | None:
+    return _grok_version_probe(work)[1]
+
+
+def grok_admission_check(work: Path) -> str | None:
+    """Zero-inference admission guard: only the adapter-verified native
+    version may launch a Grok lane. Any other version is skipped, loudly —
+    the tool-id allowlist fails open on rename, so an upgraded native could
+    otherwise run the review with the full toolset."""
+    version, problem = _grok_version_probe(work)
+    if problem:
+        return problem
+    if version != adapters.GROK_VERIFIED_VERSION:
+        return (f"native-unverified: grok {version} is not the adapter-verified "
+                f"{adapters.GROK_VERIFIED_VERSION}; revalidate the resolved toolset and "
+                f"ACP shape on this version, then bump GROK_VERIFIED_VERSION")
+    return None
 
 
 class _Stop(BaseException):  # a signal, never mistaken for an ordinary failure
@@ -236,6 +261,12 @@ def _run_lane(base: Path, name: str) -> int:
         except adapters.Unavailable as e:
             return _finish(run, name, started, "skipped", str(e), None, reader, err_path)
         env = lane_env(spec, work)
+        if spec.kind == "grok":
+            # Zero-inference admission gate: an unverified native version may
+            # have renamed tool ids, and the profile allowlist fails open.
+            problem = grok_admission_check(work)
+            if problem:
+                return _finish(run, name, started, "skipped", problem, None, reader, err_path)
         status, reason, code = None, "", None
         with ExitStack() as stack:
             stdin = stack.enter_context(open(spec.stdin, "rb")) if spec.stdin else subprocess.DEVNULL

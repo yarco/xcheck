@@ -44,10 +44,11 @@ class ReportStartup(unittest.TestCase):
         self.assertNotIn('PRIVATE CONFIG SENTINEL', problem)
 
     def test_native_startup_success_scrubs_keys_and_inherited_sandbox(self):
-        with patch.dict(os.environ, {'GROK_SANDBOX': 'off', 'TEST_API_KEY': 'SECRET', 'CLAUDECODE': '1'}):
+        with patch.dict(os.environ, {'GROK_SANDBOX': 'strict', 'GROK_EXTRA': 'x', 'TEST_API_KEY': 'SECRET', 'CLAUDECODE': '1'}):
             problem, kwargs = self.probe(subprocess.CompletedProcess([], 0, '{"currentVersion":"1.0.46"}', ''))
         self.assertIsNone(problem)
-        self.assertNotIn('GROK_SANDBOX', kwargs['env'])
+        self.assertNotIn('GROK_SANDBOX', kwargs['env'])  # the inherited value is scrubbed; argv carries the pin
+        self.assertNotIn('GROK_EXTRA', kwargs['env'])
         self.assertNotIn('TEST_API_KEY', kwargs['env'])
         self.assertNotIn('CLAUDECODE', kwargs['env'])
         self.assertEqual(kwargs['env']['GROK_DISABLE_AUTOUPDATER'], '1')
@@ -74,6 +75,33 @@ class ReportStartup(unittest.TestCase):
             with self.assertRaises(lane._Stop):
                 lane.grok_startup_check(Path('/tmp'))
 
+    def admission(self, result):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(lane.subprocess, 'run', return_value=result):
+            return lane.grok_admission_check(Path(tmp))
+
+    def test_admission_accepts_only_the_verified_native_version(self):
+        stdout = json.dumps({"currentVersion": adapters.GROK_VERIFIED_VERSION, "channel": "stable"})
+        problem = self.admission(subprocess.CompletedProcess([], 0, stdout, ''))
+        self.assertIsNone(problem)
+
+    def test_admission_skips_an_unverified_native_version_loudly(self):
+        problem = self.admission(subprocess.CompletedProcess([], 0, '{"currentVersion":"1.0.51"}', ''))
+        self.assertIn('native-unverified', problem)
+        self.assertIn('1.0.51', problem)
+        self.assertIn(adapters.GROK_VERIFIED_VERSION, problem)
+        self.assertIn('GROK_VERIFIED_VERSION', problem)
+
+    def test_admission_compares_the_parsed_version_not_a_substring(self):
+        for version in ('1.0.500', '1.0.50-beta', '10.0.50', 'v1.0.50'):
+            with self.subTest(version=version):
+                problem = self.admission(subprocess.CompletedProcess([], 0, f'{{"currentVersion":"{version}"}}', ''))
+                self.assertIn('native-unverified', problem)
+
+    def test_admission_still_blocks_on_probe_failure(self):
+        problem = self.admission(subprocess.CompletedProcess([], 1, '', 'boom'))
+        self.assertIn('startup-unavailable', problem)
+
     def doctor(self, probe, listing_failure=False, suffix=False, acp_models=None):
         helps = {tuple(cmd): (support.FIX / 'cli-help' / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
@@ -96,8 +124,11 @@ class ReportStartup(unittest.TestCase):
             code = run.doctor()
         return code, out.getvalue()
 
+    def _version_json(self):
+        return json.dumps({"currentVersion": adapters.GROK_VERIFIED_VERSION, "channel": "stable"})
+
     def test_doctor_fails_an_agy_pin_the_acp_server_does_not_advertise(self):
-        code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"fixture"}', ''),
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''),
                                  acp_models=['gemini-3.8-flash-high'])
         self.assertEqual(code, 1, text)
         self.assertIn('agy model gemini-pro-agent NOT advertised by the ACP server', text)
@@ -107,18 +138,24 @@ class ReportStartup(unittest.TestCase):
                                     (support.FIX / 'grok-sandbox-refusal.stderr').read_text()))
         self.assertEqual(code, 1)
         self.assertIn('endpoint is a symlink', text)
-        self.assertIn('grok: 13 flags present', text)
+        self.assertIn('grok: 2 flags present', text)
 
     def test_doctor_accepts_native_startup_and_current_pins(self):
-        code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"fixture"}', ''))
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''))
         self.assertEqual(code, 0, text)
         self.assertIn('startup with --sandbox off (zero inference)', text)
         self.assertNotIn('qwen3.8-27b:free', text)
 
+    def test_doctor_rejects_an_unverified_native_version(self):
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"9.9.9"}', ''))
+        self.assertEqual(code, 1, text)
+        self.assertIn('native-unverified', text)
+        self.assertIn('9.9.9', text)
+
     def test_doctor_rejects_failed_listing_and_model_prefix_collision(self):
         for kwargs in ({'listing_failure': True}, {'suffix': True}):
             with self.subTest(kwargs=kwargs):
-                code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"fixture"}', ''), **kwargs)
+                code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), **kwargs)
                 self.assertEqual(code, 1, text)
                 self.assertIn('NOT in opencode models', text)
 

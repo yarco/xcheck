@@ -59,19 +59,20 @@ class FinalReaderRepairs(unittest.TestCase):
 
 
     def test_grok_only_successful_native_turn_is_completion(self):
-        for reason in ('max_tokens', 'max_turn_requests', 'refusal', 'cancelled', 'tool_use', 'unknown', None):
+        for reason in ('max_tokens', 'refusal', 'cancelled', 'unknown', None):
             with self.subTest(reason=reason):
                 reader = adapters.Reader('grok')
-                reader.feed(dict(type='text', data=GOOD))
-                reader.feed(dict(type='end', stopReason=reason))
+                reader.feed(PROMPT)
+                reader.feed(chunk(GOOD))
+                reader.feed(rpc(id=3, result={'stopReason': reason}))
                 self.assertFalse(reader.completed)
                 self.assertTrue(reader.error)
         reader = adapters.Reader('grok')
-        reader.feed(dict(type='usage', stopReason='tool_use'))
-        self.assertFalse(reader.completed)
-        self.assertIsNone(reader.error)
-        reader.feed(dict(type='end', stopReason='end_turn'))
+        reader.feed(PROMPT)
+        reader.feed(chunk(GOOD))
+        reader.feed(rpc(id=3, result={'stopReason': 'end_turn'}))
         self.assertTrue(reader.completed)
+        self.assertIsNone(reader.error)
 
 
 class FinalLifecycleRepairs(unittest.TestCase):
