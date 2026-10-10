@@ -47,13 +47,24 @@ TAIL_LINES = 40
 # GROK_TELEMETRY_* stay.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE",  # an opencode orchestrator's session; any config override breaks the free tier
-                  "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_")  # adapter and client overrides must not reach a peer
+                  "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_",  # adapter and client overrides must not reach a peer
+                  # Provider routing overrides: an ANTHROPIC_AUTH_TOKEN or
+                  # ANTHROPIC_BASE_URL exported by another orchestrator would
+                  # silently move a subscription lane onto a paid API route
+                  # (proven: `claude auth status` flips to oauth_token/bedrock).
+                  # ANTHROPIC_API_KEY is already caught by the *_API_KEY suffix
+                  # rule; CLAUDE_CODE_* covers the USE_BEDROCK/VERTEX switches.
+                  "ANTHROPIC_", "AGENT_PROXY_", "CCR_", "CLAUDE_GATEWAY_")
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
 SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
                "GROK_SANDBOX",  # the operator's default profile; the adapter picks the lane's
                "OLDPWD", "CODEX_PATH", "CODEX_CONFIG", "INITIAL_AGENT_MODE",
                "DEFAULT_AUTH_REQUEST", "MODEL_PROVIDER", "APP_SERVER_LOGS", "NO_BROWSER",
-               "CODEX_SESSION_ID", "CODEX_THREAD_ID"}
+               "CODEX_SESSION_ID", "CODEX_THREAD_ID",
+               # Vertex/Bedrock region selectors without an ANTHROPIC_/CLAUDE_CODE_
+               # prefix; inert once the USE_* switches are scrubbed, but they name
+               # paid endpoints so they stay out of a subscription lane anyway.
+               "CLOUD_ML_REGION", "GOOGLE_CLOUD_PROJECT"}
 
 
 def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:

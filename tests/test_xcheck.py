@@ -87,8 +87,10 @@ class Readers(unittest.TestCase):
 
 
     def test_claude_result_event(self):
-        r = read_fixture("claude", "claude-ok.jsonl")
+        r = read_fixture("claude", "claude-acp-ok.jsonl")
         self.assertEqual(r.text, "PLUM-42\nRESULT_COMPLETE")
+        self.assertTrue(r.completed)
+        self.assertIn("Claude Pro", " ".join(r.notes()))
 
     def test_bold_two_line_proof_is_accepted(self):
         text = "**1) VERDICT:** Readable.\n\nThe staged evidence is readable and the contract is satisfied.\n\n**6) PROOF:**\n`MANIFEST_TAIL_TOKEN: 0123abcd`\n\nRESULT_COMPLETE\n"
@@ -101,7 +103,7 @@ class Readers(unittest.TestCase):
         self.assertNotIn("I'll read", r.text)
 
     def test_errors_are_structured(self):
-        claude = read_fixture("claude", "claude-error.jsonl")
+        claude = read_fixture("claude", "claude-acp-error.jsonl")
         self.assertIn("issue with the selected model", claude.error)
         self.assertEqual(claude.text, "")  # the error message is not an answer
         self.assertIn("unknown model id", read_fixture("grok", "grok-error.jsonl").error)
@@ -300,7 +302,9 @@ class GrokLane(unittest.TestCase):
                                     ("claude", "claude-sonnet-5", "low"),
                                     ("grok", "grok-4.7", "low")):
             lane = Lane(kind, model, effort)
-            stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
+            with tempfile.TemporaryDirectory() as tmp:
+                stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"),
+                                         Path(tmp) / "harness.log", True).argv
             app = [] if lane.kind in adapters.STREAM_ONLY else adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
             if kind == "codex":
                 self.assertNotIn("--ignore-user-config", stream)
@@ -311,27 +315,59 @@ class GrokLane(unittest.TestCase):
 
 
 class ClaudeMcp(unittest.TestCase):
+    def _launch_meta(self, lane, tmp):
+        argv = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"),
+                               Path(tmp) / "harness.log", True).argv
+        servers = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"]
+        meta = json.loads(Path(argv[argv.index("--session-meta") + 1]).read_text())
+        return argv, servers, meta["claudeCode"]["options"]
+
     def test_only_review_servers_load_and_each_is_preapproved_by_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / ".claude.json"
-            cfg.write_text(json.dumps({"mcpServers": {"qmd": {}, "keenable-free": {
+            cfg.write_text(json.dumps({"mcpServers": {"qmd": {"command": "qmd"}, "keenable-free": {
                 "type": "http", "url": "https://api.keenable.ai/mcp"}},
                                        "claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Kiwi.com"]}))
             lane = Lane("claude", "claude-sonnet-5", "low")
             with patch.object(adapters, "CLAUDE_JSON", cfg):
-                stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
-                app = [] if lane.kind in adapters.STREAM_ONLY else adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
-            for argv in (stream, app):
-                registered = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
-                self.assertEqual(set(registered), {"qmd", "keenable-free"})
-                allowed = argv[argv.index("--allowedTools") + 1].split(",")
-                self.assertEqual(set(allowed), {"Read", "Write", "WebSearch", "WebFetch", "mcp__qmd", "mcp__keenable-free"}
-                                 if "Write" in allowed else {"Read", "WebSearch", "WebFetch", "mcp__qmd", "mcp__keenable-free"})
-                self.assertNotIn("mcp__*", allowed)
-                self.assertIn("--strict-mcp-config", argv)
+                argv, servers, options = self._launch_meta(lane, tmp)
+            self.assertEqual({s["name"] for s in servers}, {"qmd", "keenable-free"})
+            allowed = options["allowedTools"]
+            self.assertEqual(set(allowed), {"Read", "WebSearch", "WebFetch", "mcp__qmd", "mcp__keenable-free"})
+            self.assertNotIn("mcp__*", allowed)
+            self.assertTrue(options["strictMcpConfig"])
+            self.assertEqual(options["disallowedTools"], ["mcp__claude_ai_*"])
+            self.assertEqual(options["settingSources"], [])
+            self.assertIs(options["persistSession"], False)
+            self.assertEqual(options["permissionPrompts"], "none")
+            self.assertIs(options["allowDangerouslySkipPermissions"], False)
+            self.assertEqual(options["extraArgs"], {"restricted": None})
+            self.assertEqual(options["model"], "claude-sonnet-5")
+            self.assertEqual(options["effort"], "low")
+            self.assertEqual(options["title"], "xcheck review")
+            self.assertIn("--deny-all", argv)
+            self.assertIn("mode=default", argv)
             with patch.object(adapters, "CLAUDE_JSON", Path(tmp) / "absent.json"):
-                argv = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
-            self.assertEqual(json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"], {})
+                _, servers, options = self._launch_meta(lane, tmp)
+            self.assertEqual(servers, [])
+            self.assertNotIn("mcp__qmd", options["allowedTools"])
+
+    def test_free_web_mcps_stay_out_without_live_web(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / ".claude.json"
+            cfg.write_text(json.dumps({"mcpServers": {"qmd": {"command": "qmd"}, "keenable-free": {
+                "type": "http", "url": "https://api.keenable.ai/mcp"},
+                "you-free": {"type": "http", "url": "https://api.you.com/mcp?profile=free&tools=you-search",
+                             "headers": {"x": "y"}}}}))
+            lane = Lane("claude", "claude-sonnet-5", "low")
+            with patch.object(adapters, "CLAUDE_JSON", cfg):
+                argv = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"),
+                                       Path(tmp) / "harness.log", False).argv
+            servers = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"]
+            self.assertEqual({s["name"] for s in servers}, {"qmd"})
+            options = json.loads(Path(argv[argv.index("--session-meta") + 1]).read_text())["claudeCode"]["options"]
+            self.assertEqual(options["tools"], ["Read"])
+            self.assertNotIn("WebSearch", options["allowedTools"])
 
 
 class IdleDefaults(unittest.TestCase):
@@ -941,7 +977,7 @@ class EndToEnd(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
         self.bin = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.bin)
-        for k in (*adapters.KINDS, "acpx", "codex-acp", "security"):
+        for k in (*adapters.KINDS, "acpx", "xcheck-acpx", "codex-acp", "claude-agent-acp", "security"):
             (self.bin / k).symlink_to(REPO / "tests" / "fake" / "harness")
         acp = self.root / "agy-acp"
         acp.mkdir()
@@ -1150,6 +1186,13 @@ class EndToEnd(unittest.TestCase):
         dump = self.bin / "env"
         leak = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_EFFORT": "max",
                 "ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "HERDR_PANE_ID": "w1:p1",
+                # Provider routing: an exported token/base URL would move the
+                # subscription lane onto a paid route without any key suffix.
+                "ANTHROPIC_AUTH_TOKEN": "t", "ANTHROPIC_BASE_URL": "http://paid.invalid",
+                "ANTHROPIC_MODEL": "x", "ANTHROPIC_CUSTOM_HEADERS": "h",
+                "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_OAUTH_TOKEN": "t",
+                "AGENT_PROXY_URL": "http://proxy.invalid", "CCR_ENABLE_BUNDLE": "1",
+                "CLOUD_ML_REGION": "r", "GOOGLE_CLOUD_PROJECT": "p",
                 "CODEX_COMPANION_SESSION_ID": "c", "GROK_SANDBOX": "ws", "ACPX_AUTH_TOKEN": "t"}
         keep = {"GROK_TELEMETRY_ENABLED": "0"}
         # herdr falls back to its default socket when HERDR_* is gone: the lane names a dead one

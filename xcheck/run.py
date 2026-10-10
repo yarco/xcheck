@@ -478,6 +478,11 @@ def doctor() -> int:
     print(f"FAIL codex: {problem}" if problem else
           f"ok   codex: installed codex-acp {adapters.CODEX_ACP_VERSION} and Codex CLI present")
     bad += bool(problem)
+    problem = adapters.unavailable(adapters.DEFAULT_ROSTER[1])
+    print(f"FAIL claude: {problem}" if problem else
+          f"ok   claude: xcheck-acpx {adapters.ACPX_REVIEWED}, claude-agent-acp "
+          f"{adapters.CLAUDE_ACP_VERSION} and a first-party subscription login present")
+    bad += bool(problem)
     # opencode pins list under their provider (`opencode models <provider>`),
     # not one shared listing.
     listings: dict[tuple, str] = {}

@@ -63,6 +63,220 @@ if kind == "opencode" and argv[:1] == ["models"] and "--help" not in argv:
             print(json.dumps({"variants": {"high": {}} if not model.startswith("openrouter/") else {}}))
     sys.exit(0)
 
+# Claude ACP pins: the reviewed acpx build with --session-meta, and the adapter.
+if kind == "xcheck-acpx" and "--version" in argv:
+    print(os.environ.get("FAKE_ACPX_VERSION", "0.19.4-xcheck.1"))
+    sys.exit(0)
+if kind == "xcheck-acpx" and argv[:1] == ["exec"] and "--help" in argv:
+    print("--file --config-option")
+    sys.exit(0)
+if kind == "xcheck-acpx" and "--help" in argv:
+    print("--agent --cwd --session-meta --mcp-config --model --deny-all --auth-policy "
+          "--no-terminal --no-fs --prompt-retries --format")
+    sys.exit(0)
+if kind == "claude-agent-acp" and "--version" in argv:
+    print(os.environ.get("FAKE_CLAUDE_ACP_VERSION", "0.89.0"))
+    sys.exit(0)
+
+# claude's zero-spend auth probe and the custody child: the fake adapter spawns
+# CLAUDE_CODE_EXECUTABLE as the SDK would. Routing overrides shadow the Keychain
+# login exactly like the real CLI, so an unscrubbed leak shows up as a wrong
+# authMethod/apiProvider instead of silently passing.
+if kind == "claude" and argv[:2] == ["auth", "status"]:
+    if "--help" in argv:
+        print("--json")
+        sys.exit(0)
+    if os.environ.get("FAKE_CLAUDE_AUTH") == "absent":
+        print(json.dumps({"loggedIn": False}))
+    else:
+        print(json.dumps({
+            "loggedIn": True,
+            "authMethod": "oauth_token" if os.environ.get("ANTHROPIC_AUTH_TOKEN") else "claude.ai",
+            "apiProvider": "bedrock" if os.environ.get("CLAUDE_CODE_USE_BEDROCK")
+                          else "vertex" if os.environ.get("CLAUDE_CODE_USE_VERTEX")
+                          else "api" if os.environ.get("ANTHROPIC_BASE_URL") else "firstParty",
+            "subscriptionType": "pro"}))
+    sys.exit(0)
+if kind == "claude" and "--fake-child" in argv:
+    dump = os.environ.get("FAKE_ENV_DUMP")
+    if dump:
+        Path(dump).with_suffix(".claude.json").write_text(json.dumps(dict(os.environ)))
+        busy = Path(os.environ["XCHECK_ROOT"]) / ".pools" / "claude" / "busy"
+        held = []
+        for fd in range(3, 256):
+            try:
+                held += [fd] if os.fstat(fd).st_ino == busy.stat().st_ino else []
+            except OSError:
+                pass
+        Path(dump).with_suffix(".claude-child.json").write_text(json.dumps(
+            {"argv": argv, "holds_busy": bool(held)}))
+    sys.exit(0)
+
+
+if kind == "xcheck-acpx":
+    # The reviewed build's surface: relays ACP JSON-RPC like `acpx`, but session/new
+    # carries the deep-merged --session-meta as _meta and the --mcp-config file's
+    # servers, exactly as upstream does after the session-meta patch.
+    import shlex
+    import subprocess
+
+    def _merge(base, extra):
+        for key, value in extra.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                _merge(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    agent_argv = shlex.split(argv[argv.index("--agent") + 1])
+    cwd = argv[argv.index("--cwd") + 1] if "--cwd" in argv else os.getcwd()
+    spec = argv[argv.index("--session-meta") + 1] if "--session-meta" in argv else None
+    user_meta = {}
+    if spec:
+        try:
+            user_meta = json.loads(spec if spec.startswith("{") else Path(cwd, spec).read_text())
+        except (OSError, ValueError) as e:
+            emit({"error": f"Invalid session meta: {e}"})
+            sys.exit(2)
+        if not isinstance(user_meta, dict):
+            emit({"error": "Invalid session meta: root must be a JSON object"})
+            sys.exit(2)
+    meta = _merge({"claudeCode": {"options": {"settingSources": ["project", "local"]}}}, user_meta)
+    mcp = []
+    if "--mcp-config" in argv:
+        mcp = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text()).get("mcpServers", [])
+    prompt = Path(argv[argv.index("--file") + 1]).read_text() if "--file" in argv else argv[-1]
+    settings = [tuple(argv[i + 1].split("=", 1)) for i, a in enumerate(argv) if a == "--config-option"]
+    agent = subprocess.Popen(agent_argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def send(msg):
+        emit(msg)
+        agent.stdin.write(json.dumps(msg) + "\n")
+        agent.stdin.flush()
+
+    def send_prompt():
+        send({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+              "params": {"sessionId": "s", "prompt": [{"type": "text", "text": prompt}]}})
+
+    def configure():
+        if settings:
+            key, value = settings.pop(0)
+            send({"jsonrpc": "2.0", "id": 5, "method": "session/set_config_option",
+                  "params": {"sessionId": "s", "configId": key, "value": value}})
+        else:
+            send_prompt()
+
+    send({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1}})
+    for line in agent.stdout:
+        msg = json.loads(line)
+        emit(msg)
+        if msg.get("id") == 0 and "result" in msg:
+            send({"jsonrpc": "2.0", "id": 1, "method": "session/new",
+                  "params": {"cwd": cwd, "mcpServers": mcp, "_meta": meta}})
+        elif msg.get("id") == 1:
+            if "error" in msg:
+                sys.exit(1)
+            configure()
+        elif msg.get("id") == 5 and "result" in msg:
+            configure()
+        elif msg.get("method") and "id" in msg:  # agent-to-client request; answer it
+            outcome = {"outcome": {"outcome": "selected",
+                       "optionId": "deny" if "--deny-all" in argv else "allow"}}
+            send({"jsonrpc": "2.0", "id": msg["id"],
+                  "result": outcome if msg["method"] == "session/request_permission" else {}})
+        elif msg.get("id") == 2:
+            if mode == "terminal-hang":
+                time.sleep(60)
+            sys.exit(0 if "result" in msg else 1)
+    emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "agent disconnected"}})
+    sys.exit(1)
+
+# The adapter: an ACP server that records session/new and spawns the lane's
+# CLAUDE_CODE_EXECUTABLE custody launcher, as the SDK spawns the claude child.
+if kind == "claude-agent-acp":
+    import subprocess
+    if os.environ.get("FAKE_ENV_DUMP"):
+        Path(os.environ["FAKE_ENV_DUMP"]).with_suffix(".claude-agent-acp.json").write_text(
+            json.dumps(dict(os.environ)))
+    configured = {}
+    child = None
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if msg.get("method") == "initialize":
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1}})
+        elif msg.get("method") == "session/new":
+            dump = os.environ.get("FAKE_ENV_DUMP")
+            if dump:
+                Path(dump).with_suffix(".session-new.json").write_text(json.dumps(msg.get("params") or {}))
+            exe = os.environ.get("CLAUDE_CODE_EXECUTABLE")
+            if exe:
+                child = subprocess.run([exe, "--fake-child"], capture_output=True, text=True)
+                if child.returncode:
+                    emit({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603,
+                          "message": f"Claude Code process exited with code {child.returncode}"}})
+                    continue
+            opts = ((msg.get("params") or {}).get("_meta") or {}).get("claudeCode", {}).get("options") or {}
+            emit({"jsonrpc": "2.0", "method": "_auth/status_update", "params": {"authStatus": {
+                  "kind": "account", "label": "Claude Pro", "account": {"plan": "pro"}}}})
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "configOptions": [
+                {"id": "mode", "type": "select", "currentValue": "auto",
+                 "options": [{"value": v} for v in ("default", "acceptEdits", "plan", "auto")]},
+                {"id": "model", "type": "select", "currentValue": opts.get("model", "claude-opus-5-5"),
+                 "options": [{"value": opts.get("model", "claude-opus-5-5")}]},
+                {"id": "effort", "type": "select", "currentValue": opts.get("effort", "high"),
+                 "options": [{"value": opts.get("effort", "high")}]}]}})
+        elif msg.get("method") == "session/set_config_option":
+            configured[msg["params"]["configId"]] = msg["params"]["value"]
+            emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                  "sessionUpdate": "current_mode_update", "currentValue": msg["params"]["value"]}}})
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"configOptions": []}})
+        elif msg.get("method") == "session/prompt":
+            pid = msg["id"]
+            if mode == "silent-exit":
+                sys.exit(0)
+            if mode == "hang":
+                time.sleep(60)
+            emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                  "sessionUpdate": "session_info_update", "title": "xcheck review"}}})
+            emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                  "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Reading the packet."}}}})
+            emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                  "sessionUpdate": "tool_call", "toolCallId": "t1", "name": "Read",
+                  "title": "Read File", "kind": "read"}}})
+            emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                  "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"}}})
+            if mode == "mcp-policy-audit":  # a forbidden connector call that succeeds
+                emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                      "sessionUpdate": "tool_call", "toolCallId": "tc-cf", "title": "fetch links",
+                      "name": "mcp__cloudflare-browser-rendering__get_url_links",
+                      "rawInput": {"url": "https://herdr.dev/docs/"}}}})
+                emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                      "sessionUpdate": "tool_call_update", "toolCallId": "tc-cf", "status": "completed",
+                      "rawOutput": "{\"result\": [\"https://herdr.dev/\"]}"}}})
+            if mode == "mcp-startup-warning":  # an unapproved call refused by the CLI
+                emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                      "sessionUpdate": "tool_call", "toolCallId": "tc-of",
+                      "name": "mcp__optional-fake__fetch", "title": "fetch"}}})
+                emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                      "sessionUpdate": "tool_call_update", "toolCallId": "tc-of", "status": "failed",
+                      "content": [{"type": "content", "content": {"type": "text", "text": "needs-auth"}}]}}})
+            emit({"jsonrpc": "2.0", "id": 7, "method": "session/request_permission",
+                  "params": {"sessionId": "s", "toolCall": {"toolCallId": "t2"}}})
+            token = [l for l in Path("evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
+            if mode in ("error", "error-retry", "rate-limit-retry"):
+                emit({"jsonrpc": "2.0", "id": pid, "error": {"code": -32603,
+                      "message": "You've hit your limit · resets 7pm",
+                      "data": {"message": "You've hit your limit · resets 7pm"}}})
+                continue
+            reply = {"invalid": "### 1) VERDICT\nfine but no proof and no marker\n"}.get(
+                mode, f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n")
+            for i in range(0, len(reply), 9):
+                emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {
+                      "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": reply[i:i + 9]}}}})
+            emit({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": "end_turn"}})
+    sys.exit(0)
+
+
 if kind == "acpx":
     import shlex
     import subprocess
