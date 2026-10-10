@@ -1,8 +1,7 @@
 """Per-harness knowledge: how to start a lane, and how to read what it streams.
 
-Codex and Claude run their first-party headless streams (`codex exec --json`,
-`claude -p --output-format stream-json`); every other lane is an acpx (ACP
-client) exec against the harness's ACP server. The
+Codex runs its first-party headless stream (`codex exec --json`); every other
+lane is an acpx (ACP client) exec against the harness's ACP server. The
 vendor-specific part is the command, its environment and its native policy. Every flag here was checked against CLI help and smoke runs, and
 `xcheck doctor` re-checks flags against installed help.
 
@@ -523,66 +522,148 @@ def _claude_review_servers(web: bool) -> dict:
                 or (web and name in CLAUDE_FREE_MCP and server == {"type": "http", "url": CLAUDE_FREE_MCP[name]}))}
 
 
-# Native flags the lane depends on; admission and doctor require each in
-# `claude --help`, since the operator CLI upgrades on its own schedule.
-CLAUDE_NATIVE_FLAGS = ("--print", "--restricted", "--strict-mcp-config", "--mcp-config", "--tools",
-                       "--allowedTools", "--disallowedTools", "--permission-mode", "--permission-prompts",
-                       "--add-dir", "--no-session-persistence", "--model", "--effort", "--debug-file",
-                       "--output-format", "--verbose", "--include-partial-messages")
+def _claude_mcp_file(path: Path, web: bool) -> Path:
+    """Approved servers in acpx's --mcp-config shape (the ACP array: headers and
+    env are name/value pairs). Only the validated review selection is written."""
+    servers = []
+    for name, server in _claude_review_servers(web).items():
+        if server.get("type") == "http":
+            entry = {"name": name, "type": "http", "url": server["url"], "headers": []}
+        else:
+            entry = {"name": name, "command": server["command"], "args": list(server.get("args") or []),
+                     "env": [{"name": k, "value": v} for k, v in (server.get("env") or {}).items()]}
+        servers.append(entry)
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+    return path
+
+
+ACPX_REVIEWED = "0.19.4-xcheck.1"      # the session-meta build; stock acpx drops the flag
+CLAUDE_ACP_VERSION = "0.89.0"          # @agentclientprotocol/claude-agent-acp pin
+# Native flags the session options become on the operator's claude command line.
+CLAUDE_NATIVE_FLAGS = ("--restricted", "--strict-mcp-config", "--mcp-config", "--tools",
+                       "--allowedTools", "--disallowedTools")
+
+
+def _claude_acp_meta(lane: Lane, work: Path, log: Path, web: bool) -> Path:
+    """Session options the native -p flags mapped to, through acpx's generic
+    --session-meta merge into _meta.claudeCode.options (SDK Options verbatim).
+    `extraArgs.restricted` keeps the native --restricted (operator CLI accepts
+    it; verified live). The adapter adds the bypass flag unless the supported
+    allowDangerouslySkipPermissions:false opt-out is set — --restricted refuses
+    it. allowedTools pre-approves the review tools and each approved MCP server
+    by name (`mcp__<server>`), as the native --allowedTools did; without it
+    --deny-all would deny their permission requests. settingSources [] keeps
+    user/project/local settings out; managed policy still applies, as it should,
+    and the CLI still reads its global ~/.claude.json state. strictMcpConfig +
+    --mcp-config admit only the review servers, disallowedTools strips account
+    connectors, and title is set so the adapter never spends a turn on one."""
+    tools = ["Read", *(["WebSearch", "WebFetch"] if web else [])]
+    options = {
+        "settingSources": [],
+        "strictMcpConfig": True,
+        "persistSession": False,
+        "permissionPrompts": "none",
+        "allowDangerouslySkipPermissions": False,
+        "extraArgs": {"restricted": None},
+        "allowedTools": [*tools, *sorted(f"mcp__{n}" for n in _claude_review_servers(web))],
+        "disallowedTools": ["mcp__claude_ai_*"],
+        "tools": tools,
+        "model": lane.model,
+        "effort": lane.effort,
+        "title": "xcheck review",
+        "settings": {"permissions": {"defaultMode": "default"}},
+        "debugFile": str(log),
+    }
+    path = log.with_name("claude-session-meta.json")
+    # The adapter forwards these raw SDK messages as `_claude/sdkMessage`; the
+    # init message carries each MCP server's startup status, which the adapter
+    # otherwise never reports.
+    path.write_text(json.dumps({"claudeCode": {"options": options,
+                                               "emitRawSDKMessages": [{"type": "system", "subtype": "init"}]}}),
+                    encoding="utf-8")
+    return path
+
+
+def _claude_executable(path: Path, pool: str, base: str, log: Path) -> Path:
+    """Lifetime-only launcher the SDK spawns instead of its bundled CLI:
+    rejoins this run's pool hold (Node spawn drops the runner's descriptor at
+    the adapter boundary), then execs the operator's claude with argv unchanged.
+    No flags, settings or config are injected."""
+    claude = shutil.which("claude") or "claude"
+    path.write_text("#!/bin/sh\nexec " + " ".join(shlex.quote(a) for a in
+                    [sys.executable, "-I", str(BIN), "hold", "--pool", pool, "--run", base,
+                     "--log", str(log), "--", claude]) + ' "$@"\n')
+    path.chmod(0o700)
+    return path
 
 
 def _claude_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
-    """Claude Code's own headless stream: `claude -p --output-format
-    stream-json`, the message on stdin. `--restricted` ignores settings files
-    and hooks and confines file tools to the working directories;
-    `--strict-mcp-config` with an inline `--mcp-config` registers only the
-    validated review servers; `--tools` lists the built-ins and
-    `--allowedTools` pre-approves them and each server by name; account
-    connectors are disallowed. The installed binary is the runner's direct
-    child and holds the pool itself. The ACP form of this lane
-    (xcheck-acpx + claude-agent-acp) is kept on the `acp/claude` branch."""
-    servers = _claude_review_servers(web)
-    tools = ["Read", *(["WebSearch", "WebFetch"] if web else [])]
-    argv = [shutil.which("claude") or "claude", "-p", "--restricted",
-            "--strict-mcp-config", "--mcp-config", json.dumps({"mcpServers": servers}),
-            "--disallowedTools", "mcp__claude_ai_*",
-            # With -p, anything that would prompt is denied instead of waiting.
-            "--permission-mode", "dontAsk", "--permission-prompts", "none",
-            "--tools", ",".join(tools), "--allowedTools", ",".join([*tools, *sorted(f"mcp__{n}" for n in servers)]),
-            "--add-dir", str(work), "--no-session-persistence", "--model", lane.model, "--effort", lane.effort,
-            "--debug-file", str(log),
-            # Partial messages show native output during a long think.
-            "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
-    return Launch(argv, message, env_set={"DISABLE_AUTOUPDATER": "1"})
+    """Claude through the reviewed acpx build + @agentclientprotocol/claude-agent-acp.
+    xcheck-acpx (0.19.4-xcheck.1) carries --session-meta; mode=default is applied
+    before the prompt because the adapter seeds the operator's settings.json
+    defaultMode (auto) at session/new."""
+    from .files import ROOT
+    base = str(log.parent.parent.parent)
+    meta = _claude_acp_meta(lane, work, log, web)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", base, "--log", str(log), "--",
+             shutil.which("claude-agent-acp") or "claude-agent-acp"]
+    argv = [shutil.which("xcheck-acpx") or "xcheck-acpx",
+            "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), "--session-meta", str(meta),
+            "--mcp-config", str(_claude_mcp_file(log.with_name("claude-mcp.json"), web)),
+            "--deny-all", "--auth-policy", "skip", "--no-terminal", "--no-fs",
+            "--prompt-retries", "0", "--format", "json", "exec",
+            "--config-option", "mode=default", "--file", str(message)]
+    return Launch(argv, None, env_set={
+        "XCHECK_ROOT": str(ROOT),
+        # The adapter prefers this over the SDK's bundled CLI; ours keeps the
+        # spender in the pool and pins the operator's binary.
+        "CLAUDE_CODE_EXECUTABLE": str(_claude_executable(log.with_name("claude-launcher"), lane.pool, base, log)),
+        "DISABLE_AUTOUPDATER": "1",
+    })
 
 
-def claude_problem() -> str | None:
-    """A subscription lane must prove the claude.ai login in the scrubbed lane
-    environment, and the installed CLI must still list the flags it relies on."""
+def claude_acp_problem() -> str | None:
+    """Pinned transport plus a zero-spend auth-source probe: a subscription
+    lane must prove the claude.ai/Keychain login, not just binary presence."""
     from .lane import lane_env
     env = lane_env(Launch([], None), Path.cwd())
-    claude = shutil.which("claude")
-    if not claude:
-        return "startup-unavailable: claude is not on PATH"
     try:
-        out = subprocess.run([claude, "auth", "status", "--json"],
+        acpx = subprocess.run([shutil.which("xcheck-acpx") or "xcheck-acpx", "--version"],
+                              env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        adapter = subprocess.run([shutil.which("claude-agent-acp") or "claude-agent-acp", "--version"],
+                                 env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"startup-unavailable: ACP toolchain probe failed ({type(exc).__name__}); see integrations/claude-acp/README.md"
+    if acpx.returncode or acpx.stdout.strip() != ACPX_REVIEWED:
+        return (f"startup-unavailable: xcheck-acpx reports {acpx.stdout.strip() or 'nothing'} "
+                f"(exit {acpx.returncode}); the lane needs the reviewed {ACPX_REVIEWED} build "
+                "(--session-meta); see integrations/claude-acp/README.md")
+    if adapter.returncode or adapter.stdout.strip() != CLAUDE_ACP_VERSION:
+        return (f"startup-unavailable: claude-agent-acp reports {adapter.stdout.strip() or 'nothing'} "
+                f"(exit {adapter.returncode}); the lane pins {CLAUDE_ACP_VERSION}; "
+                "see integrations/claude-acp/README.md")
+    try:
+        out = subprocess.run([shutil.which("claude") or "claude", "auth", "status", "--json"],
                              env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
         auth = json.loads(out.stdout) if out.returncode == 0 else {}
     except (OSError, subprocess.SubprocessError, ValueError):
         auth = {}
-    if not (isinstance(auth, dict) and auth.get("loggedIn") and auth.get("authMethod") == "claude.ai"
-            and auth.get("apiProvider") == "firstParty"):
+    if not (auth.get("loggedIn") and auth.get("authMethod") == "claude.ai" and auth.get("apiProvider") == "firstParty"):
         return ("auth-required: `claude auth status` is not a first-party claude.ai subscription login "
                 "(scrubbed routing overrides expose a different source, or the Keychain login is missing); "
                 "run claude once to refresh it")
+    # The SDK passes these to the operator's CLI, which upgrades on its own
+    # schedule: a CLI that dropped one would ignore or refuse the lane's limits.
     try:
-        help_text = subprocess.run([claude, "--help"], env=env, stdin=subprocess.DEVNULL,
-                                   capture_output=True, text=True, timeout=10).stdout
+        help_text = subprocess.run([shutil.which("claude") or "claude", "--help"], env=env,
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         help_text = ""
     if missing := [f for f in CLAUDE_NATIVE_FLAGS if f not in help_text]:
         return (f"startup-unavailable: the installed claude no longer lists {', '.join(missing)}; "
-                "the lane's native limits depend on them — re-verify the lane before running it")
+                "the lane's native limits depend on them — re-verify the adapter before running it")
     return None
 
 # Agy runs through acpx and Antigravity's own ACP server, the headless form
@@ -684,8 +765,11 @@ def unavailable(lane: Lane) -> str | None:
     if lane.kind == "codex":
         return None if shutil.which("codex") else "startup-unavailable: codex is not on PATH"
     if lane.kind == "claude":
-        return claude_problem()
-    if not shutil.which("acpx"):
+        client = "xcheck-acpx"
+        if not shutil.which(client):
+            return (f"startup-unavailable: {client} is not on PATH; the lane needs the reviewed "
+                    f"{ACPX_REVIEWED} build — see integrations/claude-acp/README.md")
+    elif not shutil.which("acpx"):
         return "startup-unavailable: acpx is not on PATH; install it with npm install -g acpx"
     if lane.kind == "agy" and not AGY_ACP_SERVER.is_file():
         return f"startup-unavailable: {AGY_ACP_SERVER} is missing; run agy-acp-server-update"
@@ -697,6 +781,8 @@ def unavailable(lane: Lane) -> str | None:
         return f"startup-unavailable: {ACPX_CONFIG} must contain a JSON object; fix or remove it"
     if set_keys := [k for k in ACPX_FORBIDDEN if k in config]:
         return f"startup-unavailable: {ACPX_CONFIG} sets {', '.join(set_keys)}; xcheck lanes need acpx defaults"
+    if lane.kind == "claude":
+        return claude_acp_problem()
     if lane.kind in ("devin", "opencode"):
         return None if shutil.which(lane.kind) else f"startup-unavailable: {lane.kind} is not on PATH"
     if lane.kind == "grok":
@@ -722,9 +808,15 @@ HELP_COMMANDS = {
                    "--cd", "--model", "--config", "--json"]),
     # The capacity meter reads account/rateLimits/read from the app server.
     "codex app-server": (["codex", "app-server", "--help"], ["--stdio"]),
-    # Admission checks these too, since the CLI upgrades separately.
+    # The SDK, not xcheck, writes the claude child's argv from the session
+    # options; admission also checks these, since the CLI upgrades separately.
     "claude": (["claude", "--help"], list(CLAUDE_NATIVE_FLAGS)),
     "claude auth status": (["claude", "auth", "status", "--help"], ["--json"]),
+    # claude-agent-acp prints no --help; its pin is probed in claude_acp_problem.
+    "xcheck-acpx": (["xcheck-acpx", "--help"], ["--agent", "--cwd", "--session-meta", "--mcp-config",
+                    "--model", "--deny-all", "--auth-policy", "--no-terminal", "--no-fs",
+                    "--prompt-retries", "--format"]),
+    "xcheck-acpx exec": (["xcheck-acpx", "exec", "--help"], ["--file", "--config-option"]),
     # grok itself only serves the startup probe (version --json); lanes run the agent.
     "grok": (["grok", "--help"], ["--sandbox", "--cwd"]),
     "grok agent": (["grok", "agent", "--help"], ["--model", "--reasoning-effort",
@@ -782,7 +874,7 @@ class Reader:
     completed: bool = False
     diagnostics: list[dict] = field(default_factory=list)
     _buf: list[str] = field(default_factory=list)
-    _mcp_calls: dict[str, dict] = field(default_factory=dict)  # Claude: tool_use id → policy diagnostic
+    _mcp_calls: dict[str, dict] = field(default_factory=dict)  # Claude: toolCallId → policy diagnostic
     _prompt_id: object = None
     _open: dict[str, int] = field(default_factory=dict)  # unanswered non-prompt requests per id
     _held: str | None = None  # an ambiguous error at the prompt id
@@ -902,6 +994,21 @@ class Reader:
     def _notification(self, o: dict) -> str | None:
         method, params = o.get("method"), o.get("params")
         params = params if isinstance(params, dict) else {}  # a malformed event is ignored, never fatal
+        if self.kind == "claude" and method == "_auth/status_update":
+            # The adapter reports the auth source it actually resolved; keep it
+            # in exit.json diagnostics as the subscription evidence.
+            status = params.get("authStatus")
+            label = status.get("label") if isinstance(status, dict) else None
+            if label and all(d.get("label") != label for d in self.diagnostics):
+                self.diagnostics.append(dict(kind="auth", label=label))
+            return None
+        if self.kind == "claude" and method == "_claude/sdkMessage":
+            message = params.get("message")
+            servers = message.get("mcp_servers") if isinstance(message, dict) and message.get("subtype") == "init" else None
+            for server in servers if isinstance(servers, list) else ():
+                if isinstance(server, dict) and server.get("status") in ("failed", "needs-auth"):
+                    self.diagnostics.append(dict(kind="mcp_startup", server=server.get("name"), status=server["status"]))
+            return None
         if (self.kind == "grok" and method == "_x.ai/mcp/server_status"
                 and params.get("status") not in (None, "ready", "initialized")):
             self.diagnostics.append(dict(kind="mcp_startup", server=params.get("name"),
@@ -917,7 +1024,15 @@ class Reader:
             return None
         if kind == "tool_call":
             self._buf.clear()
+            if self.kind == "claude":
+                self._claude_mcp_policy(update)
             return f"> {_clip(update.get('title') or update.get('kind') or 'tool', 120)}"
+        if kind == "tool_call_update" and self.kind == "claude":
+            call = self._mcp_calls.get(update.get("toolCallId")) or self._claude_mcp_policy(update)
+            if call and update.get("status") == "completed":
+                call["outcome"] = "succeeded"
+            elif call and update.get("status") == "failed":
+                call["outcome"] = "error"
         return None
 
     # -- codex: `codex exec --json`. Each agent_message is a whole message, so
@@ -950,59 +1065,28 @@ class Reader:
             return f"> {item['type']}"
         return None
 
-    # -- claude: `claude -p --output-format stream-json`. The `result` event
-    # ends the turn and carries the final text; with is_error it is the error
-    # (even when subtype says success). init lists each MCP server's startup
-    # status. Unapproved MCP calls are audited per tool_use id: a repeated id
-    # is one call, a later call to the same server is another, and its
-    # tool_result records whether it succeeded.
-    def _claude(self, o: dict) -> str | None:
-        t = o.get("type")
-        message = o.get("message") if isinstance(o.get("message"), dict) else {}
-        blocks = [b for b in (message.get("content") or []) if isinstance(b, dict)] \
-            if isinstance(message.get("content"), list) else []
-        if t == "system" and o.get("subtype") == "init":
-            for server in o.get("mcp_servers") if isinstance(o.get("mcp_servers"), list) else ():
-                if isinstance(server, dict) and server.get("status") in ("failed", "needs-auth"):
-                    self.diagnostics.append(dict(kind="mcp_startup", server=server.get("name"), status=server["status"]))
-            return None
-        if t == "result":
-            self.completed = True
-            if o.get("is_error"):
-                self.error = _clip(str(o.get("result") or json.dumps(o.get("errors")) or "is_error"), 300)
-                return f"! {self.error}"
-            self.text = o.get("result") if isinstance(o.get("result"), str) else ""
-            return "· end turn"
-        if t == "user":
-            for block in blocks:
-                call = self._mcp_calls.get(block.get("tool_use_id")) if block.get("type") == "tool_result" else None
-                if call:
-                    call["outcome"] = "error" if block.get("is_error") else "succeeded"
-            return None
-        if t == "assistant":
-            out = []
-            for block in blocks:
-                if block.get("type") == "tool_use":
-                    self._claude_mcp_policy(block)
-                    out.append(f"> {block.get('name')} {_clip(json.dumps(block.get('input')), 100)}")
-                elif block.get("type") == "text":
-                    out.append(_clip(str(block.get("text", ""))))
-            return "\n".join(out) or None
-        return None
+    def _claude_mcp_policy(self, update: dict) -> dict | None:
+        """One diagnostic per unapproved MCP tool call reaching a Claude lane.
 
-    def _claude_mcp_policy(self, block: dict) -> None:
-        """One diagnostic per unapproved MCP tool_use; the exact
-        `mcp__<server>__<tool>` name, never text that merely quotes one."""
-        call, name = block.get("id"), block.get("name")
-        if not isinstance(name, str) or (isinstance(call, str) and call in self._mcp_calls):
-            return
-        parts = name.split("__")
+        The adapter puts the SDK's tool name in `name`, the exact
+        `mcp__<server>__<tool>` spelling, so a name merely quoted in rawInput
+        or in text is never a call. Each toolCallId is one call: repeated
+        notifications for it update that diagnostic, while a later call to the
+        same server gets its own. A notification without an id is counted on
+        its own. strictMcpConfig and disallowedTools stop such calls inside the
+        CLI; the diagnostic records that one was attempted, and its updates
+        record whether it succeeded."""
+        call = update.get("toolCallId")
+        if call and call in self._mcp_calls:
+            return self._mcp_calls[call]
+        parts = (update.get("name") or "").split("__")
         if len(parts) < 3 or parts[0] != "mcp" or parts[1] in CLAUDE_LOCAL_MCP | CLAUDE_FREE_MCP.keys():
-            return
-        diagnostic = dict(kind="mcp_policy", tool=name, outcome="attempted", billing="unknown")
+            return None
+        diagnostic = dict(kind="mcp_policy", tool=update["name"], outcome="attempted", billing="unknown")
         self.diagnostics.append(diagnostic)
-        if isinstance(call, str):
+        if call:
             self._mcp_calls[call] = diagnostic
+        return diagnostic
 
 
 def _clip(s: str, n: int = 160) -> str:

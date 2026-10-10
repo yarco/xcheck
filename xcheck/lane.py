@@ -37,10 +37,10 @@ TAIL_LINES = 40
 # Provider API keys are removed unless the selected OpenCode provider needs
 # its own configured authentication.
 # Every CLAUDE* name goes: besides the orchestrator's identity (CLAUDECODE,
-# CLAUDE_CODE_*, CLAUDE_PID, CLAUDE_EFFORT, CLAUDE_PLUGIN_*), the Claude ACP
-# adapter reads CLAUDE_CONFIG_DIR (another settings/auth home),
-# CLAUDE_MODEL_CONFIG (model routing) and CLAUDE_AGENT_* (adapter switches),
-# and the CLI reads CLAUDE_CONFIG_DIR as its settings and auth home.
+# CLAUDE_CODE_*, CLAUDE_PID, CLAUDE_EFFORT, CLAUDE_PLUGIN_*), the pinned
+# claude-agent-acp reads CLAUDE_CONFIG_DIR (another settings/auth home),
+# CLAUDE_MODEL_CONFIG (model routing) and CLAUDE_AGENT_* (adapter switches).
+# A lane's own CLAUDE_CODE_EXECUTABLE is set after the scrub.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE",  # an opencode orchestrator's session; any config override breaks the free tier
                   "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_",  # adapter and client overrides must not reach a peer

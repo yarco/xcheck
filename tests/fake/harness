@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Fake `codex exec` and `claude -p` streams, acpx, every ACP lane's server
-(grok agent stdio, devin acp, opencode acp, Agy's server), the capacity
-meters, `opencode models` and the Keychain lookup: each speaks its real CLI's
-shape.
+"""Fake acpx (stock and the reviewed xcheck-acpx build), every lane's ACP server
+(claude-agent-acp, grok agent stdio, devin acp,
+opencode acp, Agy's server), the capacity meters, `opencode models` and the
+Keychain lookup: each speaks its real CLI's shape.
 
 The kind is argv[0]'s basename. FAKE_MODE selects the review turn's behaviour;
-see `review_turn` (ACP) and `native_turn` for the modes.
+see `review_turn` for the modes.
 """
 
 import json
@@ -61,10 +61,8 @@ if kind == "opencode" and argv[:1] == ["models"] and "--help" not in argv:
 # and the custody child the adapter spawns as the SDK would. Routing overrides
 # shadow the Keychain login exactly like the real CLI, so an unscrubbed leak
 # shows up as a wrong authMethod/apiProvider instead of silently passing.
-CLAUDE_FLAGS = ["--print", "--restricted", "--strict-mcp-config", "--mcp-config", "--tools", "--allowedTools",
-                "--disallowedTools", "--permission-mode", "--permission-prompts", "--add-dir",
-                "--no-session-persistence", "--model", "--effort", "--debug-file", "--output-format", "--verbose",
-                "--include-partial-messages"]
+CLAUDE_FLAGS = ["--restricted", "--strict-mcp-config", "--mcp-config", "--tools", "--allowedTools",
+                "--disallowedTools"]
 if kind == "claude" and argv == ["--help"]:
     print(" ".join(f for f in CLAUDE_FLAGS if f != os.environ.get("FAKE_CLAUDE_DROPPED_FLAG")))
     sys.exit(0)
@@ -83,26 +81,66 @@ if kind == "claude" and argv[:2] == ["auth", "status"]:
                           else "api" if os.environ.get("ANTHROPIC_BASE_URL") else "firstParty",
             "subscriptionType": "pro"}))
     sys.exit(0)
+if kind == "claude" and "--fake-child" in argv:
+    dump = os.environ.get("FAKE_ENV_DUMP")
+    if dump:
+        Path(dump).with_suffix(".claude.json").write_text(json.dumps(dict(os.environ)))
+        busy = Path(os.environ["XCHECK_ROOT"]) / ".pools" / "claude" / "busy"
+        held = []
+        for fd in range(3, 256):
+            try:
+                held += [fd] if os.fstat(fd).st_ino == busy.stat().st_ino else []
+            except OSError:
+                pass
+        Path(dump).with_suffix(".claude-child.json").write_text(json.dumps(
+            {"argv": argv, "holds_busy": bool(held)}))
+    sys.exit(0)
 
-# acpx: spawns the --agent command with only stdio, as Node does, prints the
-# ACP JSON-RPC stream in both directions without their direction (`--format
-# json`), answers the agent's requests (permission per --approve-all/
-# --deny-all; anything else method-not-found) and exits 0 only after a prompt
-# result, as acpx exec does.
-ACPX_HELP = ("--agent --cwd --model --approve-all --deny-all --auth-policy "
+
+# acpx: one fake for stock acpx and the reviewed xcheck-acpx build. It spawns
+# the --agent command with only stdio, as Node does, prints the ACP JSON-RPC
+# stream in both directions without their direction (`--format json`), answers
+# the agent's requests (permission per --approve-all/--deny-all; anything else
+# method-not-found) and exits 0 only after a prompt result, as acpx exec does.
+# xcheck-acpx's patch adds --session-meta: deep-merged over the generated
+# _meta on session/new. --mcp-config's servers ride session/new too.
+ACPX_HELP = ("--agent --cwd --session-meta --mcp-config --model --approve-all --deny-all --auth-policy "
              "--no-terminal --no-fs --prompt-retries --format")
-if kind == "acpx":
+if kind in ("acpx", "xcheck-acpx"):
     import shlex
     import subprocess
     if "--version" in argv:
-        print("0.19.4")
+        print(os.environ.get("FAKE_ACPX_VERSION", "0.19.4-xcheck.1") if kind == "xcheck-acpx" else "0.19.4")
         sys.exit(0)
     if "--help" in argv:
-        print("--file --config-option" if argv[:1] == ["exec"] else ACPX_HELP)
+        print("--file --config-option" if argv[:1] == ["exec"] else
+              ACPX_HELP if kind == "xcheck-acpx" else ACPX_HELP.replace("--session-meta ", ""))
         sys.exit(0)
+
+    def _merge(base, extra):
+        for key, value in extra.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                _merge(base[key], value)
+            else:
+                base[key] = value
+        return base
 
     agent_argv = shlex.split(argv[argv.index("--agent") + 1])
     cwd = argv[argv.index("--cwd") + 1] if "--cwd" in argv else os.getcwd()
+    meta = None
+    if kind == "xcheck-acpx" and "--session-meta" in argv:
+        spec = argv[argv.index("--session-meta") + 1]
+        try:
+            user_meta = json.loads(spec if spec.startswith("{") else Path(cwd, spec).read_text())
+        except (OSError, ValueError) as e:
+            emit({"error": f"Invalid session meta: {e}"})
+            sys.exit(2)
+        if not isinstance(user_meta, dict):
+            emit({"error": "Invalid session meta: root must be a JSON object"})
+            sys.exit(2)
+        meta = _merge({"claudeCode": {"options": {"settingSources": ["project", "local"]}}}, user_meta)
+    mcp = (json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text()).get("mcpServers", [])
+           if "--mcp-config" in argv else [])
     model = (argv[argv.index("--model") + 1] if "--model" in argv
              else agent_argv[agent_argv.index("--model") + 1] if "--model" in agent_argv else None)
     prompt = Path(argv[argv.index("--file") + 1]).read_text() if "--file" in argv else argv[-1]
@@ -140,7 +178,8 @@ if kind == "acpx":
             else:
                 send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": "Method not found"}})
         elif msg.get("id") == 0 and "result" in msg:
-            send({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {"cwd": cwd, "mcpServers": []}})
+            send({"jsonrpc": "2.0", "id": 1, "method": "session/new",
+                  "params": {"cwd": cwd, "mcpServers": mcp, **({"_meta": meta} if meta else {})}})
         elif msg.get("id") == 1:
             if "error" in msg:
                 sys.exit(1)
@@ -189,7 +228,7 @@ def review_turn(pid, server):
     hang | slow | buffered-work | mixed-duration | progress-hang          quiet or endless work
     draft-rewrite           a complete-looking draft, more tool work, then the final answer
     bg-child                a background child that ignores TERM/HUP, then the answer
-"""
+    mcp-policy-audit | mcp-startup-warning (claude)"""
     token = [l for l in Path("evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
     good = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
     if mode == "silent-exit":
@@ -216,6 +255,17 @@ def review_turn(pid, server):
     update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Running view_file", "kind": "read",
             "name": "Read", "rawInput": {"command": "SECRET command"}})
     update({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})
+    if server == "claude" and mode == "mcp-policy-audit":  # a forbidden connector call that succeeds
+        update({"sessionUpdate": "tool_call", "toolCallId": "tc-cf", "title": "fetch links",
+                "name": "mcp__cloudflare-browser-rendering__get_url_links",
+                "rawInput": {"url": "https://herdr.dev/docs/"}})
+        update({"sessionUpdate": "tool_call_update", "toolCallId": "tc-cf", "status": "completed",
+                "rawOutput": "{\"result\": [\"https://herdr.dev/\"]}"})
+    if server == "claude" and mode == "mcp-startup-warning":  # an unapproved call refused by the CLI
+        update({"sessionUpdate": "tool_call", "toolCallId": "tc-of", "name": "mcp__optional-fake__fetch",
+                "title": "fetch"})
+        update({"sessionUpdate": "tool_call_update", "toolCallId": "tc-of", "status": "failed",
+                "content": [{"type": "content", "content": {"type": "text", "text": "needs-auth"}}]})
     emit({"jsonrpc": "2.0", "id": pid if mode == "collision-fail" else 7, "method": "session/request_permission",
           "params": {"sessionId": "s", "toolCall": {"toolCallId": "t2"}}})
     if mode == "draft-rewrite":
@@ -240,6 +290,56 @@ def review_turn(pid, server):
         sys.exit(0)
     emit({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": "refusal" if mode == "refusal" else "end_turn"}})
 
+
+# The Claude adapter: an ACP server that records session/new and spawns the
+# lane's CLAUDE_CODE_EXECUTABLE custody launcher, as the SDK spawns the claude child.
+if kind == "claude-agent-acp":
+    import subprocess
+    if "--version" in argv:
+        print(os.environ.get("FAKE_CLAUDE_ACP_VERSION", "0.89.0"))
+        sys.exit(0)
+    if os.environ.get("FAKE_ENV_DUMP"):
+        Path(os.environ["FAKE_ENV_DUMP"]).with_suffix(".claude-agent-acp.json").write_text(
+            json.dumps(dict(os.environ)))
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if msg.get("method") == "initialize":
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1}})
+        elif msg.get("method") == "session/new":
+            dump = os.environ.get("FAKE_ENV_DUMP")
+            if dump:
+                Path(dump).with_suffix(".session-new.json").write_text(json.dumps(msg.get("params") or {}))
+            exe = os.environ.get("CLAUDE_CODE_EXECUTABLE")
+            if exe:
+                child = subprocess.run([exe, "--fake-child"], capture_output=True, text=True)
+                if child.returncode:
+                    emit({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603,
+                          "message": f"Claude Code process exited with code {child.returncode}"}})
+                    continue
+            claude_meta = ((msg.get("params") or {}).get("_meta") or {}).get("claudeCode", {})
+            opts = claude_meta.get("options") or {}
+            servers = [{"name": m["name"], "status": "connected"} for m in (msg.get("params") or {}).get("mcpServers", [])]
+            if mode == "mcp-startup-warning":
+                servers.append({"name": "optional-fake", "status": "needs-auth"})
+            init = {"type": "system", "subtype": "init", "mcp_servers": servers}
+            emit({"jsonrpc": "2.0", "method": "_auth/status_update", "params": {"authStatus": {
+                  "kind": "account", "label": "Claude Pro", "account": {"plan": "pro"}}}})
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "configOptions": [
+                {"id": "mode", "type": "select", "currentValue": "auto",
+                 "options": [{"value": v} for v in ("default", "acceptEdits", "plan", "auto")]},
+                {"id": "model", "type": "select", "currentValue": opts.get("model", "claude-opus-5-5"),
+                 "options": [{"value": opts.get("model", "claude-opus-5-5")}]},
+                {"id": "effort", "type": "select", "currentValue": opts.get("effort", "high"),
+                 "options": [{"value": opts.get("effort", "high")}]}]}})
+        elif msg.get("method") == "session/set_config_option":
+            update({"sessionUpdate": "current_mode_update", "currentValue": msg["params"]["value"]})
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"configOptions": []}})
+        elif msg.get("method") == "session/prompt":
+            if {"type": "system", "subtype": "init"} in (claude_meta.get("emitRawSDKMessages") or []):
+                emit({"jsonrpc": "2.0", "method": "_claude/sdkMessage", "params": {"sessionId": "s", "message": init}})
+            update({"sessionUpdate": "session_info_update", "title": "xcheck review"})
+            review_turn(msg["id"], "claude")
+    sys.exit(0)
 
 # Native ACP servers; all join pool custody, and Agy also runs in Seatbelt.
 if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in argv and "--help" not in argv)
@@ -341,48 +441,6 @@ class CodexStream:
         emit({"type": "turn.failed", "error": {"message": message}})
 
 
-class ClaudeStream:
-    """`claude -p --output-format stream-json` event shapes."""
-    def __init__(self):
-        config = json.loads(argv[argv.index("--mcp-config") + 1])
-        self.servers = [{"name": n, "status": "connected"} for n in config.get("mcpServers", {})]
-        if mode == "mcp-startup-warning":
-            self.servers.append({"name": "optional-fake", "status": "needs-auth"})
-
-    def start(self):
-        emit({"type": "system", "subtype": "init", "model": argv[argv.index("--model") + 1],
-               "mcp_servers": self.servers})
-
-    def say(self, text):
-        emit({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
-
-    def use(self, call, name, ok=True):
-        emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": call, "name": name,
-                                                            "input": {"file_path": "PACKET.md"}}]}})
-        emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": call,
-                                                       "is_error": not ok, "content": "ok" if ok else "needs-auth"}]}})
-
-    def tool(self):
-        self.use("toolu_read", "Read")
-        if mode == "mcp-policy-audit":  # a forbidden connector call that succeeds
-            self.use("toolu_cf", "mcp__cloudflare-browser-rendering__get_url_links")
-        if mode == "mcp-startup-warning":  # an unapproved call the CLI refuses
-            self.use("toolu_of", "mcp__optional-fake__fetch", ok=False)
-
-    def think(self):
-        emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta"}}})
-
-    def notice(self, message):
-        emit({"type": "system", "subtype": "notice", "message": message})
-
-    def done(self, text):
-        self.say(text)
-        emit({"type": "result", "subtype": "success", "is_error": False, "result": text})
-
-    def fail(self, message):
-        emit({"type": "result", "subtype": "success", "is_error": True, "result": message})
-
-
 def native_turn(stream, server, work):
     """One headless run in the CLI's own event shapes, with review_turn's modes."""
     token = [l for l in (work / "evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
@@ -429,8 +487,6 @@ def native_turn(stream, server, work):
 
 if kind == "codex" and argv[:1] == ["exec"]:
     native_turn(CodexStream(), "codex", Path(argv[argv.index("-C") + 1]))
-if kind == "claude" and "-p" in argv:
-    native_turn(ClaudeStream(), "claude", Path(argv[argv.index("--add-dir") + 1]))
 
 
 # Quota meters (xcheck/capacity.py), FAKE_CAPACITY=eligible|reserve-low.
