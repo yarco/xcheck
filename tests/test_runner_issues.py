@@ -254,6 +254,18 @@ class ReportMeters(unittest.TestCase):
         self.assertFalse(reader.completed)
 
 
+def cloudflare_call():
+    """The real captured disallowed Cloudflare call, as Claude's stream-json events."""
+    rows = json.loads((support.FIX / 'claude-cloudflare-call.json').read_text())
+    return [{'type': r['stream_type'], 'message': {'content': [r['tool'] if r['stream_type'] == 'assistant'
+                                                              else r['tool_result']]}} for r in rows]
+
+
+def claude_answer(text):
+    return [{'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}},
+            {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text}]
+
+
 class ReportClaudePolicy(unittest.TestCase):
     def test_paid_and_account_connectors_are_excluded_from_review_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,16 +284,11 @@ class ReportClaudePolicy(unittest.TestCase):
                 lane = adapters.Lane('claude', 'claude-opus-5-5', 'high')
                 spec = adapters.launch(lane, Path(tmp), Path(tmp)/'m', Path(tmp)/'l', True)
                 argv = spec.argv
-                # strictMcpConfig and the connector strip ride _meta, and the
-                # approved set goes to --mcp-config as a file of ACP entries.
-                options = json.loads(Path(argv[argv.index('--session-meta') + 1])
-                                     .read_text())['claudeCode']['options']
-                self.assertIs(options['strictMcpConfig'], True)
-                registered = json.loads(Path(argv[argv.index('--mcp-config') + 1])
-                                        .read_text())['mcpServers']
-                self.assertEqual({s['name'] for s in registered}, {'fff', 'keenable-free', 'you-free'})
-                self.assertIn('mcp__claude_ai_*', options['disallowedTools'])
-                self.assertNotIn('secret-fixture', Path(argv[argv.index('--mcp-config') + 1]).read_text())
+                self.assertIn('--strict-mcp-config', argv)
+                config = argv[argv.index('--mcp-config') + 1]
+                self.assertEqual(set(json.loads(config)['mcpServers']), {'fff', 'keenable-free', 'you-free'})
+                self.assertEqual(argv[argv.index('--disallowedTools') + 1], 'mcp__claude_ai_*')
+                self.assertNotIn('secret-fixture', config)
             self.assertEqual(cfg.read_bytes(), before)
 
     def test_free_name_cannot_enable_authenticated_or_paid_endpoint(self):
@@ -304,14 +311,9 @@ class ReportClaudePolicy(unittest.TestCase):
 
     def test_real_successful_disallowed_call_is_audited_separately_from_completion(self):
         reader = adapters.Reader('claude')
-        for row in json.loads((support.FIX / 'claude-cloudflare-call.json').read_text()):
-            reader.feed(row)
-        reader.feed({'jsonrpc': '2.0', 'id': 2, 'method': 'session/prompt', 'params': {}})
-        for chunk in '1) VERDICT: The technical review completed.\n6) PROOF: ' + support.TOKEN + '\nRESULT_COMPLETE\n':
-            reader.feed({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
-                         'update': {'sessionUpdate': 'agent_message_chunk',
-                                    'content': {'type': 'text', 'text': chunk}}}})
-        reader.feed({'jsonrpc': '2.0', 'id': 2, 'result': {'stopReason': 'end_turn'}})
+        text = '1) VERDICT: The technical review completed.\n6) PROOF: ' + support.TOKEN + '\nRESULT_COMPLETE\n'
+        for event in (*cloudflare_call(), *claude_answer(text)):
+            reader.feed(event)
         reader.finish()
         self.assertTrue(reader.completed)
         self.assertIsNone(reader.error)
@@ -322,13 +324,11 @@ class ReportClaudePolicy(unittest.TestCase):
 
     def test_refused_calls_are_not_successful_invocations(self):
         reader = adapters.Reader('claude')
-        reader.feed({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
-                     'update': {'sessionUpdate': 'tool_call', 'toolCallId': 'test-call',
-                                'name': 'mcp__cloudflare-browser-rendering__get_url_links'}}})
+        reader.feed({'type': 'assistant', 'message': {'content': [{
+            'type': 'tool_use', 'id': 'test-call', 'name': 'mcp__cloudflare-browser-rendering__get_url_links'}]}})
         self.assertEqual(reader.diagnostics[-1]['outcome'], 'attempted')
-        reader.feed({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
-                     'update': {'sessionUpdate': 'tool_call_update', 'toolCallId': 'test-call',
-                                'status': 'failed'}}})
+        reader.feed({'type': 'user', 'message': {'content': [{
+            'type': 'tool_result', 'tool_use_id': 'test-call', 'is_error': True}]}})
         self.assertEqual(reader.diagnostics[-1]['outcome'], 'error')
         self.assertNotIn('succeeded', '; '.join(reader.notes()))
         self.assertIsNone(reader.error)
@@ -336,9 +336,9 @@ class ReportClaudePolicy(unittest.TestCase):
     def test_an_mcp_name_quoted_in_another_call_is_not_a_call(self):
         # rawInput text mentioning an unapproved server must not register one.
         reader = adapters.Reader('claude')
-        reader.feed({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
-                     'update': {'sessionUpdate': 'tool_call', 'toolCallId': 'test-call', 'name': 'Read',
-                                'rawInput': {'file_path': 'notes on mcp__cloudflare-browser-rendering__x'}}}})
+        reader.feed({'type': 'assistant', 'message': {'content': [{
+            'type': 'tool_use', 'id': 'test-call', 'name': 'Read',
+            'input': {'file_path': 'notes on mcp__cloudflare-browser-rendering__x'}}]}})
         self.assertFalse(reader.diagnostics)
 
     def test_dead_runner_recovery_preserves_policy_diagnostics(self):
@@ -350,13 +350,8 @@ class ReportClaudePolicy(unittest.TestCase):
                                 'headless', 'other', 'now', {}, {})
             directory = current.lane_dir(peer.name)
             directory.mkdir(parents=True)
-            events = [{'jsonrpc': '2.0', 'id': 2, 'method': 'session/prompt', 'params': {}}]
-            events += json.loads((support.FIX / 'claude-cloudflare-call.json').read_text())
             text = f'1) VERDICT: The technical review completed.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n'
-            events.append({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
-                           'update': {'sessionUpdate': 'agent_message_chunk',
-                                      'content': {'type': 'text', 'text': text}}}})
-            events.append({'jsonrpc': '2.0', 'id': 2, 'result': {'stopReason': 'end_turn'}})
+            events = [*cloudflare_call(), *claude_answer(text)]
             (directory / 'stream.jsonl').write_text('\n'.join(map(json.dumps, events)))
             with patch.object(run, '_pid_cmd', return_value=''), \
                     patch.object(run, 'workspace', return_value=base/'work'):

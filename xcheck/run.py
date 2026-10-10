@@ -456,8 +456,7 @@ def doctor() -> int:
     bad += bool(problem)
     problem = adapters.unavailable(adapters.DEFAULT_ROSTER[1])
     print(f"FAIL claude: {problem}" if problem else
-          f"ok   claude: xcheck-acpx {adapters.ACPX_REVIEWED}, claude-agent-acp "
-          f"{adapters.CLAUDE_ACP_VERSION} and a first-party subscription login present")
+          "ok   claude: native limit flags and a first-party subscription login present")
     bad += bool(problem)
     # opencode pins list under their provider (`opencode models <provider>`),
     # not one shared listing.

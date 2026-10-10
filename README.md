@@ -17,12 +17,12 @@ xcheck doctor        # verify the installed copy, flags, and model pins
 
 `install` also writes `~/.codex/rules/xcheck.rules`, which lets a Codex
 orchestrator run the installed `xcheck` (`run`, `wait`, `status`, `activity`,
-`cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt. Codex lanes run the installed `codex exec --json`.
-The other lanes are ACP sessions: Grok, Agy, Devin and OpenCode need stock `acpx` (`npm install -g acpx`), Claude the
-[reviewed `xcheck-acpx` build](integrations/claude-acp/README.md), and each harness its ACP server (`grok agent stdio`,
-Devin/OpenCode's `acp` subcommands, Antigravity's separately installed server, stock `claude-agent-acp`). Every lane shows
-its stream in both placements. The Codex ACP lane is kept on the `acp/codex` branch until upstream fixes what it needed
-patching for (see the protocol note).
+`cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt. Codex and Claude lanes run the installed CLIs'
+own headless streams (`codex exec --json`, `claude -p --output-format stream-json`). Grok, Agy, Devin and OpenCode lanes
+are ACP sessions: they need stock `acpx` (`npm install -g acpx`) and each harness's ACP server (`grok agent stdio`,
+Devin/OpenCode's `acp` subcommands, Antigravity's separately installed server). Every lane shows its stream in both
+placements. The ACP forms of the Codex and Claude lanes are kept on the `acp/codex` and `acp/claude` branches until
+upstream fixes what they needed patching for (see the protocol note).
 Herdr placement requires the operator's `~/.agents/bin/herdr-caller-context` helper; missing or unverified context falls back to headless in auto mode. Lane shells run
 through your zsh rc files; if
 yours load secrets, they must skip that load when the lane guard variable is

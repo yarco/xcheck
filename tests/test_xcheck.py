@@ -87,10 +87,9 @@ class Readers(unittest.TestCase):
 
 
     def test_claude_result_event(self):
-        r = read_fixture("claude", "claude-acp-ok.jsonl")
+        r = read_fixture("claude", "claude-ok.jsonl")
         self.assertEqual(r.text, "PLUM-42\nRESULT_COMPLETE")
         self.assertTrue(r.completed)
-        self.assertIn("Claude Pro", " ".join(r.notes()))
 
     def test_bold_two_line_proof_is_accepted(self):
         text = "**1) VERDICT:** Readable.\n\nThe staged evidence is readable and the contract is satisfied.\n\n**6) PROOF:**\n`MANIFEST_TAIL_TOKEN: 0123abcd`\n\nRESULT_COMPLETE\n"
@@ -103,7 +102,7 @@ class Readers(unittest.TestCase):
         self.assertNotIn("I'll read", r.text)
 
     def test_errors_are_structured(self):
-        claude = read_fixture("claude", "claude-acp-error.jsonl")
+        claude = read_fixture("claude", "claude-error.jsonl")
         self.assertIn("issue with the selected model", claude.error)
         self.assertEqual(claude.text, "")  # the error message is not an answer
         self.assertIn("unknown model id", read_fixture("grok", "grok-acp-error.jsonl").error)
@@ -251,8 +250,7 @@ class AcpCorrelation(unittest.TestCase):
                       {"jsonrpc": "2.0", "method": "session/update", "params": {"update": "x"}},
                       {"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
                           "sessionUpdate": "agent_message_chunk", "content": ["x"]}}},
-                      {"jsonrpc": "2.0", "method": "_auth/status_update", "params": {"authStatus": "x"}},
-                      _say("answer"), DONE_3, kind="claude")
+                      _say("answer"), DONE_3)
         r.finish()
         self.assertTrue(r.completed)
         self.assertEqual(r.text, "answer")
@@ -266,17 +264,19 @@ class AcpCorrelation(unittest.TestCase):
             self.assertFalse(adapters.Reader.replay("opencode", Path(tmp) / "absent").completed)
 
 
-def _claude_call(call, name, status=None):
-    update = {"sessionUpdate": "tool_call_update" if status else "tool_call", "name": name}
+def _claude_use(call, name):
+    block = {"type": "tool_use", "name": name, "input": {"q": "x"}}
     if call:
-        update["toolCallId"] = call
-    if status:
-        update["status"] = status
-    return {"jsonrpc": "2.0", "method": "session/update", "params": {"update": update}}
+        block["id"] = call
+    return {"type": "assistant", "message": {"content": [block]}}
+
+
+def _claude_result(call, ok=True):
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": call, "is_error": not ok}]}}
 
 
 class ClaudeMcpAudit(unittest.TestCase):
-    """One diagnostic per unapproved call, keyed by toolCallId."""
+    """One diagnostic per unapproved call, keyed by tool_use id."""
 
     def outcomes(self, *events):
         r = adapters.Reader("claude")
@@ -286,45 +286,46 @@ class ClaudeMcpAudit(unittest.TestCase):
 
     def test_a_failed_call_does_not_hide_a_later_successful_one(self):
         tool = "mcp__foreign__fetch"
-        self.assertEqual(self.outcomes(_claude_call("a", tool), _claude_call("a", tool, "failed"),
-                                       _claude_call("b", tool), _claude_call("b", tool, "completed")),
+        self.assertEqual(self.outcomes(_claude_use("a", tool), _claude_result("a", ok=False),
+                                       _claude_use("b", tool), _claude_result("b")),
                          [(tool, "error"), (tool, "succeeded")])
 
-    def test_repeated_notifications_for_one_call_are_one_diagnostic(self):
+    def test_a_repeated_tool_use_id_is_one_call(self):
         tool = "mcp__foreign__fetch"
-        self.assertEqual(self.outcomes(_claude_call("a", tool), _claude_call("a", tool),
-                                       _claude_call("a", tool, "in_progress"), _claude_call("a", tool, "completed")),
+        self.assertEqual(self.outcomes(_claude_use("a", tool), _claude_use("a", tool), _claude_result("a")),
                          [(tool, "succeeded")])
 
     def test_several_tools_of_one_server_each_count(self):
-        self.assertEqual(self.outcomes(_claude_call("a", "mcp__foreign__one"), _claude_call("b", "mcp__foreign__two")),
+        self.assertEqual(self.outcomes(_claude_use("a", "mcp__foreign__one"), _claude_use("b", "mcp__foreign__two")),
                          [("mcp__foreign__one", "attempted"), ("mcp__foreign__two", "attempted")])
 
     def test_quoted_names_and_approved_servers_are_not_violations(self):
-        quoted = {"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
-            "sessionUpdate": "tool_call", "toolCallId": "r", "name": "Read",
-            "rawInput": {"query": "mcp__foreign__fetch"}, "title": "mcp__foreign__fetch"}}}
-        self.assertEqual(self.outcomes(quoted, _say("I avoided mcp__foreign__fetch"),
-                                       _claude_call("q", "mcp__qmd__query", "completed"),
-                                       _claude_call("k", "mcp__keenable-free__search")), [])
+        quoted = {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "I avoided mcp__foreign__fetch"},
+            {"type": "tool_use", "id": "r", "name": "Read", "input": {"query": "mcp__foreign__fetch"}}]}}
+        self.assertEqual(self.outcomes(quoted, _claude_use("q", "mcp__qmd__query"), _claude_result("q"),
+                                       _claude_use("k", "mcp__keenable-free__search")), [])
 
     def test_calls_without_an_id_are_each_counted(self):
         tool = "mcp__foreign__fetch"
-        self.assertEqual(self.outcomes(_claude_call(None, tool), _claude_call(None, tool)),
+        self.assertEqual(self.outcomes(_claude_use(None, tool), _claude_use(None, tool)),
                          [(tool, "attempted"), (tool, "attempted")])
 
-    def test_forwarded_sdk_init_reports_failed_and_needs_auth_servers_only(self):
+    def test_init_reports_failed_and_needs_auth_servers_only(self):
         r = adapters.Reader("claude")
-        r.feed({"jsonrpc": "2.0", "method": "_claude/sdkMessage", "params": {"message": {
-            "type": "system", "subtype": "init", "mcp_servers": [
-                {"name": "qmd", "status": "connected"}, {"name": "semble", "status": "failed"},
-                {"name": "x", "status": "needs-auth"}, {"name": "p", "status": "pending"}, "junk"]}}})
-        r.feed({"jsonrpc": "2.0", "method": "_claude/sdkMessage", "params": {"message": "junk"}})
+        r.feed({"type": "system", "subtype": "init", "mcp_servers": [
+            {"name": "qmd", "status": "connected"}, {"name": "semble", "status": "failed"},
+            {"name": "x", "status": "needs-auth"}, {"name": "p", "status": "pending"}, "junk"]})
+        r.feed({"type": "system", "subtype": "init", "mcp_servers": "junk"})
         self.assertEqual(r.notes(), ["MCP startup semble: failed", "MCP startup x: needs-auth"])
 
-    def test_an_update_seen_before_its_call_is_still_audited(self):
-        self.assertEqual(self.outcomes(_claude_call("a", "mcp__foreign__fetch", "completed")),
-                         [("mcp__foreign__fetch", "succeeded")])
+    def test_an_error_result_is_the_failure_even_when_subtype_says_success(self):
+        r = adapters.Reader("claude")
+        r.feed({"type": "assistant", "message": {"content": [{"type": "text", "text": "draft RESULT_COMPLETE"}]}})
+        r.feed({"type": "result", "subtype": "success", "is_error": True, "result": "You've hit your limit"})
+        r.finish()
+        self.assertEqual(r.error, "You've hit your limit")
+        self.assertEqual(r.text, "")
 
 
 class OpencodeLane(unittest.TestCase):
@@ -593,13 +594,10 @@ class GrokLane(unittest.TestCase):
 
 
 class ClaudeMcp(unittest.TestCase):
-    def _launch_meta(self, lane, tmp):
-        argv = adapters.launch(lane, Path("/w"), Path("/m"),
-                               Path(tmp) / "harness.log", True).argv
-        servers = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"]
-        meta = json.loads(Path(argv[argv.index("--session-meta") + 1]).read_text())
-        self.assertEqual(meta["claudeCode"]["emitRawSDKMessages"], [{"type": "system", "subtype": "init"}])
-        return argv, servers, meta["claudeCode"]["options"]
+    def launch(self, lane, tmp, web=True):
+        argv = adapters.launch(lane, Path("/w"), Path("/m"), Path(tmp) / "harness.log", web).argv
+        servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+        return argv, servers
 
     def test_only_review_servers_load_and_each_is_preapproved_by_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -609,27 +607,26 @@ class ClaudeMcp(unittest.TestCase):
                                        "claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Kiwi.com"]}))
             lane = Lane("claude", "claude-sonnet-5", "low")
             with patch.object(adapters, "CLAUDE_JSON", cfg):
-                argv, servers, options = self._launch_meta(lane, tmp)
-            self.assertEqual({s["name"] for s in servers}, {"qmd", "keenable-free"})
-            allowed = options["allowedTools"]
+                argv, servers = self.launch(lane, tmp)
+            self.assertEqual(set(servers), {"qmd", "keenable-free"})
+            allowed = argv[argv.index("--allowedTools") + 1].split(",")
             self.assertEqual(set(allowed), {"Read", "WebSearch", "WebFetch", "mcp__qmd", "mcp__keenable-free"})
             self.assertNotIn("mcp__*", allowed)
-            self.assertTrue(options["strictMcpConfig"])
-            self.assertEqual(options["disallowedTools"], ["mcp__claude_ai_*"])
-            self.assertEqual(options["settingSources"], [])
-            self.assertIs(options["persistSession"], False)
-            self.assertEqual(options["permissionPrompts"], "none")
-            self.assertIs(options["allowDangerouslySkipPermissions"], False)
-            self.assertEqual(options["extraArgs"], {"restricted": None})
-            self.assertEqual(options["model"], "claude-sonnet-5")
-            self.assertEqual(options["effort"], "low")
-            self.assertEqual(options["title"], "xcheck review")
-            self.assertIn("--deny-all", argv)
-            self.assertIn("mode=default", argv)
+            self.assertEqual(argv[argv.index("--tools") + 1], "Read,WebSearch,WebFetch")
+            for flag in ("-p", "--restricted", "--strict-mcp-config", "--no-session-persistence"):
+                self.assertIn(flag, argv)
+            self.assertEqual(argv[argv.index("--disallowedTools") + 1], "mcp__claude_ai_*")
+            self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+            self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+            self.assertEqual(argv[argv.index("--add-dir") + 1], "/w")
+            self.assertEqual(argv[argv.index("--model") + 1], "claude-sonnet-5")
+            self.assertEqual(argv[argv.index("--effort") + 1], "low")
+            self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+            self.assertNotIn("--bare", argv)  # it skips the keychain and subscription auth fails
             with patch.object(adapters, "CLAUDE_JSON", Path(tmp) / "absent.json"):
-                _, servers, options = self._launch_meta(lane, tmp)
-            self.assertEqual(servers, [])
-            self.assertNotIn("mcp__qmd", options["allowedTools"])
+                argv, servers = self.launch(lane, tmp)
+            self.assertEqual(servers, {})
+            self.assertNotIn("mcp__qmd", argv[argv.index("--allowedTools") + 1])
 
     def test_free_web_mcps_stay_out_without_live_web(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -640,13 +637,10 @@ class ClaudeMcp(unittest.TestCase):
                              "headers": {"x": "y"}}}}))
             lane = Lane("claude", "claude-sonnet-5", "low")
             with patch.object(adapters, "CLAUDE_JSON", cfg):
-                argv = adapters.launch(lane, Path("/w"), Path("/m"),
-                                       Path(tmp) / "harness.log", False).argv
-            servers = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"]
-            self.assertEqual({s["name"] for s in servers}, {"qmd"})
-            options = json.loads(Path(argv[argv.index("--session-meta") + 1]).read_text())["claudeCode"]["options"]
-            self.assertEqual(options["tools"], ["Read"])
-            self.assertNotIn("WebSearch", options["allowedTools"])
+                argv, servers = self.launch(lane, tmp, web=False)
+            self.assertEqual(set(servers), {"qmd"})
+            self.assertEqual(argv[argv.index("--tools") + 1], "Read")
+            self.assertNotIn("WebSearch", argv[argv.index("--allowedTools") + 1])
 
 
 class ClaudeLaneBoundaries(unittest.TestCase):
@@ -656,8 +650,9 @@ class ClaudeLaneBoundaries(unittest.TestCase):
             cfg.write_text(json.dumps({"mcpServers": registrations}))
             with patch.object(adapters, "CLAUDE_JSON", cfg):
                 selected = adapters._claude_review_servers(web)
-                written = json.loads(adapters._claude_mcp_file(Path(tmp) / "mcp.json", web).read_text())
-        return selected, written["mcpServers"]
+                argv = adapters.launch(Lane("claude", "claude-sonnet-5", "low"), Path("/w"), Path("/m"),
+                                       Path(tmp) / "harness.log", web).argv
+        return selected, json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
 
     def test_local_registrations_must_be_keyless(self):
         selected, written = self.servers({
@@ -668,10 +663,10 @@ class ClaudeLaneBoundaries(unittest.TestCase):
             "fff": {"type": "stdio", "command": "local-fff", "env": {"DUMMY_API_KEY": "dummy-fixture"}},
         })
         self.assertEqual(set(selected), {"semble", "qmd", "pond"})
+        self.assertEqual(set(written), {"semble", "qmd", "pond"})
         self.assertNotIn("dummy-fixture", json.dumps(written))
-        semble = next(e for e in written if e["name"] == "semble")
-        self.assertEqual(semble["env"], [{"name": "UV_CACHE_DIR", "value": "/c"}, {"name": "UV_TOOL_DIR", "value": "/t"}])
-        self.assertEqual(next(e for e in written if e["name"] == "qmd")["headers"], [])
+        self.assertEqual(written["semble"]["env"], {"UV_CACHE_DIR": "/c", "UV_TOOL_DIR": "/t"})
+        self.assertEqual(written["qmd"], {"type": "http", "url": "http://127.0.0.1:8181/mcp"})
 
     def test_credential_and_remote_channels_drop_the_server(self):
         for entry in ({"type": "http", "url": "https://qmd.example/mcp"},
@@ -1304,7 +1299,7 @@ class EndToEnd(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
         self.bin = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.bin)
-        for k in (*adapters.KINDS, "acpx", "xcheck-acpx", "claude-agent-acp", "security"):
+        for k in (*adapters.KINDS, "acpx", "security"):
             (self.bin / k).symlink_to(REPO / "tests" / "fake" / "harness")
         acp = self.root / "agy-acp"
         acp.mkdir()
