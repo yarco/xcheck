@@ -177,14 +177,14 @@ class AcpCorrelation(unittest.TestCase):
     """acpx prints both directions without saying which; an agent request may
     reuse the id of acpx's own session/prompt (ids belong to their sender)."""
 
-    def feed(self, *events, kind="codex"):
+    def feed(self, *events, kind="opencode"):
         r = adapters.Reader(kind)
         for e in events:
             r.feed(e)
         return r
 
     def test_prompt_failure_before_the_colliding_permission_reply_is_the_failure(self):
-        for kind in adapters.KINDS:
+        for kind in (k for k in adapters.KINDS if not adapters.Reader(k).native()):
             with self.subTest(kind=kind):
                 r = self.feed(PROMPT_3, ASK_3, FAIL_3, kind=kind)
                 self.assertIsNone(r.error)  # ambiguous until the other response at id 3
@@ -1304,7 +1304,7 @@ class EndToEnd(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
         self.bin = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.bin)
-        for k in (*adapters.KINDS, "acpx", "xcheck-acpx", "codex-acp", "claude-agent-acp", "security"):
+        for k in (*adapters.KINDS, "acpx", "xcheck-acpx", "claude-agent-acp", "security"):
             (self.bin / k).symlink_to(REPO / "tests" / "fake" / "harness")
         acp = self.root / "agy-acp"
         acp.mkdir()
@@ -1493,9 +1493,9 @@ class EndToEnd(unittest.TestCase):
 
     def test_dead_supervisor_and_runner_orphan_is_stopped_on_reattach(self):
         common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
-                  "--lanes", "codex:gpt-6.1-sol:high")
+                  "--lanes", "opencode:opencode/space-bunny-free")
         self.assertEqual(self.xcheck("run", *common, "--detach", mode="hang").returncode, 0)
-        pids_file = self.base / "lanes" / "codex-gpt-6.1-sol-high" / "pids.json"
+        pids_file = self.base / "lanes" / "opencode-space-bunny-free" / "pids.json"
         for _ in range(50):
             if pids_file.exists() and json.loads(pids_file.read_text()).get("harness"):
                 break
@@ -1603,8 +1603,8 @@ class EndToEnd(unittest.TestCase):
         # The harness inherits the pool lock: a killed runner must not let a
         # second run spend from the same pool while its harness still can.
         other = self.second_base()
-        self.detach(self.base, "codex:gpt-6.1-sol:high", "hang")
-        pids_file = self.base / "lanes" / "codex-gpt-6.1-sol-high" / "pids.json"
+        self.detach(self.base, "opencode:opencode/space-bunny-free", "hang")
+        pids_file = self.base / "lanes" / "opencode-space-bunny-free" / "pids.json"
         for _ in range(50):
             if pids_file.exists() and json.loads(pids_file.read_text()).get("harness"):
                 break
@@ -1623,13 +1623,13 @@ class EndToEnd(unittest.TestCase):
         os.kill(pids["runner"], signal.SIGKILL)
         from xcheck.files import end_group
         self.addCleanup(end_group, pids["harness"])
-        self.detach(other, "codex:gpt-6.1-sol:high", "ok")
+        self.detach(other, "opencode:opencode/space-bunny-free", "ok")
         time.sleep(4)
-        view = other / "lanes" / "codex-gpt-6.1-sol-high" / "view.log"
-        self.assertIn("waiting for pool codex", view.read_text())
-        self.assertFalse((other / "lanes" / "codex-gpt-6.1-sol-high" / "exit.json").exists())
+        view = other / "lanes" / "opencode-space-bunny-free" / "view.log"
+        self.assertIn("waiting for pool opencode", view.read_text())
+        self.assertFalse((other / "lanes" / "opencode-space-bunny-free" / "exit.json").exists())
         os.killpg(pids["harness"], signal.SIGKILL)  # stop the whole ACP chain before releasing custody
-        self.assertEqual(self.lane_exit(other, "codex-gpt-6.1-sol-high")["status"], "done")
+        self.assertEqual(self.lane_exit(other, "opencode-space-bunny-free")["status"], "done")
 
     def test_native_completion_closes_background_group_before_releasing_pool(self):
         from xcheck import pools

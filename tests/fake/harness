@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fake acpx (stock and the reviewed xcheck-acpx build), every lane's ACP server
-(claude-agent-acp, codex-acp → codex app-server, grok agent stdio, devin acp,
+(claude-agent-acp, grok agent stdio, devin acp,
 opencode acp, Agy's server), the capacity meters, `opencode models` and the
 Keychain lookup: each speaks its real CLI's shape.
 
@@ -18,22 +18,9 @@ kind = Path(sys.argv[0]).name
 mode = os.environ.get("FAKE_MODE", "ok")
 argv = sys.argv[1:]
 
-if kind == "codex-acp":
-    if "--automation-capabilities" in argv:
-        print(json.dumps({"version": os.environ.get("FAKE_CODEX_ACP_VERSION", "2.1.1"),
-                          "ephemeralSessions": True, "failedTurnErrors": True}))
-        sys.exit(0)
-    if "--version" in argv:
-        print("@agentclientprotocol/codex-acp " + os.environ.get("FAKE_CODEX_ACP_VERSION", "2.1.1"))
-        sys.exit(0)
-    import subprocess
-    # Like Node, this second spawn drops the adapter's inherited pool fd.
-    child = subprocess.Popen([os.environ["CODEX_PATH"], "app-server"],
-                             stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, close_fds=True)
-    sys.exit(child.wait())
-
 if kind == "codex" and "--help" in argv:
-    print("--stdio")
+    print("--skip-git-repo-check --ephemeral --sandbox --cd --model --config --json"
+          if argv[:1] == ["exec"] else "--stdio")
     sys.exit(0)
 
 if kind == "grok" and mode == "socket-symlink" and "--sandbox" in argv and argv[argv.index("--sandbox") + 1] != "off":
@@ -157,7 +144,7 @@ if kind in ("acpx", "xcheck-acpx"):
     model = (argv[argv.index("--model") + 1] if "--model" in argv
              else agent_argv[agent_argv.index("--model") + 1] if "--model" in agent_argv else None)
     prompt = Path(argv[argv.index("--file") + 1]).read_text() if "--file" in argv else argv[-1]
-    settings = [("model", model)] if any(Path(a).name in ("opencode", "codex-acp") for a in agent_argv) else []
+    settings = [("model", model)] if any(Path(a).name == "opencode" for a in agent_argv) else []
     settings += [tuple(argv[i + 1].split("=", 1)) for i, arg in enumerate(argv) if arg == "--config-option"]
     agent = subprocess.Popen(agent_argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
@@ -241,7 +228,7 @@ def review_turn(pid, server):
     hang | slow | buffered-work | mixed-duration | progress-hang          quiet or endless work
     draft-rewrite           a complete-looking draft, more tool work, then the final answer
     bg-child                a background child that ignores TERM/HUP, then the answer
-    reconnect (codex) | mcp-policy-audit | mcp-startup-warning (claude)"""
+    mcp-policy-audit | mcp-startup-warning (claude)"""
     token = [l for l in Path("evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
     good = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
     if mode == "silent-exit":
@@ -252,9 +239,6 @@ def review_turn(pid, server):
         while True:
             update({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "."}})
             time.sleep(0.2)
-    if mode == "reconnect" and server == "codex":
-        update({"sessionUpdate": "session_info_update", "_meta": {"codex": {"error": {
-            "message": "Reconnecting... 1/5", "willRetry": True, "turnId": "turn-fixture"}}}})
     if mode == "draft-rewrite":
         chunks(good.replace("The claim holds", "EARLY candidate"))
         time.sleep(float(os.environ.get("FAKE_DELAY", "4")))
@@ -286,7 +270,7 @@ def review_turn(pid, server):
           "params": {"sessionId": "s", "toolCall": {"toolCallId": "t2"}}})
     if mode == "draft-rewrite":
         time.sleep(1)
-    if mode in ("buffered-work", "mixed-duration") and not (mode == "mixed-duration" and server == "codex"):
+    if mode in ("buffered-work", "mixed-duration"):
         time.sleep(float(os.environ.get("FAKE_DELAY", "7")))
     if mode in ("error", "error-retry", "rate-limit-retry", "error-no-newline", "collision-fail"):
         message = ERRORS.get(server, "Individual quota reached")
@@ -359,8 +343,7 @@ if kind == "claude-agent-acp":
 
 # Native ACP servers; all join pool custody, and Agy also runs in Seatbelt.
 if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in argv and "--help" not in argv)
-        or (kind == "grok" and "stdio" in argv)
-        or (kind == "codex" and os.environ.get("XCHECK_CODEX_RUN") and "app-server" in argv)):
+        or (kind == "grok" and "stdio" in argv)):
     configured = {}
     if kind == "devin":
         selected = argv[argv.index("--model") + 1]
@@ -375,8 +358,8 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
         if msg.get("method") == "initialize":
             emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1}})
         elif msg.get("method") == "session/new":
-            if kind in ("opencode", "codex"):
-                offered = OPENCODE_MODELS if kind == "opencode" else ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"]
+            if kind == "opencode":
+                offered = OPENCODE_MODELS
                 emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "configOptions": [
                     {"id": "model", "type": "select", "currentValue": offered[0], "options": [{"value": m} for m in offered]}]}})
                 continue
@@ -416,9 +399,94 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
                     "devin_sandbox": os.environ.get("DEVIN_SANDBOX"),
                     "config": configured,
                     "acpx_env": sorted(k for k in os.environ if k.startswith("ACPX_"))}))
-            review_turn(msg["id"], "grok" if kind == "grok" else "codex" if kind == "codex"
-                        else "opencode" if kind == "opencode" else kind)
+            review_turn(msg["id"], kind)
     sys.exit(0)
+
+
+def holds_pool(pool):
+    busy = Path(os.environ["XCHECK_ROOT"]) / ".pools" / pool / "busy"
+    held = []
+    for fd in range(3, 256):
+        try:
+            held += [fd] if os.fstat(fd).st_ino == busy.stat().st_ino else []
+        except OSError:
+            pass
+    return held
+
+
+class CodexStream:
+    """`codex exec --json` event shapes."""
+    def start(self):
+        emit({"type": "thread.started", "thread_id": "fixture-thread"})
+
+    def say(self, text):
+        emit({"type": "item.completed", "item": {"id": "m", "type": "agent_message", "text": text}})
+
+    def tool(self):
+        emit({"type": "item.started", "item": {"id": "c", "type": "command_execution", "command": "cat PACKET.md"}})
+        emit({"type": "item.completed", "item": {"id": "c", "type": "command_execution", "exit_code": 0}})
+
+    def think(self):
+        emit({"type": "item.started", "item": {"id": "r", "type": "reasoning"}})
+
+    def notice(self, message):
+        emit({"type": "error", "message": message})
+
+    def done(self, text):
+        self.say(text)
+        emit({"type": "turn.completed", "usage": {}})
+
+    def fail(self, message):
+        emit({"type": "error", "message": message})
+        emit({"type": "turn.failed", "error": {"message": message}})
+
+
+def native_turn(stream, server, work):
+    """One headless run in the CLI's own event shapes, with review_turn's modes."""
+    token = [l for l in (work / "evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
+    good = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
+    if os.environ.get("FAKE_ENV_DUMP"):
+        Path(os.environ["FAKE_ENV_DUMP"]).with_suffix(f".{server}.json").write_text(json.dumps(dict(os.environ)))
+    stream.start()
+    if mode == "custody":
+        (work / "probe.json").write_text(json.dumps({"holds_busy": holds_pool(server), "argv": argv,
+                                                     "stdin": sys.stdin.read()}))
+    if mode == "silent-exit":
+        sys.exit(0)
+    if mode in ("hang", "slow"):
+        time.sleep(60 if mode == "hang" else 3)
+    if mode == "progress-hang":
+        while True:
+            stream.think()
+            time.sleep(0.2)
+    if mode == "reconnect":
+        stream.notice("Reconnecting... 1/5 (stream disconnected before completion)")
+    stream.say("Reading the packet.")
+    stream.tool()
+    if mode in ("buffered-work", "mixed-duration") and not (mode == "mixed-duration" and server == "codex"):
+        time.sleep(float(os.environ.get("FAKE_DELAY", "7")))
+    if mode in ("error", "error-retry", "rate-limit-retry", "error-no-newline", "collision-fail"):
+        stream.fail(ERRORS.get(server, "Individual quota reached"))
+        while mode in ("error-retry", "rate-limit-retry"):  # the process keeps going after its failure
+            stream.think()
+            time.sleep(0.2)
+        sys.exit(1)
+    text = {"echo402": good.replace("The claim holds", "The packet quotes `HTTP 402 payment required`, "
+                                    "`You've hit your limit · resets 7pm` and `session limit reached`; "
+                                    "all are evidence, not errors. The claim holds"),
+            "invalid": "### 1) VERDICT\nfine but no proof and no marker\n",
+            "declined": "I cannot do this review.\nRESULT_INVALID\n"}.get(mode, good)
+    if mode == "text-only":
+        stream.say(text)
+        sys.exit(0)
+    stream.done(text)
+    if mode == "terminal-hang":
+        time.sleep(60)
+    sys.exit(0)
+
+
+if kind == "codex" and argv[:1] == ["exec"]:
+    native_turn(CodexStream(), "codex", Path(argv[argv.index("-C") + 1]))
 
 
 # Quota meters (xcheck/capacity.py), FAKE_CAPACITY=eligible|reserve-low.

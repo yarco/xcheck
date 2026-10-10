@@ -452,8 +452,7 @@ def doctor() -> int:
     print(f"FAIL grok: {problem}" if problem else "ok   grok: startup with --sandbox off (zero inference)")
     bad += bool(problem)
     problem = adapters.unavailable(adapters.DEFAULT_ROSTER[0])
-    print(f"FAIL codex: {problem}" if problem else
-          f"ok   codex: installed codex-acp {adapters.CODEX_ACP_VERSION} and Codex CLI present")
+    print(f"FAIL codex: {problem}" if problem else "ok   codex: Codex CLI present")
     bad += bool(problem)
     problem = adapters.unavailable(adapters.DEFAULT_ROSTER[1])
     print(f"FAIL claude: {problem}" if problem else
