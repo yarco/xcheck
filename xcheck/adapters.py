@@ -908,7 +908,9 @@ class Reader:
             return native(o)
         if "method" in o:
             if "id" in o:  # a request, from either side
-                if o["method"] == "session/prompt":
+                if o["method"] == "session/prompt" and self._prompt_id is None:
+                    # acpx sends one prompt (--prompt-retries 0); session/prompt
+                    # is client-to-agent, so a later one is an ordinary request.
                     self._prompt_id = o["id"]
                 else:
                     key = _id_key(o["id"])
@@ -1006,13 +1008,13 @@ class Reader:
         if t == "error":
             self._failure = _clip(str(o.get("message") or "error"), 300)
             return f"! {self._failure}"
+        if item.get("type") == "mcp_tool_call" and t in ("item.started", "item.completed"):
+            self._codex_mcp_policy(item, t)
         if t == "item.started" and item.get("type") not in (None, "agent_message", "reasoning"):
             self.text = ""  # narration before a tool call is not the answer
             if item["type"] == "command_execution":
                 return f"$ {_clip(str(item.get('command', '')), 120)}"
             return f"> {item['type']}"
-        if item.get("type") == "mcp_tool_call" and t in ("item.started", "item.completed"):
-            self._codex_mcp_policy(item, t)
         if t == "item.completed" and item.get("type") == "agent_message":
             self.text = item.get("text") if isinstance(item.get("text"), str) else ""
             return None

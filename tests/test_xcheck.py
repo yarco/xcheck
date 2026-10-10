@@ -201,6 +201,12 @@ class AcpCorrelation(unittest.TestCase):
                 self.assertEqual(r.error, "usage limit reached")
                 self.assertFalse(r.completed)
 
+    def test_a_later_session_prompt_request_does_not_take_the_prompt_id(self):
+        r = self.feed(PROMPT_3, {"jsonrpc": "2.0", "id": 7, "method": "session/prompt", "params": {}},
+                      _say("answer"), DONE_3)
+        self.assertTrue(r.completed)
+        self.assertIsNone(r.error)
+
     def test_prompt_failure_after_the_colliding_permission_reply_is_the_failure(self):
         r = self.feed(PROMPT_3, ASK_3, GRANT_3, FAIL_3)
         self.assertEqual(r.error, "usage limit reached")
@@ -1380,6 +1386,16 @@ class EndToEnd(unittest.TestCase):
     def test_silent_exit_is_failed(self):
         rows = self.run_lanes("silent-exit")
         self.assertEqual({r["status"] for r in rows.values()}, {"failed"})
+
+    def test_a_descendant_holding_stdout_does_not_keep_an_exited_harness_pending(self):
+        started = time.monotonic()
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes",
+                        "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high", "--mode", "headless", "--skip-capacity",
+                        mode="stdout-leak")
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        rows = json.loads((self.base / "STATUS.json").read_text())["lanes"]
+        self.assertEqual({r["status"] for r in rows}, {"failed"}, rows)
+        self.assertLess(time.monotonic() - started, 30)
 
     def test_idle_timeout_kills_the_lane(self):
         rows = self.run_lanes("hang", extra=("--idle", "3"))
