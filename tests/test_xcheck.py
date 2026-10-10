@@ -1394,9 +1394,10 @@ class EndToEnd(unittest.TestCase):
 
     def test_a_descendant_holding_stdout_does_not_keep_an_exited_harness_pending(self):
         started = time.monotonic()
-        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes",
-                        "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high", "--mode", "headless", "--skip-capacity",
-                        mode="stdout-leak")
+        native = [s for s in ("codex:gpt-6.1-sol:high", "claude:claude-opus-5-5:high")
+                  if adapters.Reader(s.split(":")[0]).native()]  # the harness is the runner's direct child
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", ",".join(native),
+                        "--mode", "headless", "--skip-capacity", mode="stdout-leak")
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         rows = json.loads((self.base / "STATUS.json").read_text())["lanes"]
         self.assertEqual({r["status"] for r in rows}, {"failed"}, rows)
