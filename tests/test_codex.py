@@ -46,8 +46,8 @@ class Reader(unittest.TestCase):
         self.assertEqual(r.error, "Reconnecting... 1/5")
 
 
-def server(name, kind="stdio", **transport):
-    return {"name": name, "enabled": True, "transport": {"type": kind, **transport}}
+def server(name, kind="stdio", auth="unsupported", **transport):
+    return {"name": name, "enabled": True, "auth_status": auth, "transport": {"type": kind, **transport}}
 
 
 SERVERS = [server("semble", command="uvx", env={"UV_CACHE_DIR": "/c"}),
@@ -130,6 +130,13 @@ class Controls(unittest.TestCase):
                 with self.assertRaises(adapters.Unavailable):
                     adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
         self.assertFalse(adapters._codex_review_mcp({"name": "you-free", "transport": {"type": "streamable_http"}}, True))
+
+    def test_a_stored_login_disqualifies_an_approved_keyless_server(self):
+        free = server("you-free", "streamable_http", url=adapters.REVIEW_FREE_MCP["you-free"])
+        self.assertTrue(adapters._codex_review_mcp({**free, "auth_status": "not_logged_in"}, True))
+        for auth in ("o_auth", "bearer_token", None):
+            with self.subTest(auth=auth):
+                self.assertFalse(adapters._codex_review_mcp({**free, "auth_status": auth}, True))
 
     def test_an_unapproved_mcp_call_that_slips_through_is_audited(self):
         calls = [json.loads(line) for line in (support.FIX / "codex-mcp-calls.jsonl").read_text().splitlines()]

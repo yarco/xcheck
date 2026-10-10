@@ -145,9 +145,11 @@ CODEX_DISABLED_FEATURES = ("plugins", "hooks", "apps", "computer_use", "browser_
 
 def _codex_review_mcp(server: dict, web: bool) -> bool:
     """One entry of `codex mcp list --json` that a review may keep: an approved
-    name in a keyless shape (the same rule as Claude's registrations)."""
+    name in a keyless shape (the same rule as Claude's registrations) with no
+    stored login, which the shape cannot show (Codex keeps MCP OAuth tokens)."""
     name, transport = server.get("name"), server.get("transport")
-    if not isinstance(name, str) or not isinstance(transport, dict):
+    if not isinstance(name, str) or not isinstance(transport, dict) \
+            or server.get("auth_status") not in ("unsupported", "not_logged_in"):
         return False
     if transport.get("type") == "stdio":
         env = transport.get("env") or {}
