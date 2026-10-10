@@ -176,7 +176,7 @@ class AcpCorrelation(unittest.TestCase):
     """acpx prints both directions without saying which; an agent request may
     reuse the id of acpx's own session/prompt (ids belong to their sender)."""
 
-    def feed(self, *events, kind="opencode"):
+    def feed(self, *events, kind="codex"):
         r = adapters.Reader(kind)
         for e in events:
             r.feed(e)
@@ -1299,7 +1299,7 @@ class EndToEnd(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp(prefix="xcheck-test-", dir=self.root))
         self.bin = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.bin)
-        for k in (*adapters.KINDS, "acpx", "security"):
+        for k in (*adapters.KINDS, "acpx", "codex-acp", "security"):
             (self.bin / k).symlink_to(REPO / "tests" / "fake" / "harness")
         acp = self.root / "agy-acp"
         acp.mkdir()
@@ -1488,9 +1488,9 @@ class EndToEnd(unittest.TestCase):
 
     def test_dead_supervisor_and_runner_orphan_is_stopped_on_reattach(self):
         common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
-                  "--lanes", "opencode:opencode/space-bunny-free")
+                  "--lanes", "codex:gpt-6.1-sol:high")
         self.assertEqual(self.xcheck("run", *common, "--detach", mode="hang").returncode, 0)
-        pids_file = self.base / "lanes" / "opencode-space-bunny-free" / "pids.json"
+        pids_file = self.base / "lanes" / "codex-gpt-6.1-sol-high" / "pids.json"
         for _ in range(50):
             if pids_file.exists() and json.loads(pids_file.read_text()).get("harness"):
                 break
@@ -1598,8 +1598,8 @@ class EndToEnd(unittest.TestCase):
         # The harness inherits the pool lock: a killed runner must not let a
         # second run spend from the same pool while its harness still can.
         other = self.second_base()
-        self.detach(self.base, "opencode:opencode/space-bunny-free", "hang")
-        pids_file = self.base / "lanes" / "opencode-space-bunny-free" / "pids.json"
+        self.detach(self.base, "codex:gpt-6.1-sol:high", "hang")
+        pids_file = self.base / "lanes" / "codex-gpt-6.1-sol-high" / "pids.json"
         for _ in range(50):
             if pids_file.exists() and json.loads(pids_file.read_text()).get("harness"):
                 break
@@ -1618,13 +1618,13 @@ class EndToEnd(unittest.TestCase):
         os.kill(pids["runner"], signal.SIGKILL)
         from xcheck.files import end_group
         self.addCleanup(end_group, pids["harness"])
-        self.detach(other, "opencode:opencode/space-bunny-free", "ok")
+        self.detach(other, "codex:gpt-6.1-sol:high", "ok")
         time.sleep(4)
-        view = other / "lanes" / "opencode-space-bunny-free" / "view.log"
-        self.assertIn("waiting for pool opencode", view.read_text())
-        self.assertFalse((other / "lanes" / "opencode-space-bunny-free" / "exit.json").exists())
+        view = other / "lanes" / "codex-gpt-6.1-sol-high" / "view.log"
+        self.assertIn("waiting for pool codex", view.read_text())
+        self.assertFalse((other / "lanes" / "codex-gpt-6.1-sol-high" / "exit.json").exists())
         os.killpg(pids["harness"], signal.SIGKILL)  # stop the whole ACP chain before releasing custody
-        self.assertEqual(self.lane_exit(other, "opencode-space-bunny-free")["status"], "done")
+        self.assertEqual(self.lane_exit(other, "codex-gpt-6.1-sol-high")["status"], "done")
 
     def test_native_completion_closes_background_group_before_releasing_pool(self):
         from xcheck import pools

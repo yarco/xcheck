@@ -1,0 +1,20 @@
+{
+  "upstreamTag": "v2.1.1",
+  "upstreamCommit": "68d7d2d5ddfc0ed5746f9f6130892dda685e65dd",
+  "packageVersion": "2.1.1",
+  "buildName": "2.1.1-automation.1",
+  "archiveSha256": "921b7ced5b76fe4896ddeed8589fd266f305df93dd330f28a3ceac6a1b075d66",
+  "sourcePatchSha256": "7a6448ee4f77fa5640f48406374486d1f9dc227c2b09c378b4719df904cd77cb",
+  "validatedWith": {
+    "codex": "0.162.0",
+    "acpx": "0.19.4"
+  },
+  "validation": {
+    "xcheckTestsPassed": 251,
+    "adapterTestsPassed": 1089,
+    "adapterTestsSkipped": 33,
+    "headlessSmokeSeconds": 334,
+    "herdrSmokeSeconds": 52,
+    "genericNativeFailureSmokeSeconds": 1
+  }
+}

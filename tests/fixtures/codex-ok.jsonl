@@ -1,7 +1,0 @@
-{"type":"thread.started","thread_id":"fa891ee7-8df0-54cd-b51a-083182de344f"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll read the file and return the requested value and final line."}}
-{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'cat data.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'cat data.txt'","aggregated_output":"secret=PLUM-42\n","exit_code":0,"status":"completed"}}
-{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"PLUM-42\nRESULT_COMPLETE"}}
-{"type":"turn.completed","usage":{"input_tokens":39406,"cached_input_tokens":19456,"cache_write_input_tokens":0,"output_tokens":67,"reasoning_output_tokens":0}}

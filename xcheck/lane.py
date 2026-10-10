@@ -384,6 +384,14 @@ def hold(pool: str, run_id: str, log: Path | None, argv: list[str]) -> int:
     os.execv(argv[0], argv)
 
 
+def codex_app_server() -> int:
+    """CODEX_PATH target: keep the actual spender in this run's existing pool."""
+    binary, base = os.environ.get("XCHECK_CODEX_BINARY"), os.environ.get("XCHECK_CODEX_RUN")
+    if not binary or not base:
+        raise ValueError("app-server is an internal Codex ACP custody entry point")
+    return hold("codex", base, None, [binary, "app-server", "--stdio"])
+
+
 def _consume(reader: adapters.Reader, raw: bytes, progress=None) -> None:
     line = raw.decode("utf-8", errors="replace").strip()
     if not line:

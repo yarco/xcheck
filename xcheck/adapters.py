@@ -1,9 +1,9 @@
 """Per-harness knowledge: how to start a lane, and how to read what it streams.
 
-Codex and Claude run their first-party headless streams (`codex exec --json`,
-`claude -p --output-format stream-json`); every other lane is an acpx (ACP
-client) exec against the harness's ACP server. The
-vendor-specific part is the command, its environment and its native policy. Every flag here was checked against CLI help and smoke runs, and
+Claude runs its first-party headless stream (`claude -p --output-format
+stream-json`); every other lane, Codex included, is an acpx (ACP client) exec
+against the harness's ACP server. The vendor-specific part is the command,
+its environment and its native policy. Every flag here was checked against CLI help and smoke runs, and
 `xcheck doctor` re-checks flags against installed help.
 
 Lanes print their answer as their final message; the one Reader below
@@ -134,19 +134,55 @@ def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launc
     raise ValueError(f"unknown kind {lane.kind}")
 
 
+CODEX_ACP_VERSION = "2.1.1"  # re-verify permissions and native events before changing
+
+
 def _codex_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
-    """Codex's own headless form: `codex exec --json`, the message on stdin.
-    `--ephemeral` keeps no session files, `-s read-only` is the native sandbox
-    (exec never asks for approval), and the operator's config still loads, so
-    connected MCP servers are available. The installed binary is the direct
-    child, so it holds the pool descriptor itself. The ACP form of this lane
-    (codex-acp) is kept on the `acp/codex` branch."""
-    argv = [shutil.which("codex") or "codex", "exec", "--skip-git-repo-check", "--ephemeral",
-            "-s", "read-only", "-C", str(work), "-m", lane.model,
-            "-c", f'model_reasoning_effort="{lane.effort}"',
-            "-c", f'web_search="{"live" if web else "disabled"}"',
-            "-c", "check_for_update_on_startup=false", "--json", "-"]
-    return Launch(argv, message)
+    from .files import ROOT
+    base = str(log.parent.parent.parent)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", base, "--log", str(log), "--", shutil.which("codex-acp") or "codex-acp"]
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), "--model", lane.model, "--deny-all", "--auth-policy", "skip",
+            "--no-terminal", "--no-fs", "--prompt-retries", "0", "--format", "json", "exec",
+            "--config-option", "mode=read-only", "--config-option", f"reasoning_effort={lane.effort}",
+            "--file", str(message)]
+    return Launch(argv, None, env_set={
+        "XCHECK_ROOT": str(ROOT), "XCHECK_CODEX_RUN": base,
+        "XCHECK_CODEX_BINARY": shutil.which("codex") or "codex",
+        # Node drops inherited descriptors again when the adapter spawns Codex.
+        # The installed xcheck entry point rejoins the same pool before exec.
+        "CODEX_PATH": str(BIN), "INITIAL_AGENT_MODE": "read-only", "NO_BROWSER": "1",
+        "CODEX_ACP_EPHEMERAL": "1",
+        "CODEX_CONFIG": json.dumps({"model": lane.model, "model_reasoning_effort": lane.effort,
+                                     "sandbox_mode": "read-only", "approval_policy": "never",
+                                     "web_search": "live" if web else "disabled",
+                                     "check_for_update_on_startup": False,
+                                     "history": {"persistence": "none"}}),
+        "APP_SERVER_LOGS": str(log.parent / "codex-logs"),
+    })
+
+
+def codex_acp_problem() -> str | None:
+    """Only the explicitly installed, audited adapter; never an npm caret launch."""
+    if not shutil.which("codex") or not shutil.which("codex-acp"):
+        return ("startup-unavailable: codex and the reviewed codex-acp automation build must be on PATH; "
+                "see integrations/codex-acp/README.md (stock npm is insufficient)")
+    from .lane import lane_env
+    try:
+        out = subprocess.run([shutil.which("codex-acp"), "--automation-capabilities"],
+                             env=lane_env(Launch([], None, env_set={"CODEX_PATH": os.devnull}), Path.cwd()),
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"startup-unavailable: codex-acp capability probe failed ({type(exc).__name__})"
+    try:
+        features = json.loads(out.stdout)
+    except ValueError:
+        features = None
+    if out.returncode or features != {"version": CODEX_ACP_VERSION, "ephemeralSessions": True, "failedTurnErrors": True}:
+        return (f"startup-unavailable: codex-acp needs the reviewed {CODEX_ACP_VERSION} automation build "
+                "(ephemeral sessions and failed-turn errors); stock npm releases lack these controls")
+    return None
 
 
 def _opencode_model(lane: Lane) -> list[str]:
@@ -681,8 +717,6 @@ def _agy_profile(path: Path, work: Path, home: Path, uv: Path) -> Path:
 
 def unavailable(lane: Lane) -> str | None:
     """Why this lane cannot start here, before admission; None when it can."""
-    if lane.kind == "codex":
-        return None if shutil.which("codex") else "startup-unavailable: codex is not on PATH"
     if lane.kind == "claude":
         return claude_problem()
     if not shutil.which("acpx"):
@@ -697,6 +731,8 @@ def unavailable(lane: Lane) -> str | None:
         return f"startup-unavailable: {ACPX_CONFIG} must contain a JSON object; fix or remove it"
     if set_keys := [k for k in ACPX_FORBIDDEN if k in config]:
         return f"startup-unavailable: {ACPX_CONFIG} sets {', '.join(set_keys)}; xcheck lanes need acpx defaults"
+    if lane.kind == "codex":
+        return codex_acp_problem()
     if lane.kind in ("devin", "opencode"):
         return None if shutil.which(lane.kind) else f"startup-unavailable: {lane.kind} is not on PATH"
     if lane.kind == "grok":
@@ -718,9 +754,6 @@ def unavailable(lane: Lane) -> str | None:
 # Flags each adapter relies on, for `xcheck doctor` (help-text drift check).
 # Hidden-but-accepted flags are never used, so every entry must be listed.
 HELP_COMMANDS = {
-    "codex exec": (["codex", "exec", "--help"], ["--skip-git-repo-check", "--ephemeral", "--sandbox",
-                   "--cd", "--model", "--config", "--json"]),
-    # The capacity meter reads account/rateLimits/read from the app server.
     "codex app-server": (["codex", "app-server", "--help"], ["--stdio"]),
     # Admission checks these too, since the CLI upgrades separately.
     "claude": (["claude", "--help"], list(CLAUDE_NATIVE_FLAGS)),
@@ -918,36 +951,6 @@ class Reader:
         if kind == "tool_call":
             self._buf.clear()
             return f"> {_clip(update.get('title') or update.get('kind') or 'tool', 120)}"
-        return None
-
-    # -- codex: `codex exec --json`. Each agent_message is a whole message, so
-    # the last one is the answer; turn.completed ends the turn and turn.failed
-    # fails it. A top-level `error` (a reconnect notice) can recover, so it is
-    # only the reason if the turn never completes.
-    def _codex(self, o: dict) -> str | None:
-        t = o.get("type")
-        item = o.get("item") if isinstance(o.get("item"), dict) else {}
-        if t == "turn.completed":
-            self.completed = True
-            return "· end turn"
-        if t == "turn.failed":
-            error = o.get("error")
-            self.error = _clip(str((error.get("message") if isinstance(error, dict) else None)
-                                   or self._failure or "turn.failed"), 300)
-            return f"! turn failed: {self.error}"
-        if t == "error":
-            self._failure = _clip(str(o.get("message") or "error"), 300)
-            return f"! {self._failure}"
-        if t == "item.started" and item.get("type") not in (None, "agent_message", "reasoning"):
-            self.text = ""  # narration before a tool call is not the answer
-            if item["type"] == "command_execution":
-                return f"$ {_clip(str(item.get('command', '')), 120)}"
-            return f"> {item['type']}"
-        if t == "item.completed" and item.get("type") == "agent_message":
-            self.text = item.get("text") if isinstance(item.get("text"), str) else ""
-            return None
-        if t == "item.completed" and isinstance(item.get("type"), str):
-            return f"> {item['type']}"
         return None
 
     # -- claude: `claude -p --output-format stream-json`. The `result` event

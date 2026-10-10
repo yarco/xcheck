@@ -43,7 +43,7 @@ class FinalReaderRepairs(unittest.TestCase):
         from unittest.mock import Mock
         for error in (OSError("store unavailable"), AttributeError("unexpected metadata shape")):
             with self.subTest(error=type(error).__name__):
-                reader = adapters.Reader('opencode')
+                reader = adapters.Reader('codex')
                 progress = Mock()
                 progress.observe.side_effect = error
                 lane._consume(reader, json.dumps(chunk(GOOD)).encode(), progress)
