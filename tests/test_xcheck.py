@@ -1,4 +1,4 @@
-"""X-Check tests. Run: uv run --with-requirements requirements-test.txt pytest"""
+"""X-Check tests. Run: uv run --python '>=3.12' --with-requirements requirements-test.txt pytest"""
 
 from __future__ import annotations
 
@@ -103,6 +103,7 @@ class Readers(unittest.TestCase):
 
     def test_errors_are_structured(self):
         claude = read_fixture("claude", "claude-error.jsonl")
+        self.assertFalse(claude.completed)  # an error result ends the turn without completing it
         self.assertIn("issue with the selected model", claude.error)
         self.assertEqual(claude.text, "")  # the error message is not an answer
         self.assertIn("unknown model id", read_fixture("grok", "grok-acp-error.jsonl").error)
@@ -209,6 +210,22 @@ class AcpCorrelation(unittest.TestCase):
                 else:
                     r.feed(FAIL_3)  # both responses at id 3 are errors: one ended the prompt
                     self.assertIn("usage limit reached", r.error)
+
+    def test_an_agent_reusing_the_prompt_id_after_its_error_reply_is_not_a_failure(self):
+        # A sender reuses an id only after its earlier request at that id was
+        # answered, so the held error answered that request, not the prompt.
+        for rounds in (1, 2, 3):
+            with self.subTest(rounds=rounds):
+                r = self.feed(PROMPT_3, *(e for _ in range(rounds) for e in (ASK_3, REFUSE_3)), ASK_3, GRANT_3)
+                self.assertIsNone(r.error)
+                r.feed(_say("answer"))
+                r.feed(DONE_3)
+                r.finish()
+                self.assertTrue(r.completed)
+                self.assertIsNone(r.error)
+                self.assertEqual(r.text, "answer")
+        r = self.feed(PROMPT_3, ASK_3, REFUSE_3, ASK_3, GRANT_3, FAIL_3)  # the prompt can still fail
+        self.assertEqual(r.error, "usage limit reached")
 
     def test_an_unresolved_held_error_fails_when_the_client_exits_without_completion(self):
         r = self.feed(PROMPT_3, ASK_3, _say("draft RESULT_COMPLETE"), FAIL_3)
@@ -582,7 +599,8 @@ class GrokLane(unittest.TestCase):
                                     ("claude", "claude-sonnet-5", "low"),
                                     ("grok", "grok-4.7", "low")):
             lane = Lane(kind, model, effort)
-            with tempfile.TemporaryDirectory() as tmp:
+            with tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(adapters, "_codex_mcp_enabled", return_value=[]):
                 stream = adapters.launch(lane, Path("/w"), Path("/m"),
                                          Path(tmp) / "harness.log", True).argv
             if kind == "codex":
@@ -1319,7 +1337,7 @@ class EndToEnd(unittest.TestCase):
     def xcheck(self, *args, mode="ok", timeout=60, capacity=None, env_extra=None):
         env = {**os.environ, **(env_extra or {}), "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
                "XCHECK_ROOT": str(self.root),
-               "CODEX_CONFIG": str(self.root / "codex-config.toml")}
+}
         if capacity:
             env["FAKE_CAPACITY"] = capacity
         env.pop("HERDR_ENV", None)
@@ -1541,7 +1559,7 @@ class EndToEnd(unittest.TestCase):
         stale = {"PWD": str(Path.home()), "OLDPWD": str(Path.home())}
         env = {**os.environ, **leak, **keep, **stale, **live_socket, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
-               "CODEX_CONFIG": str(self.root / "codex-config.toml")}
+}
         lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free,devin:swe-2-max"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],

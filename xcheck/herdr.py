@@ -1,6 +1,6 @@
 """Herdr placement: one visible pane per lane, running the ordinary lane runner.
 
-A pane shows the lane runner's rendering of its ACP stream (tool calls,
+A pane shows the lane runner's rendering of its stream (tool calls,
 errors, the end of the turn). Completion is the lane's exit.json, never pane
 text. The runner replaces the pane's shell (`exec`), and
 Herdr closes a pane when its process exits, so each pane closes itself when its

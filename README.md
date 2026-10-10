@@ -42,14 +42,14 @@ Stage `BASE/PACKET.md`, `BASE/PROMPT.md`, and `BASE/evidence/` before launching.
 ## Tests
 
 ```bash
-uv run --with-requirements requirements-test.txt pytest   # ~25 s, all cores (pytest.ini)
+uv run --python '>=3.12' --with-requirements requirements-test.txt pytest   # ~25 s, all cores (pytest.ini)
 git diff --check
 ```
 
 Optional long acceptance (185 s):
 
 ```bash
-uv run --with-requirements requirements-test.txt pytest tests/acceptance_runtime.py
+uv run --python '>=3.12' --with-requirements requirements-test.txt pytest tests/acceptance_runtime.py
 ```
 
 ## License

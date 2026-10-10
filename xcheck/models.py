@@ -122,13 +122,14 @@ def priced_candidates(payload: dict, source_url: str) -> list[dict]:
         inputs = architecture.get("input_modalities", item.get("input_modalities", []))
         outputs = architecture.get("output_modalities", item.get("output_modalities", []))
         features = item.get("supported_parameters", item.get("supported_features", []))
-        if ("tools" not in features or "text" not in inputs or "text" not in outputs
+        # A review lane is a text coding model: multimodal (image/audio/video)
+        # models are excluded, and so is any offer with an announced end date,
+        # which is a promotion rather than a standing free tier.
+        if ("tools" not in features or set(inputs) != {"text"} or set(outputs) != {"text"}
                 or architecture.get("tokenizer") == "Router" or item.get("router") is True
-                or item.get("deprecated") or not zero_cost(item.get("pricing"), ("prompt", "completion"))):
+                or item.get("deprecated") or item.get("expiration_date")
+                or not zero_cost(item.get("pricing"), ("prompt", "completion"))):
             continue
-        if item.get("expiration_date"):
-            if date.fromisoformat(item["expiration_date"]) <= datetime.now(timezone.utc).date():
-                continue
         created = item.get("created")
         released = ""
         if isinstance(created, (int, float)) and not isinstance(created, bool):

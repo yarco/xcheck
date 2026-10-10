@@ -92,3 +92,23 @@ class Lanes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeControl(unittest.TestCase):
+    def test_the_probe_fake_offers_a_global_connector_only_without_strict_mcp(self):
+        # Keeps test_fake_global_paid_connector_is_not_offered_by_installed_review
+        # able to fail: drop --strict-mcp-config and the forbidden call appears.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            support.stage(work)
+            fake = support.REPO / "tests" / "fake" / "harness"
+            claude = work / "claude"
+            claude.symlink_to(fake)
+            base = [str(claude), "-p", "--mcp-config", '{"mcpServers": {}}', "--model", "m", "--add-dir", str(work)]
+            env = {**os.environ, "FAKE_MODE": "mcp-policy-probe"}
+            loose = subprocess.run(base, cwd=work, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            strict = subprocess.run([*base, "--strict-mcp-config"], cwd=work, env=env, stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True)
+        self.assertIn("cloudflare-browser-rendering", loose.stdout)
+        self.assertNotIn("cloudflare-browser-rendering", strict.stdout)
