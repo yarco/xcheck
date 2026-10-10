@@ -291,9 +291,9 @@ class AcpCorrelation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stream = Path(tmp) / "stream.jsonl"
             stream.write_text("\n".join(json.dumps(e) for e in (PROMPT_3, ASK_3, FAIL_3, GRANT_3)) + "\nnot json\n")
-            r = adapters.Reader.replay("opencode", stream)
+            r = adapters.Reader.replay("opencode", stream, True)
             self.assertEqual(r.error, "usage limit reached")
-            self.assertFalse(adapters.Reader.replay("opencode", Path(tmp) / "absent").completed)
+            self.assertFalse(adapters.Reader.replay("opencode", Path(tmp) / "absent", True).completed)
 
 
 def _claude_use(call, name):

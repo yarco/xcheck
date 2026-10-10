@@ -268,6 +268,19 @@ class FinalSettlementRepairs(unittest.TestCase):
         self.assertFalse((current.lane_dir(live) / 'cancel.json').exists())
         self.assertFalse(files.is_alive(current.lane_dir(unstarted) / 'alive'))  # the lock was released
 
+    def test_a_dead_runner_does_not_veto_cancelling_the_others(self):
+        current = self.current(two=True)
+        dead, live = current.lanes
+        files.hold_life(current.lane_dir(dead) / 'alive').close()  # ran, then exited without a record
+        (current.lane_dir(dead) / 'pids.json').write_text(json.dumps(dict(runner=1, harness=None)))
+        (current.lane_dir(live) / 'pids.json').write_text(json.dumps(dict(runner=123)))
+        with files.hold_life(current.lane_dir(live) / 'alive'), \
+             patch.object(run, '_pid_cmd', return_value=f'python xcheck lane --base {self.base} --lane {live}'), \
+             patch.object(run, '_signal') as sent:
+            self.assertEqual(run.cancel(current, None, 'operator reason'), 0)
+        sent.assert_called_once_with(123, signal.SIGTERM)
+        self.assertEqual(json.loads((current.lane_dir(dead) / 'exit.json').read_text())['status'], 'failed')
+
     def test_a_lane_whose_runner_never_started_is_settled_and_cannot_start_later(self):
         current = self.current()
         current.save()

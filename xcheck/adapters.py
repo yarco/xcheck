@@ -76,9 +76,13 @@ DEFAULT_ROSTER = (
 # offer fails doctor until the pin is refreshed.
 OPT_IN = (
     Lane("devin", "swe-2-max"),
-    Lane("opencode", "opencode/space-bunny-free"),
-    # Contributor tier permits logging/training; mind what its packets hold.
-    Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),
+    # Free OpenCode Zen pins, each qualified by a real review run. Data terms
+    # are the provider's (opencode.ai/docs/zen); mind what a packet holds.
+    Lane("opencode", "opencode/space-bunny-free"),  # zero retention, no training
+    Lane("opencode", "opencode/step-5-preview-free"),  # zero retention, no training
+    Lane("opencode", "opencode/nemotron-3-ultra-free"),  # NVIDIA trial: logged; no confidential data
+    Lane("opencode", "opencode/mimo-v2.6-flash-free"),  # may be used to improve the model
+    Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),  # Contributor: may log or train
 )
 
 
@@ -816,6 +820,7 @@ class Reader:
     only as the failure reason if the turn never completes.
     The answer is the agent text after the last tool call."""
     kind: str
+    web: bool = True  # the run's mode: the MCP audit approves what the launch approved
     text: str = ""
     error: str | None = None
     completed: bool = False
@@ -828,10 +833,10 @@ class Reader:
     _failure: str | None = None  # the reason to report if the turn never completes
 
     @classmethod
-    def replay(cls, kind: str, stream: Path) -> "Reader":
+    def replay(cls, kind: str, stream: Path, web: bool) -> "Reader":
         """Rebuild a lane's reader from its saved stream (recovery after a
         runner died). Completion stays exactly what the live reader requires."""
-        reader = cls(kind)
+        reader = cls(kind, web)
         try:
             lines = stream.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -1007,6 +1012,9 @@ class Reader:
             return "\n".join(out) or None
         return None
 
+    def _approved_mcp(self) -> set[str]:
+        return REVIEW_LOCAL_MCP | (REVIEW_FREE_MCP.keys() if self.web else set())
+
     def _claude_mcp_policy(self, block: dict) -> None:
         """One diagnostic per unapproved MCP tool_use; the exact
         `mcp__<server>__<tool>` name, never text that merely quotes one."""
@@ -1014,7 +1022,7 @@ class Reader:
         if not isinstance(name, str) or (isinstance(call, str) and call in self._mcp_calls):
             return
         parts = name.split("__")
-        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in REVIEW_LOCAL_MCP | REVIEW_FREE_MCP.keys():
+        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in self._approved_mcp():
             return
         diagnostic = dict(kind="mcp_policy", tool=name, outcome="attempted", billing="unknown")
         self.diagnostics.append(diagnostic)
