@@ -328,7 +328,7 @@ def cancel(run: Run, name: str | None, reason: str) -> int:
     names = [name] if name else list(run.lanes)
     if any(n not in run.lanes for n in names):
         raise ValueError('unknown lane')
-    targets = []
+    targets, unstarted = [], []
     for selected in names:
         d = run.lane_dir(selected)
         if (d / 'exit.json').exists():
@@ -337,7 +337,13 @@ def cancel(run: Run, name: str | None, reason: str) -> int:
         try:
             pid = json.loads((d / 'pids.json').read_text())['runner']
         except (OSError, ValueError, KeyError):
-            raise RunError(f'{selected}: runner not recorded; cancellation not sent')
+            # No runner recorded. Holding its life lock proves none runs, and a
+            # runner that starts later finds exit.json under that lock and stops.
+            try:
+                unstarted.append((selected, hold_life(d / 'alive')))
+            except BlockingIOError:
+                raise RunError(f'{selected}: runner is starting; cancellation not sent') from None
+            continue
         cmd = _pid_cmd(pid)
         if not is_alive(d / 'alive') or not all(re.search(re.escape(value) + r"(?=[/\s'\"]|$)", cmd)
                                               for value in (str(run.base), selected)) or ' lane ' not in cmd:
@@ -349,6 +355,10 @@ def cancel(run: Run, name: str | None, reason: str) -> int:
     for selected, d, pid in targets:
         _signal(pid, signal.SIGTERM)
         print(f'xcheck: cancellation sent to {selected}')
+    for selected, lock in unstarted:
+        _write_exit(run, selected, 'interrupted', f'cancelled: {reason.strip()}; no runner had started')
+        lock.close()
+        print(f'xcheck: {selected} settled; no runner had started')
     return 0
 
 

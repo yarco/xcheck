@@ -234,6 +234,18 @@ class Discovery(unittest.TestCase):
             models.discover({"unknown"})
         http.assert_not_called()
 
+    def test_concurrent_listings_are_serialized(self):
+        import fcntl, tempfile
+        from xcheck import files
+        with tempfile.TemporaryDirectory() as tmp, patch.object(files, "ROOT", pathlib.Path(tmp)):
+            def listing(*args, **kwargs):
+                with open(pathlib.Path(tmp) / ".opencode-models.lock", "a") as other:
+                    with self.assertRaises(BlockingIOError):  # held for the whole listing
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return models.subprocess.CompletedProcess(args, 0, "", "")
+            with patch.object(models.subprocess, "run", side_effect=listing):
+                self.assertEqual(models.client_metadata(refresh=False), {})
+
     def test_verbose_client_listing_and_format_failure(self):
         output = 'opencode/new-free\n' + json.dumps({"capabilities": {"toolcall": True}}) + '\nopenrouter/new/model:free\n{}\n'
         with patch.object(models.subprocess, "run", return_value=Mock(stdout=output)) as cli:

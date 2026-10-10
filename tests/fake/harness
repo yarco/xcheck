@@ -477,7 +477,10 @@ def native_turn(stream, server, work):
     if mode == "custody":
         (work / "probe.json").write_text(json.dumps({"holds_busy": holds_pool(server), "argv": argv,
                                                      "stdin": sys.stdin.read()}))
-    if mode == "silent-exit":
+    if mode in ("silent-exit", "stdout-leak"):
+        if mode == "stdout-leak" and os.fork() == 0:  # a descendant keeps stdout open
+            time.sleep(60)
+            os._exit(0)
         sys.exit(0)
     if mode in ("hang", "slow"):
         time.sleep(60 if mode == "hang" else 3)

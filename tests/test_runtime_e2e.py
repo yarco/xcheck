@@ -45,8 +45,10 @@ class RuntimeHandoff(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
 
-    def assert_settled(self, row, pool="opencode"):
+    def assert_settled(self, row):
         lane_dir = self.base / "lanes" / row["lane"]
+        pool = support.adapters.Lane.from_json(
+            json.loads((self.base / "run.json").read_text())["lanes"][row["lane"]]).pool
         pids = json.loads((lane_dir / "pids.json").read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pids["harness"], 0)
@@ -158,7 +160,7 @@ class RuntimeHandoff(unittest.TestCase):
                 self.assertEqual(row["status"], "failed", row)
                 self.assertTrue(row["error"])
                 self.assertFalse((self.base / f"RESULT-{row['lane']}.md").exists())
-                self.assert_settled(row, pool=lane.split(":", 1)[0])
+                self.assert_settled(row)
 
     def test_codex_reconnect_notice_can_recover_to_a_valid_review(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other",
@@ -167,7 +169,7 @@ class RuntimeHandoff(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "done", row)
-        self.assert_settled(row, pool="codex")
+        self.assert_settled(row)
 
     def test_native_failure_without_newline_at_stdout_eof_stops_live_harness(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other",
@@ -221,7 +223,7 @@ class RuntimeHandoff(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
                 self.assertEqual(row["status"], "done", row)
-                self.assert_settled(row, lane.split(":", 1)[0])
+                self.assert_settled(row)
 
     def test_silent_turn_stays_live_until_explicit_cancellation(self):
         lane_dir = self.launch_detached(mode="hang", lanes="claude:claude-opus-5-5:high")
@@ -237,7 +239,7 @@ class RuntimeHandoff(unittest.TestCase):
         row = json.loads((lane_dir / "exit.json").read_text())
         self.assertEqual(row["status"], "interrupted", row)
         self.assertIn("operator ends deliberately silent test", row["reason"])
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
 
     def test_supervisor_interruption_detaches_and_reattachment_preserves_work(self):
         import signal

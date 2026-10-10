@@ -46,6 +46,10 @@ def snapshot(run, name):
     directory = run.lane_dir(name)
     live = is_alive(directory / 'alive') if not (directory / 'exit.json').exists() else False
     result = dict(lane=name, live=live, explicit_cap=run.cap, explicit_idle=run.idle or None)
+    try:  # a settled lane reports its outcome, not the last phase it reached
+        result['status'] = json.loads((directory / 'exit.json').read_text())['status']
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     for filename, key in [('activity.json', 'stream'), ('phase.json', 'phase')]:
         try:
             result[key] = json.loads((directory / filename).read_text())
@@ -62,7 +66,8 @@ def compact(row):
     phase = row.get('phase', {}).get('phase', 'unknown')
     live = {True: 'yes', False: 'no', None: 'unknown'}[row['live']]
     stream = row.get('stream', {})
-    parts = [row['lane'], f'phase={phase}', f'live={live}',
+    state = f"status={row['status']}" if row.get('status') else f'phase={phase}'
+    parts = [row['lane'], state, f'live={live}',
              f"events={stream.get('events', 0)}", f"tools={stream.get('completed_tools', 0)}"]
     if stream.get('last_event'):
         parts.append(f"last={stream['last_event']}")

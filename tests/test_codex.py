@@ -117,18 +117,36 @@ class Controls(unittest.TestCase):
             with self.assertRaisesRegex(adapters.Unavailable, "cannot disable"):
                 adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
 
+    def test_a_changed_listing_shape_fails_closed(self):
+        # An entry without `enabled` (or with an unexpected shape) is treated as
+        # enabled, refused, and still present on the re-read, so the lane skips.
+        def listing(features, overrides, env, work):
+            return adapters_listing
+        for adapters_listing in ([{"name": "evil", "transport": {"type": "stdio", "command": "x"}}],
+                                 [{"name": "nameless-url", "transport": {"type": "streamable_http"}}], ["junk"]):
+            with self.subTest(listing=adapters_listing), \
+                    patch.object(adapters.subprocess, "run", return_value=adapters.subprocess.CompletedProcess(
+                        [], 0, __import__("json").dumps(adapters_listing), "")):
+                with self.assertRaises(adapters.Unavailable):
+                    adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
+        self.assertFalse(adapters._codex_review_mcp({"name": "you-free", "transport": {"type": "streamable_http"}}, True))
+
     def test_an_unapproved_mcp_call_that_slips_through_is_audited(self):
-        r = adapters.Reader("codex")
-        for event in ({"type": "item.started", "item": {"id": "c1", "type": "mcp_tool_call", "server": "perplexity",
-                                                        "tool": "search"}},
-                      {"type": "item.completed", "item": {"id": "c1", "type": "mcp_tool_call", "server": "perplexity",
-                                                          "tool": "search", "status": "completed"}},
-                      {"type": "item.completed", "item": {"id": "c2", "type": "mcp_tool_call", "server": "qmd",
-                                                          "tool": "query", "status": "completed"}}):
-            r.feed(event)
+        calls = [json.loads(line) for line in (support.FIX / "codex-mcp-calls.jsonl").read_text().splitlines()]
+        def audit(events):
+            r = adapters.Reader("codex")
+            for event in events:
+                r.feed(event)
+            return r
+        self.assertEqual(audit(calls).diagnostics, [])  # keenable-free is approved
+        for event in calls:
+            event["item"]["server"] = "perplexity"
+        r = audit(calls)
         self.assertEqual([(d["tool"], d["outcome"]) for d in r.diagnostics],
-                         [("mcp__perplexity__search", "succeeded")])
+                         [("mcp__perplexity__fetch_page_content", "succeeded"),
+                          ("mcp__perplexity__fetch_page_content", "error")])
         self.assertIn("POLICY VIOLATION", "; ".join(r.notes()))
+        self.assertEqual([d["outcome"] for d in audit(calls[:1]).diagnostics], ["attempted"])
 
     def test_a_missing_cli_skips_before_admission(self):
         with patch.object(adapters.shutil, "which", return_value=None):

@@ -14,7 +14,7 @@ from unittest.mock import patch
 import test_xcheck as support
 import test_runtime_e2e as runtime
 from test_agy_acp import PROMPT, chunk, rpc
-from xcheck import adapters, files, pools, run, validate
+from xcheck import adapters, files, lane, pools, run, validate
 
 GOOD = f"1) VERDICT: The reviewed contract holds.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n"
 
@@ -101,7 +101,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'done', row)
         self.assertIn("hit your limit", (self.base / f"RESULT-{row['lane']}.md").read_text())
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
         self.base = support.EndToEnd.second_base(self)
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
                              'claude:claude-opus-5-5:high', '--mode', 'headless',
@@ -111,7 +111,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
         self.assertEqual(row['status'], 'failed', row)
         self.assertIn("hit your limit", row['reason'])
         self.assertFalse((self.base / f"RESULT-{row['lane']}.md").exists())
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
 
     def test_dead_opencode_stream_runner_is_stopped_on_reattach(self):
         lane_dir = self.launch_detached(mode='hang')
@@ -132,7 +132,8 @@ class FinalLifecycleRepairs(unittest.TestCase):
         self.assert_settled(row)
 
     def test_queued_lane_receives_launch_snapshot_despite_live_base_edits(self):
-        held = pools.acquire(self.root, 'opencode', 'blocking-run', time.monotonic() + 1)
+        held = pools.acquire(self.root, adapters.parse_lane('opencode:opencode/space-bunny-free').pool, 'blocking-run',
+                             time.monotonic() + 1)
         self.assertIsNotNone(held)
         try:
             result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
@@ -166,6 +167,9 @@ class FinalLifecycleRepairs(unittest.TestCase):
         finally:
             self.xcheck('cancel', '--base', str(self.base), '--reason', 'metadata test cleanup')
             self.xcheck('wait', '--base', str(self.base), '--timeout', '15')
+        result = self.xcheck('activity', '--base', str(self.base))  # settled: the outcome, not the last phase
+        self.assertIn('status=interrupted', result.stdout)
+        self.assertNotIn('phase=', result.stdout)
 
     def test_spawn_setup_failure_and_interruption_cleanup(self):
         unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
@@ -252,16 +256,32 @@ class FinalSettlementRepairs(unittest.TestCase):
             run._settle_dead_runner(current, name)
         self.assertEqual(record.read_text(), original)
 
-    def test_cancel_all_prevalidates_before_signalling_any_lane(self):
+    def test_cancel_all_prevalidates_before_signalling_or_settling_any_lane(self):
         current = self.current(two=True)
-        name = next(iter(current.lanes))
-        (current.lane_dir(name) / 'pids.json').write_text(json.dumps(dict(runner=123)))
-        with patch.object(run, '_pid_cmd', return_value=f'python xcheck lane --base {self.base} --lane {name}'), \
-             patch.object(run, 'is_alive', return_value=True), patch.object(run, '_signal') as sent:
-            with self.assertRaisesRegex(run.RunError, 'runner not recorded'):
+        unstarted, live = current.lanes
+        (current.lane_dir(live) / 'pids.json').write_text(json.dumps(dict(runner=123)))
+        with patch.object(run, '_pid_cmd', return_value='python unrelated'), patch.object(run, '_signal') as sent:
+            with self.assertRaisesRegex(run.RunError, 'runner identity unverified'):
                 run.cancel(current, None, 'operator reason')
             sent.assert_not_called()
-        self.assertFalse((current.lane_dir(name) / 'cancel.json').exists())
+        self.assertFalse((current.lane_dir(unstarted) / 'exit.json').exists())
+        self.assertFalse((current.lane_dir(live) / 'cancel.json').exists())
+        self.assertFalse(files.is_alive(current.lane_dir(unstarted) / 'alive'))  # the lock was released
+
+    def test_a_lane_whose_runner_never_started_is_settled_and_cannot_start_later(self):
+        current = self.current()
+        current.save()
+        name = next(iter(current.lanes))
+        self.assertEqual(run.cancel(current, name, 'operator reason'), 0)
+        row = json.loads((current.lane_dir(name) / 'exit.json').read_text())
+        self.assertEqual((row['status'], row['reason']), ('interrupted', 'cancelled: operator reason; no runner had started'))
+        with patch.object(lane, '_run_lane', side_effect=AssertionError('a cancelled lane started')):
+            self.assertEqual(lane.run_lane(self.base, name), 0)
+        (current.lane_dir(name) / 'exit.json').unlink()
+        with files.hold_life(current.lane_dir(name) / 'alive'):  # a runner starting now
+            with self.assertRaisesRegex(run.RunError, 'runner is starting'):
+                run.cancel(current, name, 'operator reason')
+        self.assertFalse((current.lane_dir(name) / 'exit.json').exists())
 
     def test_dead_runner_cannot_promote_complete_looking_uncommitted_output(self):
         current = self.current()
