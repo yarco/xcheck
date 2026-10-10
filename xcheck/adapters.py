@@ -76,9 +76,13 @@ DEFAULT_ROSTER = (
 # offer fails doctor until the pin is refreshed.
 OPT_IN = (
     Lane("devin", "swe-2-max"),
-    Lane("opencode", "opencode/space-bunny-free"),
-    # Contributor tier permits logging/training; mind what its packets hold.
-    Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),
+    # Free OpenCode Zen pins, each qualified by a real review run. Data terms
+    # are the provider's (opencode.ai/docs/zen); mind what a packet holds.
+    Lane("opencode", "opencode/space-bunny-free"),  # zero retention, no training
+    Lane("opencode", "opencode/step-5-preview-free"),  # zero retention, no training
+    Lane("opencode", "opencode/nemotron-3-ultra-free"),  # NVIDIA trial: logged; no confidential data
+    Lane("opencode", "opencode/mimo-v2.6-flash-free"),  # may be used to improve the model
+    Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),  # Contributor: may log or train
 )
 
 
@@ -145,9 +149,11 @@ CODEX_DISABLED_FEATURES = ("plugins", "hooks", "apps", "computer_use", "browser_
 
 def _codex_review_mcp(server: dict, web: bool) -> bool:
     """One entry of `codex mcp list --json` that a review may keep: an approved
-    name in a keyless shape (the same rule as Claude's registrations)."""
+    name in a keyless shape (the same rule as Claude's registrations) with no
+    stored login, which the shape cannot show (Codex keeps MCP OAuth tokens)."""
     name, transport = server.get("name"), server.get("transport")
-    if not isinstance(name, str) or not isinstance(transport, dict):
+    if not isinstance(name, str) or not isinstance(transport, dict) \
+            or server.get("auth_status") not in ("unsupported", "not_logged_in"):
         return False
     if transport.get("type") == "stdio":
         env = transport.get("env") or {}
@@ -932,6 +938,7 @@ class Reader:
     only as the failure reason if the turn never completes.
     The answer is the agent text after the last tool call."""
     kind: str
+    web: bool = True  # the run's mode: the MCP audit approves what the launch approved
     text: str = ""
     error: str | None = None
     completed: bool = False
@@ -944,10 +951,10 @@ class Reader:
     _failure: str | None = None  # the reason to report if the turn never completes
 
     @classmethod
-    def replay(cls, kind: str, stream: Path) -> "Reader":
+    def replay(cls, kind: str, stream: Path, web: bool) -> "Reader":
         """Rebuild a lane's reader from its saved stream (recovery after a
         runner died). Completion stays exactly what the live reader requires."""
-        reader = cls(kind)
+        reader = cls(kind, web)
         try:
             lines = stream.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -1138,11 +1145,14 @@ class Reader:
             return f"> {item['type']}"
         return None
 
+    def _approved_mcp(self) -> set[str]:
+        return REVIEW_LOCAL_MCP | (REVIEW_FREE_MCP.keys() if self.web else set())
+
     def _codex_mcp_policy(self, item: dict, event: str) -> None:
         """A call to an MCP server the launch did not approve (it should have
         been disabled): one diagnostic per item id, updated on completion."""
         server = item.get("server")
-        if not isinstance(server, str) or server in REVIEW_LOCAL_MCP | REVIEW_FREE_MCP.keys():
+        if not isinstance(server, str) or server in self._approved_mcp():
             return
         call = item.get("id") if isinstance(item.get("id"), str) else None
         diagnostic = self._mcp_calls.get(call) if call else None
@@ -1170,7 +1180,7 @@ class Reader:
         if call and call in self._mcp_calls:
             return self._mcp_calls[call]
         parts = (update.get("name") or "").split("__")
-        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in REVIEW_LOCAL_MCP | REVIEW_FREE_MCP.keys():
+        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in self._approved_mcp():
             return None
         diagnostic = dict(kind="mcp_policy", tool=update["name"], outcome="attempted", billing="unknown")
         self.diagnostics.append(diagnostic)

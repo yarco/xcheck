@@ -29,14 +29,14 @@ if kind == "codex" and argv[-3:] == ["mcp", "list", "--json"]:
     if os.environ.get("FAKE_CODEX_MCP") == "broken":
         sys.exit(1)
     servers = [
-        {"name": "semble", "transport": {"type": "stdio", "command": "uvx", "env": {"UV_CACHE_DIR": "/c"}}},
-        {"name": "qmd", "transport": {"type": "streamable_http", "url": "http://127.0.0.1:8181/mcp"}},
-        {"name": "keenable-free", "transport": {"type": "streamable_http", "url": "https://api.keenable.ai/mcp"}},
-        {"name": "perplexity", "transport": {"type": "stdio", "command": "pwm-mcp"}},
-        {"name": "keenable", "transport": {"type": "streamable_http", "url": "https://api.keenable.ai/mcp",
+        {"auth_status": "unsupported", "name": "semble", "transport": {"type": "stdio", "command": "uvx", "env": {"UV_CACHE_DIR": "/c"}}},
+        {"auth_status": "unsupported", "name": "qmd", "transport": {"type": "streamable_http", "url": "http://127.0.0.1:8181/mcp"}},
+        {"auth_status": "unsupported", "name": "keenable-free", "transport": {"type": "streamable_http", "url": "https://api.keenable.ai/mcp"}},
+        {"auth_status": "unsupported", "name": "perplexity", "transport": {"type": "stdio", "command": "pwm-mcp"}},
+        {"auth_status": "unsupported", "name": "keenable", "transport": {"type": "streamable_http", "url": "https://api.keenable.ai/mcp",
                                            "http_headers": {"X-API-Key": "fixture"}}}]
     if "plugins" not in [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--disable"]:
-        servers.append({"name": "cua_repl", "transport": {"type": "stdio", "command": "node"}})
+        servers.append({"auth_status": "unsupported", "name": "cua_repl", "transport": {"type": "stdio", "command": "node"}})
     off = {argv[i + 1].split(".")[1] for i, a in enumerate(argv[:-1])
            if a == "--config" and argv[i + 1].startswith("mcp_servers.") and argv[i + 1].endswith(".enabled=false")}
     if os.environ.get("FAKE_CODEX_MCP") == "stuck":
