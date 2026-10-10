@@ -839,6 +839,7 @@ class Reader:
     only as the failure reason if the turn never completes.
     The answer is the agent text after the last tool call."""
     kind: str
+    web: bool = True  # the run's mode: the MCP audit approves what the launch approved
     text: str = ""
     error: str | None = None
     completed: bool = False
@@ -851,10 +852,10 @@ class Reader:
     _failure: str | None = None  # the reason to report if the turn never completes
 
     @classmethod
-    def replay(cls, kind: str, stream: Path) -> "Reader":
+    def replay(cls, kind: str, stream: Path, web: bool) -> "Reader":
         """Rebuild a lane's reader from its saved stream (recovery after a
         runner died). Completion stays exactly what the live reader requires."""
-        reader = cls(kind)
+        reader = cls(kind, web)
         try:
             lines = stream.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -1022,11 +1023,14 @@ class Reader:
             return f"> {item['type']}"
         return None
 
+    def _approved_mcp(self) -> set[str]:
+        return REVIEW_LOCAL_MCP | (REVIEW_FREE_MCP.keys() if self.web else set())
+
     def _codex_mcp_policy(self, item: dict, event: str) -> None:
         """A call to an MCP server the launch did not approve (it should have
         been disabled): one diagnostic per item id, updated on completion."""
         server = item.get("server")
-        if not isinstance(server, str) or server in REVIEW_LOCAL_MCP | REVIEW_FREE_MCP.keys():
+        if not isinstance(server, str) or server in self._approved_mcp():
             return
         call = item.get("id") if isinstance(item.get("id"), str) else None
         diagnostic = self._mcp_calls.get(call) if call else None
@@ -1086,7 +1090,7 @@ class Reader:
         if not isinstance(name, str) or (isinstance(call, str) and call in self._mcp_calls):
             return
         parts = name.split("__")
-        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in REVIEW_LOCAL_MCP | REVIEW_FREE_MCP.keys():
+        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in self._approved_mcp():
             return
         diagnostic = dict(kind="mcp_policy", tool=name, outcome="attempted", billing="unknown")
         self.diagnostics.append(diagnostic)

@@ -307,7 +307,7 @@ def _settle_dead_runner(run: Run, name: str) -> None:
     result = run.base / f"RESULT-{name}.md"
     # Only a natively completed turn in the saved stream is an answer; a
     # complete-looking RESULT file or draft is not.
-    reader = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl")
+    reader = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web)
     diagnostics = reader.diagnostics
     if reader.notes():
         note += "; " + "; ".join(reader.notes())

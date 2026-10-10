@@ -147,6 +147,12 @@ class Controls(unittest.TestCase):
                           ("mcp__perplexity__fetch_page_content", "error")])
         self.assertIn("POLICY VIOLATION", "; ".join(r.notes()))
         self.assertEqual([d["outcome"] for d in audit(calls[:1]).diagnostics], ["attempted"])
+        for event in calls:
+            event["item"]["server"] = "keenable-free"
+        packet = adapters.Reader("codex", web=False)  # the launch disables the web servers in packet mode
+        for event in calls:
+            packet.feed(event)
+        self.assertEqual([d["tool"] for d in packet.diagnostics], ["mcp__keenable-free__fetch_page_content"] * 2)
 
     def test_a_missing_cli_skips_before_admission(self):
         with patch.object(adapters.shutil, "which", return_value=None):

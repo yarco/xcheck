@@ -181,7 +181,7 @@ def run_lane(base: Path, name: str) -> int:
             status, reason, text = "failed", f"lane runner error: {e!r} (runner-error.log)", ""
             # Never lose a natively completed answer to a runner bug; never
             # promote one that did not complete.
-            saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl")
+            saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web)
             if saved.completed and not saved.error and saved.text.strip():
                 text = saved.text
                 status, problems = validate.check(text, run.contract)
@@ -216,7 +216,7 @@ def _run_lane(base: Path, name: str) -> int:
     signal.alarm(bound(run.cap))
 
     started = time.time()
-    reader = adapters.Reader(lane.kind)
+    reader = adapters.Reader(lane.kind, run.web)
     # Recorded before any spend, so a crashed supervisor's successor sees this
     # lane as live from its first instant.
     atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": None}))
