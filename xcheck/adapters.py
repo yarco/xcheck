@@ -45,9 +45,12 @@ class Lane:
     def pool(self) -> str:
         if self.kind == "agy":
             return "agy-gemini"
-        if self.kind == "opencode" and "/" in self.model:
-            provider = self.model.split('/', 1)[0]
-            return "opencode" if provider == "opencode" else f"opencode-{provider}"
+        if self.kind == "opencode":
+            # OpenCode has no quota meter, so a pool only serializes: one run per
+            # Zen model (different free models run side by side), and one run per
+            # other provider, whose models share that account's limits.
+            provider, _, model = self.model.partition("/") if "/" in self.model else ("opencode", "", self.model)
+            return f"opencode-zen-{model}" if provider == "opencode" else f"opencode-{provider}"
         return self.kind
 
     def to_json(self) -> dict:
@@ -882,7 +885,9 @@ class Reader:
             return native(o)
         if "method" in o:
             if "id" in o:  # a request, from either side
-                if o["method"] == "session/prompt":
+                if o["method"] == "session/prompt" and self._prompt_id is None:
+                    # acpx sends one prompt (--prompt-retries 0); session/prompt
+                    # is client-to-agent, so a later one is an ordinary request.
                     self._prompt_id = o["id"]
                 else:
                     key = _id_key(o["id"])

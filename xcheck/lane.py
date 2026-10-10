@@ -25,6 +25,7 @@ from . import activity, adapters, capacity, pools, validate
 from .files import ROOT, Run, atomic_write, defer_stop, end_group, hold_life, now, signal_group, workspace
 
 LINGER = 3  # seconds a finished Herdr pane stays visible
+DRAIN = 3  # seconds of stdout silence after the harness exits; a descendant's open copy is not the harness
 TAIL_LINES = 40
 
 # The orchestrator's own session identity must not reach a peer: a child
@@ -161,8 +162,8 @@ def _raise_stop(signum, _frame):
 def run_lane(base: Path, name: str) -> int:
     """Run one lane; whatever happens, end with exit.json."""
     _alive = hold_life(Run.load(base).lane_dir(name) / "alive")
-    try:
-        code = _run_lane(base, name)
+    try:  # exit.json already under the lock: cancelled before this runner started
+        code = 0 if (Run.load(base).lane_dir(name) / "exit.json").exists() else _run_lane(base, name)
     except _Stop as stop:  # a signal outside the guarded spans still ends with a record
         run = Run.load(base)
         code = 130
@@ -315,7 +316,9 @@ def _run_lane(base: Path, name: str) -> int:
                         break
                     if reader.completed:
                         break
-                    if not sel.get_map() and proc.poll() is not None:
+                    # Completion is written before the harness exits, so once it
+                    # has exited, bytes still in flight are drained, then dropped.
+                    if proc.poll() is not None and (not sel.get_map() or time.monotonic() - last > DRAIN):
                         break
                 if pending:
                     _consume(reader, pending, progress)
