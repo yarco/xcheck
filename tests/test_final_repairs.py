@@ -167,6 +167,9 @@ class FinalLifecycleRepairs(unittest.TestCase):
         finally:
             self.xcheck('cancel', '--base', str(self.base), '--reason', 'metadata test cleanup')
             self.xcheck('wait', '--base', str(self.base), '--timeout', '15')
+        result = self.xcheck('activity', '--base', str(self.base))  # settled: the outcome, not the last phase
+        self.assertIn('status=interrupted', result.stdout)
+        self.assertNotIn('phase=', result.stdout)
 
     def test_spawn_setup_failure_and_interruption_cleanup(self):
         unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
