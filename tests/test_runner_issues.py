@@ -412,10 +412,11 @@ class ReportRuntime(unittest.TestCase):
         self.assertTrue((self.base / f"RESULT-{row['lane']}.md").exists())
 
     def test_refused_unapproved_call_is_visible_without_failing_review(self):
-        # ACP carries no per-server startup status (the native init mcp_servers
-        # list); what reaches the wire is the refused call itself.
+        # The adapter forwards the SDK init message on request, so the startup
+        # status arrives alongside the refused call itself.
         row = self.claude_run('mcp-startup-warning')
         self.assertEqual(row['status'], 'done', row)
+        self.assertIn('MCP startup optional-fake: needs-auth', row['reason'])
         self.assertIn('MCP policy warning', row['reason'])
         self.assertIn('mcp__optional-fake', row['reason'])
         policy = [d for d in row['diagnostics'] if d['kind'] == 'mcp_policy']

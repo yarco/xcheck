@@ -313,6 +313,15 @@ class ClaudeMcpAudit(unittest.TestCase):
         self.assertEqual(self.outcomes(_claude_call(None, tool), _claude_call(None, tool)),
                          [(tool, "attempted"), (tool, "attempted")])
 
+    def test_forwarded_sdk_init_reports_failed_and_needs_auth_servers_only(self):
+        r = adapters.Reader("claude")
+        r.feed({"jsonrpc": "2.0", "method": "_claude/sdkMessage", "params": {"message": {
+            "type": "system", "subtype": "init", "mcp_servers": [
+                {"name": "qmd", "status": "connected"}, {"name": "semble", "status": "failed"},
+                {"name": "x", "status": "needs-auth"}, {"name": "p", "status": "pending"}, "junk"]}}})
+        r.feed({"jsonrpc": "2.0", "method": "_claude/sdkMessage", "params": {"message": "junk"}})
+        self.assertEqual(r.notes(), ["MCP startup semble: failed", "MCP startup x: needs-auth"])
+
     def test_an_update_seen_before_its_call_is_still_audited(self):
         self.assertEqual(self.outcomes(_claude_call("a", "mcp__foreign__fetch", "completed")),
                          [("mcp__foreign__fetch", "succeeded")])
@@ -589,6 +598,7 @@ class ClaudeMcp(unittest.TestCase):
                                Path(tmp) / "harness.log", True).argv
         servers = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"]
         meta = json.loads(Path(argv[argv.index("--session-meta") + 1]).read_text())
+        self.assertEqual(meta["claudeCode"]["emitRawSDKMessages"], [{"type": "system", "subtype": "init"}])
         return argv, servers, meta["claudeCode"]["options"]
 
     def test_only_review_servers_load_and_each_is_preapproved_by_name(self):

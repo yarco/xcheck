@@ -106,12 +106,32 @@ acpx's `prepare: husky` is dev-only; the package ships a prebuilt `dist/`.
   upgrades separately; admission and `doctor` require `claude --help` to
   list `--restricted`, `--strict-mcp-config`, `--mcp-config`, `--tools`,
   `--allowedTools` and `--disallowedTools`.
-- Visibility gap: the stock adapter does not forward the CLI's MCP startup
-  statuses (failed / needs-auth), so a Claude lane cannot report them.
-  The unapproved-call audit (`Reader._claude_mcp_policy`) works per
+- MCP startup: session meta asks the stock adapter to forward the SDK
+  `system/init` message (`claudeCode.emitRawSDKMessages`), and the reader
+  reports its failed and needs-auth servers as `mcp_startup` diagnostics.
+  This is verified against the pinned adapter source and test fixtures, not
+  yet in a live run. The unapproved-call audit (`Reader._claude_mcp_policy`) works per
   `toolCallId` on the adapter's exact tool `name`. Its test fixtures are
   derived from a real native call and the pinned renderer, not a live ACP
   capture of a forbidden success.
+
+## Pending upstream changes and areas to improve
+
+Last checked 2026-10-10. Re-check at each acpx or claude-agent-acp upgrade.
+
+| Area | Today | Improves or retires when | Tracker |
+|---|---|---|---|
+| `--session-meta` acpx patch | local `xcheck-acpx` build | acpx ships generic `_meta` passthrough, or its built-in Claude option passthrough grows to cover `extraArgs`, `strictMcpConfig`, `tools`, `disallowedTools`, `allowDangerouslySkipPermissions`, `title`, `settings` and `emitRawSDKMessages`; then the lane returns to stock acpx | [acpx PR #32](https://github.com/openclaw/acpx/pull/32) closed 2026-03-10 as de-scoped; the maintainer would take generic passthrough only as a fresh maintainer-owned PR. Offering one upstream is the operator's call |
+| Native ACP in Claude Code | adapter required | Anthropic ships an ACP mode | [claude-code#6686](https://github.com/anthropics/claude-code/issues/6686) closed NOT_PLANNED 2026-02-09 |
+| Adapter churn | exact pin 0.89.0; releases land almost daily (0.85 to 0.89 in eight days) | pins move only after the maintenance checks; a stable release line would reduce this | none |
+| Structured failure reasons | prompt errors and stop reasons | acpx negotiates the AIR typed `sessionFailure` extension, which this adapter also implements, giving categorized failures for Claude and Codex alike | [acpx#850](https://github.com/openclaw/acpx/issues/850) (same decision) |
+| MCP startup statuses | forwarded through `emitRawSDKMessages` (above) | a live run confirms it; an ACP-native status notification would replace the raw message. The open `/mcp` command PR needs a second prompt, so it does not apply | [claude-agent-acp PR #1106](https://github.com/agentclientprotocol/claude-agent-acp/pull/1106), open |
+
+Fallback if the adapter's maintenance cost outgrows its value: Claude's own
+`claude -p --output-format stream-json` is first-party, takes the same
+native flags directly, and ends with an authoritative `result` event. It
+would cost a second reader beside the ACP one, and it is not adopted while
+the adapter path works.
 
 ## Custody chain
 

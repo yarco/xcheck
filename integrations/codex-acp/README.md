@@ -84,3 +84,24 @@ placement smokes; then change `CODEX_ACP_VERSION` and its fake capability fixtur
 Do not loosen the marker guard, use acpx's built-in Codex name, or infer success
 from transcript text. A protocol- or version-changing package stops before spend
 until deliberately re-verified.
+
+## Retirement
+
+The patch is temporary: each of its three changes retires on its own once
+upstream supplies the behavior, and the whole local build retires when all
+three have. Re-check at every codex-acp release. Last checked 2026-10-10
+against v2.2.2, the latest release; none has landed.
+
+| Patched behavior | Retires when | Tracker |
+|---|---|---|
+| Native failed turn becomes a JSON-RPC prompt error | codex-acp rejects terminal provider failures with an ordinary error (the fix acpx's triage recommends), or acpx negotiates codex-acp's typed AIR `sessionFailure` extension (#383/#393) and xcheck reads that | [acpx#850](https://github.com/openclaw/acpx/issues/850), open, maintainer decision pending |
+| `CODEX_ACP_EPHEMERAL=1` ephemeral thread | upstream ships ephemeral sessions; the open PR takes `_meta.codex.ephemeral` on `session/new`, which stock acpx cannot send, so the Codex lane would then use `xcheck-acpx --session-meta` (see `integrations/claude-acp`) or acpx's own generic `_meta` if it gains one | [codex-acp#448](https://github.com/agentclientprotocol/codex-acp/issues/448), [PR #391](https://github.com/agentclientprotocol/codex-acp/pull/391), both open |
+| No separate title-generation model call | upstream offers a supported switch. [PR #485](https://github.com/agentclientprotocol/codex-acp/pull/485) (`ACP_DISABLE_TITLE_GENERATION`) was closed unmerged; [PR #595](https://github.com/agentclientprotocol/codex-acp/pull/595) skips titles only for other model providers | none open for this case |
+
+To retire a row: drop that hunk from `automation.patch` (or the whole build),
+remove the matching key from the `--automation-capabilities` marker and
+`CODEX_ACP_VERSION` check, and run the maintenance checks above. If the
+failed-turn row retires through the typed extension, add its reading to
+`adapters.Reader` and a captured fixture first. Until then, an upgrade means
+re-applying the patch to the new tag; never run stock codex-acp, which reports
+these failures as `end_turn`.

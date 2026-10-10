@@ -332,7 +332,12 @@ if kind == "claude-agent-acp":
                     emit({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603,
                           "message": f"Claude Code process exited with code {child.returncode}"}})
                     continue
-            opts = ((msg.get("params") or {}).get("_meta") or {}).get("claudeCode", {}).get("options") or {}
+            claude_meta = ((msg.get("params") or {}).get("_meta") or {}).get("claudeCode", {})
+            opts = claude_meta.get("options") or {}
+            servers = [{"name": m["name"], "status": "connected"} for m in (msg.get("params") or {}).get("mcpServers", [])]
+            if mode == "mcp-startup-warning":
+                servers.append({"name": "optional-fake", "status": "needs-auth"})
+            init = {"type": "system", "subtype": "init", "mcp_servers": servers}
             emit({"jsonrpc": "2.0", "method": "_auth/status_update", "params": {"authStatus": {
                   "kind": "account", "label": "Claude Pro", "account": {"plan": "pro"}}}})
             emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "configOptions": [
@@ -346,6 +351,8 @@ if kind == "claude-agent-acp":
             update({"sessionUpdate": "current_mode_update", "currentValue": msg["params"]["value"]})
             emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"configOptions": []}})
         elif msg.get("method") == "session/prompt":
+            if {"type": "system", "subtype": "init"} in (claude_meta.get("emitRawSDKMessages") or []):
+                emit({"jsonrpc": "2.0", "method": "_claude/sdkMessage", "params": {"sessionId": "s", "message": init}})
             update({"sessionUpdate": "session_info_update", "title": "xcheck review"})
             review_turn(msg["id"], "claude")
     sys.exit(0)

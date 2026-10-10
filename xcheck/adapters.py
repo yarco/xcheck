@@ -611,7 +611,12 @@ def _claude_acp_meta(lane: Lane, work: Path, log: Path, web: bool) -> Path:
         "debugFile": str(log),
     }
     path = log.with_name("claude-session-meta.json")
-    path.write_text(json.dumps({"claudeCode": {"options": options}}), encoding="utf-8")
+    # The adapter forwards these raw SDK messages as `_claude/sdkMessage`; the
+    # init message carries each MCP server's startup status, which the adapter
+    # otherwise never reports.
+    path.write_text(json.dumps({"claudeCode": {"options": options,
+                                               "emitRawSDKMessages": [{"type": "system", "subtype": "init"}]}}),
+                    encoding="utf-8")
     return path
 
 
@@ -1018,6 +1023,13 @@ class Reader:
             label = status.get("label") if isinstance(status, dict) else None
             if label and all(d.get("label") != label for d in self.diagnostics):
                 self.diagnostics.append(dict(kind="auth", label=label))
+            return None
+        if self.kind == "claude" and method == "_claude/sdkMessage":
+            message = params.get("message")
+            servers = message.get("mcp_servers") if isinstance(message, dict) and message.get("subtype") == "init" else None
+            for server in servers if isinstance(servers, list) else ():
+                if isinstance(server, dict) and server.get("status") in ("failed", "needs-auth"):
+                    self.diagnostics.append(dict(kind="mcp_startup", server=server.get("name"), status=server["status"]))
             return None
         if (self.kind == "grok" and method == "_x.ai/mcp/server_status"
                 and params.get("status") not in (None, "ready", "initialized")):
