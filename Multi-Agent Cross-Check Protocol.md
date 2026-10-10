@@ -272,7 +272,7 @@ ACP standardizes transport and completion: initialization, sessions, prompt upda
 
 ## Deliberately absent
 
-Legacy (archived read-only in `../x-check-legacy/`, never a launcher) solved problems this design does not have. Do not re-add these without a failure that happened within scope:
+Legacy (archived in the private repo `yarco/multi-agent-cross-check-protocol`, never a launcher) solved problems this design does not have. Do not re-add these without a failure that happened within scope:
 
 | Legacy mechanism | Why it is not needed |
 |---|---|
