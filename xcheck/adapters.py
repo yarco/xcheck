@@ -946,7 +946,16 @@ class Reader:
                              f"{'execution unconfirmed; ' if outcome == 'attempted' else ''}billing unknown")
         return notes
 
+    def native(self):
+        """The kind's own stream reader, for a harness whose first-party
+        headless stream xcheck reads directly; None means ACP."""
+        return getattr(self, f"_{self.kind}", None)
+
     def finish(self) -> None:
+        if self.native():
+            if not self.completed and not self.error and self._failure:
+                self.error = self._failure
+            return
         self.text = "".join(self._buf)
         head = self.text.strip()
         # Agy's server reports an MCP server that will not start as the whole
@@ -958,6 +967,8 @@ class Reader:
 
     def feed(self, o: dict) -> str | None:
         """Consume one stream object; return a short human line for the view."""
+        if native := self.native():
+            return native(o)
         if "method" in o:
             if "id" in o:  # a request, from either side
                 if o["method"] == "session/prompt":

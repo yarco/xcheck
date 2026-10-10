@@ -16,9 +16,11 @@ class Activity:
         self.data = dict(events=0, completed_tools=0)
 
     def observe(self, obj):
-        # ACP JSON-RPC: name the update, call or response
         update = (obj.get('params') or {}).get('update') or {}
-        event = update.get('sessionUpdate') or obj.get('method') or ('error' if 'error' in obj else 'result')
+        if 'jsonrpc' in obj:  # ACP: name the update, call or response
+            event = update.get('sessionUpdate') or obj.get('method') or ('error' if 'error' in obj else 'result')
+        else:  # a native stream names its own event type
+            event = obj.get('type')
         at = now()
         self.data.update(events=self.data['events'] + 1, last_event=event, observed_at=at)
         if self.kind == 'opencode':
@@ -26,8 +28,14 @@ class Activity:
             if isinstance(session, str):
                 self.data['session_id'] = session
         tool = None
+        item = obj.get('item') or {}
         if event == 'tool_call_update' and update.get('status') == 'completed':
             tool = update.get('kind') or 'tool'
+        elif event == 'item.completed' and item.get('type') not in (None, 'agent_message', 'reasoning'):
+            tool = item['type']  # Codex: command_execution, mcp_tool_call, web_search, ...
+        elif event == 'user' and any(isinstance(b, dict) and b.get('type') == 'tool_result' and not b.get('is_error')
+                                     for b in (obj.get('message') or {}).get('content') or []):
+            tool = 'tool_result'  # Claude
         if tool:
             self.data['completed_tools'] += 1
             self.data['last_completed_tool'] = dict(kind=tool, observed_at=at)
