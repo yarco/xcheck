@@ -45,9 +45,12 @@ class Lane:
     def pool(self) -> str:
         if self.kind == "agy":
             return "agy-gemini"
-        if self.kind == "opencode" and "/" in self.model:
-            provider = self.model.split('/', 1)[0]
-            return "opencode" if provider == "opencode" else f"opencode-{provider}"
+        if self.kind == "opencode":
+            # OpenCode has no quota meter, so a pool only serializes: one run per
+            # Zen model (different free models run side by side), and one run per
+            # other provider, whose models share that account's limits.
+            provider, _, model = self.model.partition("/") if "/" in self.model else ("opencode", "", self.model)
+            return f"opencode-zen-{model}" if provider == "opencode" else f"opencode-{provider}"
         return self.kind
 
     def to_json(self) -> dict:
@@ -143,7 +146,9 @@ CODEX_DISABLED_FEATURES = ("plugins", "hooks", "apps", "computer_use", "browser_
 def _codex_review_mcp(server: dict, web: bool) -> bool:
     """One entry of `codex mcp list --json` that a review may keep: an approved
     name in a keyless shape (the same rule as Claude's registrations)."""
-    name, transport = server.get("name"), server.get("transport") or {}
+    name, transport = server.get("name"), server.get("transport")
+    if not isinstance(name, str) or not isinstance(transport, dict):
+        return False
     if transport.get("type") == "stdio":
         env = transport.get("env") or {}
         return (name in REVIEW_LOCAL_MCP and isinstance(env, dict) and set(env) <= LOCAL_MCP_ENV
@@ -152,8 +157,9 @@ def _codex_review_mcp(server: dict, web: bool) -> bool:
             transport.get(k) for k in ("bearer_token_env_var", "http_headers", "env_http_headers", "http_headers_helper")):
         return False
     url = transport.get("url")
-    return ((name in REVIEW_LOCAL_MCP and isinstance(url, str) and LOOPBACK_URL.fullmatch(url) is not None)
-            or (web and url == REVIEW_FREE_MCP.get(name)))
+    return isinstance(url, str) and (
+        (name in REVIEW_LOCAL_MCP and LOOPBACK_URL.fullmatch(url) is not None)
+        or (web and url == REVIEW_FREE_MCP.get(name)))
 
 
 def _codex_mcp_enabled(features: list[str], overrides: list[str], env: dict, work: Path) -> list[dict]:
@@ -162,7 +168,9 @@ def _codex_mcp_enabled(features: list[str], overrides: list[str], env: dict, wor
     servers = json.loads(out.stdout) if out.returncode == 0 else None
     if not isinstance(servers, list):
         raise ValueError(f"`codex mcp list --json` failed (exit {out.returncode})")
-    return [s for s in servers if isinstance(s, dict) and s.get("enabled")]
+    # Anything not explicitly disabled counts as enabled, so a changed output
+    # shape makes the launch refuse servers instead of overlooking them.
+    return [s for s in servers if not (isinstance(s, dict) and s.get("enabled") is False)]
 
 
 def _codex_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
@@ -180,12 +188,13 @@ def _codex_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -
     env = lane_env(Launch([], message), work)
     try:
         enabled = _codex_mcp_enabled(features, [], env, work)
-        refused = sorted(str(s.get("name")) for s in enabled if not _codex_review_mcp(s, web))
+        refused = sorted(str(s.get("name") if isinstance(s, dict) else s) for s in enabled
+                         if not _codex_review_mcp(s if isinstance(s, dict) else {}, web))
         if bad := [n for n in refused if not re.fullmatch(r"[A-Za-z0-9_-]+", n)]:
             raise ValueError(f"cannot disable MCP server(s) {bad} by name")
         overrides = [arg for n in refused for arg in ("--config", f"mcp_servers.{n}.enabled=false")]
-        left = [s.get("name") for s in _codex_mcp_enabled(features, overrides, env, work)
-                if not _codex_review_mcp(s, web)]
+        left = [s.get("name") if isinstance(s, dict) else s for s in _codex_mcp_enabled(features, overrides, env, work)
+                if not _codex_review_mcp(s if isinstance(s, dict) else {}, web)]
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         raise Unavailable(f"startup-unavailable: Codex MCP selection could not be proved ({_clip(str(e), 200)})") from e
     if left:

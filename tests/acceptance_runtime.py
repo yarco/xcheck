@@ -19,4 +19,4 @@ class RealDuration(unittest.TestCase):
         row = json.loads((case.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "done", row)
         self.assertGreater(row["seconds"], 180)
-        case.assert_settled(row, "codex")
+        case.assert_settled(row)

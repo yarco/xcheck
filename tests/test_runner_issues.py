@@ -379,14 +379,14 @@ class ReportRuntime(unittest.TestCase):
             self.assertEqual(row['status'], 'done', row)
             self.assertEqual(row['reason'], 'RESULT_COMPLETE')
             self.assertTrue((self.base / f"RESULT-{name}.md").exists())
-            self.assert_settled(row, 'grok' if name.startswith('grok') else 'codex')
+            self.assert_settled(row)
 
     def claude_run(self, mode):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
                              'claude:claude-opus-5-5:high', '--mode', 'headless', '--skip-capacity', mode=mode, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
-        self.assert_settled(row, 'claude')
+        self.assert_settled(row)
         return row
 
     def test_fake_global_paid_connector_is_not_offered_by_installed_review(self):
@@ -427,7 +427,7 @@ class ReportRuntime(unittest.TestCase):
         self.assertEqual(row['reason'], UPSTREAM_LIMIT)
         self.assertEqual(row['error'], row['reason'])
         self.assertFalse((self.base / f"RESULT-{row['lane']}.md").exists())
-        self.assert_settled(row, 'opencode-openrouter')
+        self.assert_settled(row)
         pids = (self.base / 'lanes' / row['lane'] / 'pids.json').read_bytes()
         self.assertEqual(self.xcheck('wait', '--base', str(self.base), timeout=15).returncode, 0)
         self.assertEqual((self.base / 'lanes' / row['lane'] / 'pids.json').read_bytes(), pids)
@@ -446,4 +446,4 @@ class ReportRuntime(unittest.TestCase):
                 # The client may exit on its own before the runner's kill lands.
                 self.assertIn(row['exit_code'], (0, -15))
                 self.assertIsNone(row['error'])
-                self.assert_settled(row, lane.split(':', 1)[0])
+                self.assert_settled(row)

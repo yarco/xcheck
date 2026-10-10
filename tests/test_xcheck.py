@@ -54,6 +54,15 @@ class LaneNames(unittest.TestCase):
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").pool, "grok")
         self.assertEqual(Lane("devin", "swe-2-max").pool, "devin")
 
+    def test_meterless_opencode_pools_serialize_one_zen_model_or_one_provider(self):
+        bunny, pickle = adapters.parse_lane("opencode:space-bunny-free"), adapters.parse_lane("opencode:big-pickle")
+        self.assertEqual(bunny.pool, "opencode-zen-space-bunny-free")
+        self.assertEqual(bunny.pool, adapters.parse_lane("opencode:opencode/space-bunny-free:high").pool)
+        self.assertNotEqual(bunny.pool, pickle.pool)  # different free models run side by side
+        glm, glm_high = (adapters.parse_lane("opencode:zai-coding-plan/glm-5.3"),
+                         adapters.parse_lane("opencode:zai-coding-plan/glm-5.3-air:high"))
+        self.assertEqual(glm.pool, glm_high.pool)  # one account's models share its limits
+
     def test_parse_lane(self):
         self.assertEqual(adapters.parse_lane("codex:gpt-6.1-sol:high"), Lane("codex", "gpt-6.1-sol", "high"))
         self.assertEqual(adapters.parse_lane("opencode:muse-spark-1.3-contributor-free"),
@@ -1336,8 +1345,7 @@ class EndToEnd(unittest.TestCase):
 
     def xcheck(self, *args, mode="ok", timeout=60, capacity=None, env_extra=None):
         env = {**os.environ, **(env_extra or {}), "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": mode,
-               "XCHECK_ROOT": str(self.root),
-}
+               "XCHECK_ROOT": str(self.root)}
         if capacity:
             env["FAKE_CAPACITY"] = capacity
         env.pop("HERDR_ENV", None)
@@ -1558,8 +1566,7 @@ class EndToEnd(unittest.TestCase):
         # The orchestrator's directory: opencode roots its tools at PWD, not at its cwd.
         stale = {"PWD": str(Path.home()), "OLDPWD": str(Path.home())}
         env = {**os.environ, **leak, **keep, **stale, **live_socket, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
-               "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok",
-}
+               "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok"}
         lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free,devin:swe-2-max"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
@@ -1656,7 +1663,8 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(self.lane_exit(self.base, "opencode-space-bunny-free")["status"], "done")
         with self.assertRaises(ProcessLookupError):  # it ignored TERM; the group's KILL ended it
             os.kill(child, 0)
-        held = pools.acquire(self.root, "opencode", "next-run", time.monotonic() + 1)
+        held = pools.acquire(self.root, adapters.parse_lane("opencode:opencode/space-bunny-free").pool, "next-run",
+                             time.monotonic() + 1)
         self.assertIsNotNone(held, "a surviving background child kept the quota lock")
         if held:
             held.release()

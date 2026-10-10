@@ -117,6 +117,20 @@ class Controls(unittest.TestCase):
             with self.assertRaisesRegex(adapters.Unavailable, "cannot disable"):
                 adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
 
+    def test_a_changed_listing_shape_fails_closed(self):
+        # An entry without `enabled` (or with an unexpected shape) is treated as
+        # enabled, refused, and still present on the re-read, so the lane skips.
+        def listing(features, overrides, env, work):
+            return adapters_listing
+        for adapters_listing in ([{"name": "evil", "transport": {"type": "stdio", "command": "x"}}],
+                                 [{"name": "nameless-url", "transport": {"type": "streamable_http"}}], ["junk"]):
+            with self.subTest(listing=adapters_listing), \
+                    patch.object(adapters.subprocess, "run", return_value=adapters.subprocess.CompletedProcess(
+                        [], 0, __import__("json").dumps(adapters_listing), "")):
+                with self.assertRaises(adapters.Unavailable):
+                    adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
+        self.assertFalse(adapters._codex_review_mcp({"name": "you-free", "transport": {"type": "streamable_http"}}, True))
+
     def test_an_unapproved_mcp_call_that_slips_through_is_audited(self):
         r = adapters.Reader("codex")
         for event in ({"type": "item.started", "item": {"id": "c1", "type": "mcp_tool_call", "server": "perplexity",

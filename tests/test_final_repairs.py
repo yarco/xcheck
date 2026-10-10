@@ -101,7 +101,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'done', row)
         self.assertIn("hit your limit", (self.base / f"RESULT-{row['lane']}.md").read_text())
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
         self.base = support.EndToEnd.second_base(self)
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
                              'claude:claude-opus-5-5:high', '--mode', 'headless',
@@ -111,7 +111,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
         self.assertEqual(row['status'], 'failed', row)
         self.assertIn("hit your limit", row['reason'])
         self.assertFalse((self.base / f"RESULT-{row['lane']}.md").exists())
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
 
     def test_dead_opencode_stream_runner_is_stopped_on_reattach(self):
         lane_dir = self.launch_detached(mode='hang')
@@ -132,7 +132,8 @@ class FinalLifecycleRepairs(unittest.TestCase):
         self.assert_settled(row)
 
     def test_queued_lane_receives_launch_snapshot_despite_live_base_edits(self):
-        held = pools.acquire(self.root, 'opencode', 'blocking-run', time.monotonic() + 1)
+        held = pools.acquire(self.root, adapters.parse_lane('opencode:opencode/space-bunny-free').pool, 'blocking-run',
+                             time.monotonic() + 1)
         self.assertIsNotNone(held)
         try:
             result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
