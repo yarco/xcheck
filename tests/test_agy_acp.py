@@ -23,7 +23,7 @@ def read(lines) -> adapters.Reader:
     reader = adapters.Reader("agy")
     for obj in lines:
         reader.feed(obj)
-    reader.finish(Path("/nonexistent"))
+    reader.finish()
     return reader
 
 
@@ -89,7 +89,7 @@ class Reader(unittest.TestCase):
         r.feed(PROMPT)
         r.feed(rpc(id=None, error={"code": -32603, "message": "agent disconnected"}))
         self.assertIsNone(r.error)
-        r.finish(Path("/nonexistent"))
+        r.finish()
         self.assertEqual(r.error, "agent disconnected")
 
     def test_completion_requires_an_observed_non_null_prompt_id(self):
@@ -243,8 +243,7 @@ class Lanes(unittest.TestCase):
                 if complete:
                     events.append(rpc(id=3, result={"stopReason": "end_turn"}))
                 (directory / "stream.jsonl").write_text("\n".join(map(json.dumps, events)))
-                with patch.object(run, "fresh_answer", return_value=None), \
-                        patch.object(run, "workspace", return_value=self.root / ".lanes" / peer.name), \
+                with patch.object(run, "workspace", return_value=self.root / ".lanes" / peer.name), \
                         patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {self.root / '.lanes' / peer.name} --model {peer.model}"), \
                         patch.object(run, "end_group", return_value=True) as stopped:
                     run._settle_dead_runner(current, peer.name)

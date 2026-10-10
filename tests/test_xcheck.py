@@ -1,4 +1,4 @@
-"""X-Check tests. Run: python3 -m unittest discover -s tests"""
+"""X-Check tests. Run: uv run --with-requirements requirements-test.txt pytest"""
 
 from __future__ import annotations
 
@@ -30,12 +30,12 @@ TOKEN = "MANIFEST_TAIL_TOKEN: 0123abcd"
 CONTRACT = validate.Contract("VERDICT", "evidence/manifest-tail.txt", TOKEN)
 
 
-def read_fixture(kind: str, name: str, final: Path | None = None) -> adapters.Reader:
+def read_fixture(kind: str, name: str) -> adapters.Reader:
     r = adapters.Reader(kind)
     for line in (FIX / name).read_text().splitlines():
         if line.strip():
             r.feed(json.loads(line))
-    r.finish(final or Path("/nonexistent"))
+    r.finish()
     return r
 
 
@@ -122,7 +122,7 @@ class GrokReader(unittest.TestCase):
         r.feed({"method": "session/update", "params": {"update": {
             "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "### 1) VERDICT\nok"}}}})
         r.feed({"id": 3, "result": {"stopReason": "end_turn"}})
-        r.finish(Path("/nonexistent"))
+        r.finish()
         self.assertEqual(r.text, "Now I will write the review.### 1) VERDICT\nok")
 
     def test_narration_before_a_tool_call_is_not_an_answer(self):
@@ -133,14 +133,14 @@ class GrokReader(unittest.TestCase):
         r.feed({"method": "session/update", "params": {"update": {
             "sessionUpdate": "tool_call", "title": "read_file"}}})
         r.feed({"id": 3, "result": {"stopReason": "end_turn"}})
-        r.finish(Path("/nonexistent"))
+        r.finish()
         self.assertEqual(r.text, "")
 
     def test_a_native_turn_error_is_the_failure_reason(self):
         r = adapters.Reader("grok")
         r.feed({"id": 3, "method": "session/prompt"})
         r.feed({"id": 3, "error": {"code": -32603, "message": "HTTP 402 Grok Build usage balance exhausted"}})
-        r.finish(Path("/nonexistent"))
+        r.finish()
         self.assertIn("402", r.error)
         self.assertFalse(r.completed)
 
@@ -158,6 +158,164 @@ class GrokReader(unittest.TestCase):
                 "status": "ready", "reason": "initialized"}})
         self.assertEqual([n for n in r.notes() if "qmd" in n],
                          ["MCP startup qmd: connection closed"])
+
+
+def _say(text):
+    return {"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}}
+
+
+PROMPT_3 = {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {}}
+ASK_3 = {"jsonrpc": "2.0", "id": 3, "method": "session/request_permission", "params": {}}
+GRANT_3 = {"jsonrpc": "2.0", "id": 3, "result": {"outcome": {"outcome": "selected", "optionId": "deny"}}}
+REFUSE_3 = {"jsonrpc": "2.0", "id": 3, "error": {"code": -32601, "message": "Method not found"}}
+FAIL_3 = {"jsonrpc": "2.0", "id": 3, "error": {"code": -32603, "message": "usage limit reached"}}
+DONE_3 = {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}
+
+
+class AcpCorrelation(unittest.TestCase):
+    """acpx prints both directions without saying which; an agent request may
+    reuse the id of acpx's own session/prompt (ids belong to their sender)."""
+
+    def feed(self, *events, kind="codex"):
+        r = adapters.Reader(kind)
+        for e in events:
+            r.feed(e)
+        return r
+
+    def test_prompt_failure_before_the_colliding_permission_reply_is_the_failure(self):
+        for kind in adapters.KINDS:
+            with self.subTest(kind=kind):
+                r = self.feed(PROMPT_3, ASK_3, FAIL_3, kind=kind)
+                self.assertIsNone(r.error)  # ambiguous until the other response at id 3
+                r.feed(GRANT_3)
+                self.assertEqual(r.error, "usage limit reached")
+                self.assertFalse(r.completed)
+
+    def test_prompt_failure_after_the_colliding_permission_reply_is_the_failure(self):
+        r = self.feed(PROMPT_3, ASK_3, GRANT_3, FAIL_3)
+        self.assertEqual(r.error, "usage limit reached")
+
+    def test_a_client_error_reply_at_the_prompt_id_is_not_the_prompt_failure(self):
+        for order in ("success", "failure"):
+            with self.subTest(order=order):
+                r = self.feed(PROMPT_3, ASK_3, REFUSE_3, _say("answer"))
+                self.assertIsNone(r.error)
+                if order == "success":
+                    r.feed(DONE_3)
+                    r.finish()
+                    self.assertTrue(r.completed)
+                    self.assertIsNone(r.error)
+                    self.assertEqual(r.text, "answer")
+                else:
+                    r.feed(FAIL_3)  # both responses at id 3 are errors: one ended the prompt
+                    self.assertIn("usage limit reached", r.error)
+
+    def test_an_unresolved_held_error_fails_when_the_client_exits_without_completion(self):
+        r = self.feed(PROMPT_3, ASK_3, _say("draft RESULT_COMPLETE"), FAIL_3)
+        r.finish()  # acpx exited: no completion arrived
+        self.assertEqual(r.error, "usage limit reached")
+        self.assertFalse(r.completed)
+
+    def test_completion_is_recognised_by_shape_whichever_id_it_reuses(self):
+        r = self.feed(PROMPT_3, ASK_3, _say("answer"), DONE_3, GRANT_3)
+        r.finish()
+        self.assertTrue(r.completed)
+        self.assertIsNone(r.error)
+
+    def test_unrelated_errors_and_results_with_reused_ids_never_decide(self):
+        r = self.feed({"jsonrpc": "2.0", "id": 0, "method": "initialize"},
+                      {"jsonrpc": "2.0", "id": 0, "method": "session/request_permission"},
+                      {"jsonrpc": "2.0", "id": 0, "result": {"protocolVersion": 1}},
+                      {"jsonrpc": "2.0", "id": 0, "error": {"message": "denied"}},
+                      PROMPT_3, _say("answer"), DONE_3)
+        r.finish()
+        self.assertTrue(r.completed)
+        self.assertIsNone(r.error)
+        self.assertEqual(r.text, "answer")
+
+    def test_an_error_answering_another_request_is_only_the_reason(self):
+        r = self.feed({"jsonrpc": "2.0", "id": 5, "method": "session/set_config_option"},
+                      {"jsonrpc": "2.0", "id": 5, "error": {"message": "effort xhigh is not offered"}})
+        self.assertIsNone(r.error)
+        r.finish()
+        self.assertEqual(r.error, "effort xhigh is not offered")
+
+    def test_cancelled_turn_is_not_a_review(self):
+        r = self.feed(PROMPT_3, _say("partial"), {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "cancelled"}})
+        self.assertIn("cancelled", r.error)
+        self.assertFalse(r.completed)
+
+    def test_malformed_events_are_ignored_not_fatal(self):
+        r = self.feed(PROMPT_3, {"jsonrpc": "2.0", "method": "session/update", "params": ["x"]},
+                      {"jsonrpc": "2.0", "method": "session/update", "params": {"update": "x"}},
+                      {"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+                          "sessionUpdate": "agent_message_chunk", "content": ["x"]}}},
+                      {"jsonrpc": "2.0", "method": "_auth/status_update", "params": {"authStatus": "x"}},
+                      _say("answer"), DONE_3, kind="claude")
+        r.finish()
+        self.assertTrue(r.completed)
+        self.assertEqual(r.text, "answer")
+
+    def test_replay_matches_the_live_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = Path(tmp) / "stream.jsonl"
+            stream.write_text("\n".join(json.dumps(e) for e in (PROMPT_3, ASK_3, FAIL_3, GRANT_3)) + "\nnot json\n")
+            r = adapters.Reader.replay("opencode", stream)
+            self.assertEqual(r.error, "usage limit reached")
+            self.assertFalse(adapters.Reader.replay("opencode", Path(tmp) / "absent").completed)
+
+
+def _claude_call(call, name, status=None):
+    update = {"sessionUpdate": "tool_call_update" if status else "tool_call", "name": name}
+    if call:
+        update["toolCallId"] = call
+    if status:
+        update["status"] = status
+    return {"jsonrpc": "2.0", "method": "session/update", "params": {"update": update}}
+
+
+class ClaudeMcpAudit(unittest.TestCase):
+    """One diagnostic per unapproved call, keyed by toolCallId."""
+
+    def outcomes(self, *events):
+        r = adapters.Reader("claude")
+        for e in events:
+            r.feed(e)
+        return [(d["tool"], d["outcome"]) for d in r.diagnostics if d["kind"] == "mcp_policy"]
+
+    def test_a_failed_call_does_not_hide_a_later_successful_one(self):
+        tool = "mcp__foreign__fetch"
+        self.assertEqual(self.outcomes(_claude_call("a", tool), _claude_call("a", tool, "failed"),
+                                       _claude_call("b", tool), _claude_call("b", tool, "completed")),
+                         [(tool, "error"), (tool, "succeeded")])
+
+    def test_repeated_notifications_for_one_call_are_one_diagnostic(self):
+        tool = "mcp__foreign__fetch"
+        self.assertEqual(self.outcomes(_claude_call("a", tool), _claude_call("a", tool),
+                                       _claude_call("a", tool, "in_progress"), _claude_call("a", tool, "completed")),
+                         [(tool, "succeeded")])
+
+    def test_several_tools_of_one_server_each_count(self):
+        self.assertEqual(self.outcomes(_claude_call("a", "mcp__foreign__one"), _claude_call("b", "mcp__foreign__two")),
+                         [("mcp__foreign__one", "attempted"), ("mcp__foreign__two", "attempted")])
+
+    def test_quoted_names_and_approved_servers_are_not_violations(self):
+        quoted = {"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call", "toolCallId": "r", "name": "Read",
+            "rawInput": {"query": "mcp__foreign__fetch"}, "title": "mcp__foreign__fetch"}}}
+        self.assertEqual(self.outcomes(quoted, _say("I avoided mcp__foreign__fetch"),
+                                       _claude_call("q", "mcp__qmd__query", "completed"),
+                                       _claude_call("k", "mcp__keenable-free__search")), [])
+
+    def test_calls_without_an_id_are_each_counted(self):
+        tool = "mcp__foreign__fetch"
+        self.assertEqual(self.outcomes(_claude_call(None, tool), _claude_call(None, tool)),
+                         [(tool, "attempted"), (tool, "attempted")])
+
+    def test_an_update_seen_before_its_call_is_still_audited(self):
+        self.assertEqual(self.outcomes(_claude_call("a", "mcp__foreign__fetch", "completed")),
+                         [("mcp__foreign__fetch", "succeeded")])
 
 
 class OpencodeLane(unittest.TestCase):
@@ -180,7 +338,7 @@ class OpencodeLane(unittest.TestCase):
                 "opencode/muse-spark-1.3-contributor-free": {"variants": {"high": {}}}}):
             work, msg = Path(tmp).resolve(), Path(tmp) / "m.txt"
             msg.write_text("review\n")
-            argv = adapters.launch(self.LANE, work, msg, work / "f", work / "l", True).argv
+            argv = adapters.launch(self.LANE, work, msg, work / "l", True).argv
             self.assertIn("--approve-all", argv)
             self.assertIn("--no-terminal", argv)
             self.assertIn("--no-fs", argv)
@@ -190,44 +348,13 @@ class OpencodeLane(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work, msg = Path(tmp).resolve(), Path(tmp) / "m.txt"
             msg.write_text("review\n")
-            argv = adapters.launch(glm, work, msg, work / "f", work / "l", True).argv
+            argv = adapters.launch(glm, work, msg, work / "l", True).argv
             self.assertIn("zai-coding-plan/glm-5.3", argv)
             self.assertIn("effort=high", argv)
-            self.assertEqual(adapters.view_for("opencode", "tui"), "stream")
 
     def test_opt_in_has_no_protocol_meter(self):
         from xcheck import capacity
         self.assertEqual(capacity.read(self.LANE).status, "eligible")
-
-
-class LimitBanner(unittest.TestCase):
-    def test_banners_count_only_at_a_line_start_near_the_bottom(self):
-        from xcheck import tui
-        for line in ("You've hit your limit · resets 7pm (America/Los_Angeles)", "  ⎿  You hit your weekly limit."):
-            self.assertIsNotNone(tui.limit_banner(["work", line, "> "], adapters.APP_LIMIT), line)
-        self.assertIsNone(tui.limit_banner(["The banner You've hit your limit means a cap"], adapters.APP_LIMIT))
-        self.assertIsNone(tui.limit_banner(["You've hit your limit · resets 7pm", *["more work"] * 10], adapters.APP_LIMIT))
-
-
-class SleepingMac(unittest.TestCase):
-    def test_a_wall_clock_jump_neither_idles_nor_caps_an_app(self):
-        # Closing the lid moves wall time, not the monotonic clock the runner measures by.
-        from xcheck import tui
-        with tempfile.TemporaryDirectory() as tmp:
-            work = Path(tmp)
-            app = ("import time, pathlib\n"
-                   "for i in range(8):\n    print('working', i, flush=True); time.sleep(0.25)\n"
-                   "pathlib.Path('ANSWER.md').write_text('### 1) VERDICT\\nok\\nRESULT_COMPLETE\\n')\n"
-                   "pathlib.Path('ANSWER.ready').write_text('ANSWER_READY\\n')\n"
-                   "time.sleep(30)\n")
-            real, t0 = time.time, time.time()
-            jumped = lambda: real() + (86400 if real() - t0 > 1 else 0)
-            with patch("time.time", jumped):
-                status, reason, _, text = tui.run([sys.executable, "-c", app], dict(os.environ), work,
-                                                  work / "ANSWER.md", work / "screen.log",
-                                                  idle=5, cap=60, on_spawn=lambda pid: None)
-            self.assertIsNone(status, reason)
-            self.assertTrue(text.endswith("RESULT_COMPLETE\n"))
 
 
 class DevinLane(unittest.TestCase):
@@ -244,7 +371,7 @@ class DevinLane(unittest.TestCase):
                 "shell": {"setup_complete": True},
             }))
             with patch.object(adapters, "DEVIN_USER_CONFIG", user):
-                spec = adapters.launch(self.LANE, work, work / "message", work / "final", log, True)
+                spec = adapters.launch(self.LANE, work, work / "message", log, True)
             import shlex
             argv = shlex.split(spec.argv[spec.argv.index("--agent") + 1])
             self.assertIn("hold", argv)
@@ -264,7 +391,6 @@ class DevinLane(unittest.TestCase):
             self.assertEqual(cfg["hooks"], {})
             self.assertEqual(cfg["devin"], {"org_id": "org-test"})
             self.assertEqual(cfg["shell"], {"setup_complete": True})
-            self.assertEqual(adapters.view_for("devin", "tui"), "stream")
 
     def test_overlay_pre_approves_what_accept_edits_would_prompt_for(self):
         # accept-edits prompts for shell, fetch and MCP; a prompt hangs the lane (I3)
@@ -299,7 +425,7 @@ class GrokLane(unittest.TestCase):
         d = Path(tmp.name)
         with patch.object(adapters, "GROK_CONFIG_FILE", config or d / "no-operator-config.toml"):
             spec = adapters.launch(Lane("grok", "grok-4.7", "xhigh"), d / "work", d / "msg",
-                                   d / "final", d / "lane" / "harness.log", web)
+                                   d / "lane" / "harness.log", web)
         return spec, d
 
     def test_authorized_unrestricted_profile_and_env(self):
@@ -428,23 +554,17 @@ class GrokLane(unittest.TestCase):
         self.assertEqual((d / "lane" / "grok-home" / "requirements.toml").read_text(),
                          "minimum_version = \"1.0.0\"\n")
 
-    def test_stream_only_placement(self):
-        self.assertIn("grok", adapters.STREAM_ONLY)
-        self.assertEqual(adapters.view_for("grok", "tui"), "stream")
-        with self.assertRaises(ValueError):
-            adapters.tui(Lane("grok", "grok-4.7", "xhigh"), Path("/w"), "p", Path("/l"), True)
-
     def test_message_allows_workspace_scratch_without_widening_other_peers(self):
         from xcheck.run import _message
-        grok = _message("stream", True, "grok")
-        claude = _message("tui", True, "claude")
+        grok = _message(True, "grok")
+        claude = _message(True, "claude")
         self.assertIn("disposable writes inside this workspace", grok)
         self.assertIn("Do not change PACKET.md", grok)
         self.assertNotIn("disposable writes", claude)
         self.assertIn("use only tools that read", claude)
         self.assertIn("Connected MCP tools are available", grok)
 
-    def test_connected_mcp_is_available_to_stream_and_app_peers(self):
+    def test_connected_mcp_is_available_to_every_peer(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         d = Path(tmp.name)
@@ -453,20 +573,19 @@ class GrokLane(unittest.TestCase):
                                     ("grok", "grok-4.7", "low")):
             lane = Lane(kind, model, effort)
             with tempfile.TemporaryDirectory() as tmp:
-                stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"),
+                stream = adapters.launch(lane, Path("/w"), Path("/m"),
                                          Path(tmp) / "harness.log", True).argv
-            app = [] if lane.kind in adapters.STREAM_ONLY else adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
             if kind == "codex":
                 self.assertNotIn("--ignore-user-config", stream)
             elif kind == "claude":
                 pass  # ClaudeMcp covers it
             else:
-                self.assertNotIn("MCPTool(*)", stream + app)
+                self.assertNotIn("MCPTool(*)", stream)
 
 
 class ClaudeMcp(unittest.TestCase):
     def _launch_meta(self, lane, tmp):
-        argv = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"),
+        argv = adapters.launch(lane, Path("/w"), Path("/m"),
                                Path(tmp) / "harness.log", True).argv
         servers = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"]
         meta = json.loads(Path(argv[argv.index("--session-meta") + 1]).read_text())
@@ -511,7 +630,7 @@ class ClaudeMcp(unittest.TestCase):
                              "headers": {"x": "y"}}}}))
             lane = Lane("claude", "claude-sonnet-5", "low")
             with patch.object(adapters, "CLAUDE_JSON", cfg):
-                argv = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"),
+                argv = adapters.launch(lane, Path("/w"), Path("/m"),
                                        Path(tmp) / "harness.log", False).argv
             servers = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"]
             self.assertEqual({s["name"] for s in servers}, {"qmd"})
@@ -520,13 +639,65 @@ class ClaudeMcp(unittest.TestCase):
             self.assertNotIn("WebSearch", options["allowedTools"])
 
 
-class IdleDefaults(unittest.TestCase):
-    def test_default_uses_actual_lane_view_and_explicit_override_wins(self):
-        from xcheck.lane import idle_for
-        self.assertEqual(idle_for(0, "stream"), 0)
-        self.assertEqual(idle_for(0, "tui"), 0)  # silence is not model inactivity
-        self.assertEqual(idle_for(37, "tui"), 37)
-        self.assertEqual(idle_for(37, "stream"), 37)
+class ClaudeLaneBoundaries(unittest.TestCase):
+    def servers(self, registrations, web=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / ".claude.json"
+            cfg.write_text(json.dumps({"mcpServers": registrations}))
+            with patch.object(adapters, "CLAUDE_JSON", cfg):
+                selected = adapters._claude_review_servers(web)
+                written = json.loads(adapters._claude_mcp_file(Path(tmp) / "mcp.json", web).read_text())
+        return selected, written["mcpServers"]
+
+    def test_local_registrations_must_be_keyless(self):
+        selected, written = self.servers({
+            "semble": {"type": "stdio", "command": "uvx", "args": ["semble"],
+                       "env": {"UV_CACHE_DIR": "/c", "UV_TOOL_DIR": "/t"}},
+            "qmd": {"type": "http", "url": "http://127.0.0.1:8181/mcp"},
+            "pond": {"type": "stdio", "command": "pond", "args": [], "env": {}},
+            "fff": {"type": "stdio", "command": "local-fff", "env": {"DUMMY_API_KEY": "dummy-fixture"}},
+        })
+        self.assertEqual(set(selected), {"semble", "qmd", "pond"})
+        self.assertNotIn("dummy-fixture", json.dumps(written))
+        semble = next(e for e in written if e["name"] == "semble")
+        self.assertEqual(semble["env"], [{"name": "UV_CACHE_DIR", "value": "/c"}, {"name": "UV_TOOL_DIR", "value": "/t"}])
+        self.assertEqual(next(e for e in written if e["name"] == "qmd")["headers"], [])
+
+    def test_credential_and_remote_channels_drop_the_server(self):
+        for entry in ({"type": "http", "url": "https://qmd.example/mcp"},
+                      {"type": "http", "url": "http://127.0.0.1:8181/mcp", "headers": {"Authorization": "x"}},
+                      {"type": "http", "url": "http://127.0.0.1:8181/mcp", "headersHelper": "/bin/token"},
+                      {"type": "http", "url": "http://user:pw@127.0.0.1/mcp"},
+                      {"type": "http", "url": "http://localhost.evil.example/mcp"},
+                      {"type": "sse", "url": "http://127.0.0.1/mcp"},
+                      {"type": "stdio", "command": "qmd", "env": {"QMD_TOKEN": "t"}},
+                      {"type": "stdio", "command": "qmd", "args": "not-a-list"},
+                      {"type": "stdio", "command": ["qmd"]},
+                      {"command": "qmd", "cwd": "/elsewhere"}):
+            with self.subTest(entry=entry):
+                self.assertEqual(self.servers({"qmd": entry})[0], {})
+
+    def test_free_web_endpoints_need_their_exact_keyless_shape(self):
+        exact = {"type": "http", "url": "https://api.keenable.ai/mcp"}
+        self.assertEqual(set(self.servers({"keenable-free": exact})[0]), {"keenable-free"})
+        self.assertEqual(self.servers({"keenable-free": exact}, web=False)[0], {})
+        for extra in ({"headers": {"X-API-Key": "k"}}, {"headersHelper": "/bin/k"},
+                      {"url": "https://api.keenable.ai/mcp?k=1"}):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.servers({"keenable-free": {**exact, **extra}})[0], {})
+
+    def test_claude_routing_and_effort_overrides_never_reach_any_peer(self):
+        from xcheck.lane import lane_env
+        hostile = {"CLAUDE_CONFIG_DIR": "/foreign", "CLAUDE_MODEL_CONFIG": "{}", "MAX_THINKING_TOKENS": "1",
+                   "CLAUDE_AGENT_LOGS": "/tmp/x", "IS_SANDBOX": "1", "CLAUDE_GATEWAY_URL": "https://g",
+                   "CLAUDECODE": "1", "ANTHROPIC_MODEL": "other"}
+        with patch.dict(os.environ, hostile):
+            for kind in adapters.KINDS:
+                env = lane_env(adapters.Launch([], None, env_set={"CLAUDE_CODE_EXECUTABLE": "/lane/launcher"},
+                                               kind=kind), Path("/w"))
+                with self.subTest(kind=kind):
+                    self.assertFalse(set(hostile) & set(env), sorted(set(hostile) & set(env)))
+                    self.assertEqual(env["CLAUDE_CODE_EXECUTABLE"], "/lane/launcher")
 
 
 class RunnerBound(unittest.TestCase):
@@ -759,16 +930,12 @@ class HerdrOwnership(unittest.TestCase):
 class SignalGroup(unittest.TestCase):
     def test_an_exited_unreaped_leader_is_not_an_error(self):
         # macOS killpg answers EPERM here; it crashed real Agy and Grok lanes
-        import pty
         from xcheck.files import signal_group
-        pid, fd = pty.fork()
-        if pid == 0:
-            os._exit(0)
-        self.addCleanup(os.close, fd)
-        time.sleep(0.3)
-        signal_group(pid, signal.SIGTERM)  # must not raise
-        os.waitpid(pid, 0)
-        self.assertFalse(signal_group(pid, signal.SIGTERM))
+        leader = subprocess.Popen(["/usr/bin/true"], start_new_session=True)
+        time.sleep(0.3)  # exited, not yet reaped
+        signal_group(leader.pid, signal.SIGTERM)  # must not raise
+        leader.wait()
+        self.assertFalse(signal_group(leader.pid, signal.SIGTERM))
 
 
 class Liveness(unittest.TestCase):
@@ -1203,7 +1370,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_opencode_effort_uses_the_acp_stream_in_the_app_placement(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
-                        "--view", "tui", "--skip-capacity", "--lanes", "opencode:opencode/muse-spark-1.3-contributor-free:high")
+                        "--skip-capacity", "--lanes", "opencode:opencode/muse-spark-1.3-contributor-free:high")
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "done", row)
@@ -1454,89 +1621,35 @@ class EndToEnd(unittest.TestCase):
         os.killpg(pids["harness"], signal.SIGKILL)  # stop the whole ACP chain before releasing custody
         self.assertEqual(self.lane_exit(other, "codex-gpt-6.1-sol-high")["status"], "done")
 
-    def test_tui_answer_closes_background_group_before_releasing_pool(self):
+    def test_native_completion_closes_background_group_before_releasing_pool(self):
         from xcheck import pools
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
-                        "--lanes", "claude:claude-opus-5-5:high", "--mode", "headless",
-                        "--view", "tui", "--skip-capacity", mode="bg-child")
-        work = self.root / ".lanes" / "claude-opus-5-5-high"
+                        "--lanes", "opencode:opencode/space-bunny-free", "--mode", "headless",
+                        "--skip-capacity", mode="bg-child")
+        work = self.root / ".lanes" / "opencode-space-bunny-free"
         child = int((work / "background-child.pid").read_text())
         self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
-        self.assertEqual(self.lane_exit(self.base, "claude-opus-5-5-high")["status"], "done")
-        held = pools.acquire(self.root, "claude", "next-run", time.monotonic() + 1)
+        self.assertEqual(self.lane_exit(self.base, "opencode-space-bunny-free")["status"], "done")
+        with self.assertRaises(ProcessLookupError):  # it ignored TERM; the group's KILL ended it
+            os.kill(child, 0)
+        held = pools.acquire(self.root, "opencode", "next-run", time.monotonic() + 1)
         self.assertIsNotNone(held, "a surviving background child kept the quota lock")
         if held:
             held.release()
 
-    def run_tui(self, mode, extra=()):
-        lanes = "claude:claude-opus-5-5:high,grok:grok-4.7:xhigh"
-        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
-                        "--mode", "headless", "--view", "tui", "--skip-capacity", *extra, mode=mode)
-        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
-        return {r["lane"]: r for r in json.loads((self.base / "STATUS.json").read_text())["lanes"]}
-
-    def test_agy_streams_through_acp_even_in_the_app_view(self):
-        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless", "--view", "tui",
-                        "--skip-capacity", "--lanes", "agy:gemini-3.8-flash-high,grok:grok-4.7:xhigh")
+    def test_every_lane_answers_in_its_final_message(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
+                        "--skip-capacity", "--lanes", "agy:gemini-3.8-flash-high,grok:grok-4.7:xhigh,"
+                        "claude:claude-opus-5-5:high")
         self.assertEqual(p.returncode, 0, p.stderr)
         rows = {r["lane"]: r for r in json.loads((self.base / "STATUS.json").read_text())["lanes"]}
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-        agy = self.base / "lanes" / "agy-gemini-3.8-flash-high"
-        self.assertIn("final message", (agy / "message.txt").read_text())
-        self.assertTrue((agy / "stream.jsonl").exists())
-        self.assertFalse((agy / "screen.log").exists())
-        grok = self.base / "lanes" / "grok-4.7-xhigh"
-        self.assertIn("final message", (grok / "message.txt").read_text())
-        self.assertTrue((grok / "stream.jsonl").exists())
-        self.assertFalse((grok / "screen.log").exists())
-
-    def test_an_incomplete_app_draft_keeps_its_timeout_and_body(self):
-        rows = self.run_tui("invalid", extra=("--idle", "3"))
-        # The app sits on its draft until the idle limit; the stream lane
-        # publishes its invalid body and is graded, not timed out.
-        self.assertEqual(rows["claude-opus-5-5-high"]["status"], "timeout", rows)
-        self.assertEqual(rows["grok-4.7-xhigh"]["status"], "invalid", rows)
         for name in rows:
-            self.assertIn("fine but no proof", (self.base / f"RESULT-{name}.md").read_text())
-
-
-    def test_tui_lanes_publish_answer_md_and_are_closed(self):
-        t0 = time.time()
-        rows = self.run_tui("ok")
-        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-        self.assertLess(time.time() - t0, 30)  # the apps idle for 60 s; the runner closes them
-        for name in rows:
-            self.assertTrue((self.base / f"RESULT-{name}.md").read_text().endswith("RESULT_COMPLETE\n"))
-        message = (self.base / "lanes" / "claude-opus-5-5-high" / "message.txt").read_text()
-        self.assertIn("ANSWER.md", message)
-
-    def test_an_app_that_exits_right_after_answering_is_done(self):
-        # macOS killpg on an unreaped exited leader returns EPERM; that must not kill the runner
-        rows = self.run_tui("answer-exit")
-        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-
-    def test_a_tui_draft_is_not_published_until_committed(self):
-        rows = self.run_tui("slowwrite")
-        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-        self.assertIn("after a rewrite", (self.base / "RESULT-claude-opus-5-5-high.md").read_text())
-
-    def test_a_silent_tui_times_out_with_its_last_screen(self):
-        rows = self.run_tui("error", extra=("--idle", "3"))
-        # The silent app hits the idle limit; the stream lane's native turn
-        # error is the failure reason, not a timeout.
-        self.assertEqual(rows["claude-opus-5-5-high"]["status"], "timeout", rows)
-        self.assertEqual(rows["grok-4.7-xhigh"]["status"], "failed", rows)
-        self.assertIn("402", rows["grok-4.7-xhigh"]["reason"], rows)
-        self.assertTrue(any("hit your limit" in l for l in rows["claude-opus-5-5-high"]["stderr_tail"]))
-
-    def test_an_app_drawing_only_empty_frames_times_out(self):
-        # a blocked dialog that keeps emitting sync-update frames is idle, not busy
-        t0 = time.time()
-        rows = self.run_tui("noop-frames", extra=("--idle", "3"))
-        self.assertEqual(rows["claude-opus-5-5-high"]["status"], "timeout", rows)
-        self.assertEqual(rows["grok-4.7-xhigh"]["status"], "done", rows)
-        self.assertLess(time.time() - t0, 30)  # the frames run for 60 s
+            lane = self.base / "lanes" / name
+            self.assertIn("final message", (lane / "message.txt").read_text())
+            self.assertNotIn("ANSWER", (lane / "message.txt").read_text())
+            self.assertTrue((lane / "stream.jsonl").exists())
 
     def test_wait_and_status_refuse_a_base_never_launched(self):
         for cmd in ("wait", "status"):
@@ -1545,31 +1658,24 @@ class EndToEnd(unittest.TestCase):
             self.assertIn("was never launched", p.stderr)
             self.assertNotIn("Traceback", p.stderr)
 
-    def test_a_limit_screen_is_diagnostic_until_an_explicit_idle_limit(self):
-        rows = self.run_tui("limit", extra=("--idle", "3"))
-        self.assertEqual(rows["claude-opus-5-5-high"]["status"], "timeout", rows)
-        self.assertEqual(rows["grok-4.7-xhigh"]["status"], "done", rows)
-        self.assertTrue(any("hit your limit" in line
-                            for line in rows["claude-opus-5-5-high"]["stderr_tail"]))
-
-    def test_a_quoted_limit_banner_does_not_end_a_working_app(self):
-        rows = self.run_tui("limit-echo")
-        self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-
-    def test_a_killed_app_runner_leaves_its_screen_on_disk(self):
-        # screen.log is the diagnosis for a runner that died: nothing may sit in a buffer.
+    def test_a_killed_runner_leaves_its_partial_stream_on_disk(self):
+        # stream.jsonl is the diagnosis for a runner that died: nothing may sit in a buffer.
         self.assertEqual(self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
-                                     "--view", "tui", "--skip-capacity", "--lanes", "claude:claude-opus-5-5:high",
-                                     "--detach", mode="hang").returncode, 0)
-        d = self.base / "lanes" / "claude-opus-5-5-high"
-        for _ in range(50):
-            if (d / "pids.json").exists() and json.loads((d / "pids.json").read_text()).get("harness"):
+                                     "--skip-capacity", "--lanes", "opencode:opencode/space-bunny-free",
+                                     "--detach", mode="progress-hang").returncode, 0)
+        d = self.base / "lanes" / "opencode-space-bunny-free"
+        for _ in range(100):
+            if (d / "stream.jsonl").exists() and "agent_thought_chunk" in (d / "stream.jsonl").read_text():
                 break
             time.sleep(0.1)
-        time.sleep(1)  # the fake app has drawn its first screen
-        os.kill(json.loads((d / "pids.json").read_text())["runner"], signal.SIGKILL)
-        self.assertIn(b"working on the review", (d / "screen.log").read_bytes())
-        self.assertEqual(self.xcheck("wait", "--base", str(self.base), mode="hang").returncode, 0)
+        pids = json.loads((d / "pids.json").read_text())
+        from xcheck.files import end_group
+        self.addCleanup(end_group, pids["harness"])
+        os.kill(pids["runner"], signal.SIGKILL)
+        self.assertIn('"session/prompt"', (d / "stream.jsonl").read_text())
+        self.assertEqual(self.xcheck("wait", "--base", str(self.base)).returncode, 0)
+        row = self.lane_exit(self.base, "opencode-space-bunny-free")
+        self.assertEqual(row["status"], "failed", row)
 
     def test_leftovers_of_an_earlier_run_never_reach_the_next(self):
         # a stale complete answer, and scratch a peer left read-only (Go module caches do)
@@ -1580,11 +1686,11 @@ class EndToEnd(unittest.TestCase):
         for d in (work / "cache" / "mod", work / "cache"):
             d.chmod(0o555)
         self.addCleanup(lambda: [d.chmod(0o755) for d in (work / "cache", work / "cache" / "mod") if d.exists()])
-        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless", "--view", "tui",
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
                         "--skip-capacity", "--idle", "3", "--lanes", "grok:grok-4.7:xhigh", mode="hang")
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
-        self.assertEqual(row["status"], "timeout", row)  # the app wrote nothing; the stale answer is gone
+        self.assertEqual(row["status"], "timeout", row)  # the lane printed nothing; the stale answer is gone
         self.assertFalse((self.base / "RESULT-grok-4.7-xhigh.md").exists())
 
     def test_awkward_evidence_names_reach_the_workspace(self):

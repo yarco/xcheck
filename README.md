@@ -17,9 +17,11 @@ xcheck doctor        # verify the installed copy, flags, and model pins
 
 `install` also writes `~/.codex/rules/xcheck.rules`, which lets a Codex
 orchestrator run the installed `xcheck` (`run`, `wait`, `status`, `activity`,
-`cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt. Codex, Agy, Devin and OpenCode lanes need `acpx`
-(`npm install -g acpx`) and an ACP server (Devin/OpenCode's `acp` subcommands, Antigravity's separately installed server, or the
-[reviewed Codex adapter build](integrations/codex-acp/README.md)). Stock `codex-acp` is insufficient; the local patch has an explicit maintenance cost. Codex shows its stream in both placements, and no longer edits workspace trust entries.
+`cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt. Every lane is an ACP session: Codex, Grok, Agy, Devin and
+OpenCode lanes need stock `acpx` (`npm install -g acpx`), Claude lanes the [reviewed `xcheck-acpx` build](integrations/claude-acp/README.md),
+and each harness its ACP server (`grok agent stdio`, Devin/OpenCode's `acp` subcommands, Antigravity's separately installed server,
+stock `claude-agent-acp`, or the [reviewed Codex adapter build](integrations/codex-acp/README.md)). The two local patches have an
+explicit maintenance cost. Every lane shows its ACP stream in both placements.
 Herdr placement requires the operator's `~/.agents/bin/herdr-caller-context` helper; missing or unverified context falls back to headless in auto mode. Lane shells run
 through your zsh rc files; if
 yours load secrets, they must skip that load when the lane guard variable is
@@ -39,14 +41,14 @@ Stage `BASE/PACKET.md`, `BASE/PROMPT.md`, and `BASE/evidence/` before launching.
 ## Tests
 
 ```bash
-uv run --with 'hypothesis>=6.100' python3 -m unittest discover -s tests   # a few minutes
+uv run --with-requirements requirements-test.txt pytest   # ~25 s, all cores (pytest.ini)
 git diff --check
 ```
 
 Optional long acceptance (185 s):
 
 ```bash
-uv run --with 'hypothesis>=6.100' python3 -m unittest discover -s tests -p acceptance_runtime.py
+uv run --with-requirements requirements-test.txt pytest tests/acceptance_runtime.py
 ```
 
 ## License

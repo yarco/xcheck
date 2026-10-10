@@ -47,20 +47,6 @@ def atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def fresh_answer(lane_dir: Path, work: Path) -> str | None:
-    """ANSWER.md written by this run's lane, or None. The workspace is reused
-    across runs, so only an answer newer than this run's staging counts."""
-    staged, answer = lane_dir / "staged", work / "ANSWER.md"
-    try:
-        ready = work / "ANSWER.ready"
-        if (ready.read_text().strip() == "ANSWER_READY" and ready.stat().st_mtime >= staged.stat().st_mtime
-                and answer.stat().st_mtime >= staged.stat().st_mtime):
-            return answer.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        pass
-    return None
-
-
 def signal_group(pgid: int, sig: int) -> bool:
     """Signal a lane's process group; False if nothing was left to signal.
 
@@ -129,14 +115,13 @@ class Run:
     lanes: dict[str, Lane]       # selected lanes, by name
     contract: Contract
     web: bool
-    idle: int                    # 0 = default for each lane's actual view
+    idle: int                    # 0 = no silence limit
     cap: int | None
     mode: str                    # headless | herdr
     orch: str
     started: str
     panes: dict[str, str]        # herdr: lane → pane id (only panes this run created)
     herdr: dict                  # herdr: caller pane; {} when headless
-    view: str = "stream"         # stream (headless NDJSON) | tui (interactive app, answers in ANSWER.md)
     capacity: bool = True        # each lane probes its pool before spending
     forced: list = None          # lanes launched past a capacity refusal
     epoch: float = 0.0           # lower bound for this run's native-session creation time
@@ -153,7 +138,7 @@ class Run:
             "contract": vars(self.contract),
             "web": self.web, "idle": self.idle, "cap": self.cap, "mode": self.mode,
             "orch": self.orch, "started": self.started, "panes": self.panes,
-            "herdr": self.herdr, "view": self.view, "capacity": self.capacity,
+            "herdr": self.herdr, "capacity": self.capacity,
             "forced": self.forced or [], "epoch": self.epoch,
         }, indent=2))
 
@@ -166,6 +151,6 @@ class Run:
             contract=Contract(**d["contract"]),
             web=d["web"], idle=d["idle"], cap=d["cap"], mode=d["mode"],
             orch=d["orch"], started=d["started"], panes=d.get("panes", {}),
-            herdr=d.get("herdr", {}), view=d.get("view", "stream"), capacity=d.get("capacity", True),
+            herdr=d.get("herdr", {}), capacity=d.get("capacity", True),
             forced=d.get("forced", []), epoch=d.get("epoch", 0.0),
         )

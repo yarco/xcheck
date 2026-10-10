@@ -17,7 +17,7 @@ from xcheck import install, pools
 class RuntimeHandoff(unittest.TestCase):
     setUp = support.EndToEnd.setUp
 
-    def xcheck(self, *args, mode="ok", timeout=40, delay=7):
+    def xcheck(self, *args, mode="ok", timeout=40, delay=5):
         if not hasattr(self, "entry"):
             share = self.root / "runtime"
             self.entry = self.root / "bin" / "xcheck"
@@ -39,10 +39,10 @@ class RuntimeHandoff(unittest.TestCase):
                 path.chmod(0o755)
         root.chmod(0o755)
 
-    def run_app(self, mode, *extra):
+    def run_peer(self, mode, *extra, delay=5):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other",
-                             "--lanes", "claude:claude-opus-5-5:high", "--mode", "headless",
-                             "--view", "tui", "--skip-capacity", "--cap", "20", *extra, mode=mode)
+                             "--lanes", "opencode:opencode/space-bunny-free", "--mode", "headless",
+                             "--skip-capacity", "--cap", "20", *extra, mode=mode, delay=delay)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
 
@@ -58,57 +58,58 @@ class RuntimeHandoff(unittest.TestCase):
         self.assertEqual(json.loads((lane_dir / "exit.json").read_text())["status"], row["status"])
 
     def test_silent_work_publishes_answer_and_releases_pool(self):
-        row = self.run_app("silent-work")
+        row = self.run_peer("buffered-work")
         self.assertEqual(row["status"], "done", row)
         self.assertTrue((self.base / f"RESULT-{row['lane']}.md").read_text().endswith("RESULT_COMPLETE\n"))
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
 
-    def test_complete_looking_draft_waits_for_explicit_final_commit(self):
-        row = self.run_app("deadline-rewrite")
+    def test_complete_looking_draft_waits_for_native_completion(self):
+        row = self.run_peer("draft-rewrite", delay=2)
         self.assertEqual(row["status"], "done", row)
         text = (self.base / f"RESULT-{row['lane']}.md").read_text()
         self.assertIn("FINAL reviewed answer", text)
         self.assertNotIn("EARLY candidate", text)
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
 
     def test_explicit_silence_limit_remains_bounded(self):
-        row = self.run_app("silent-work", "--idle", "3")
+        row = self.run_peer("buffered-work", "--idle", "3")
         self.assertEqual(row["status"], "timeout", row)
         self.assertFalse((self.base / f"RESULT-{row['lane']}.md").exists())
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
 
-    def test_cap_does_not_promote_an_unstable_complete_draft(self):
-        row = self.run_app("deadline-rewrite", "--cap", "3")
+    def test_cap_does_not_promote_a_complete_looking_draft(self):
+        row = self.run_peer("draft-rewrite", "--cap", "3", delay=6)
         self.assertEqual(row["status"], "timeout", row)
         self.assertIn("3s cap", row["reason"])
+        # The draft stays as diagnostic bytes; it is never graded or published as done.
         self.assertIn("EARLY candidate", (self.base / f"RESULT-{row['lane']}.md").read_text())
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
 
-    def test_cap_stops_both_silence_and_endless_drawing_without_harming_other_processes(self):
-        for mode in ("hang", "drawing-hang"):
+    def test_cap_stops_silent_and_endlessly_progressing_turns_without_harming_other_processes(self):
+        for mode in ("hang", "progress-hang"):
             with self.subTest(mode=mode):
                 if mode != "hang":
                     self.base = support.EndToEnd.second_base(self)
                 unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                                              start_new_session=True)
                 try:
-                    row = self.run_app(mode, "--cap", "4")
+                    row = self.run_peer(mode, "--cap", "4")
                     self.assertEqual(row["status"], "timeout", row)
                     self.assertIn("4s cap", row["reason"])
                     self.assertIsNone(unrelated.poll())
-                    self.assert_settled(row, "claude")
+                    self.assert_settled(row)
                 finally:
                     unrelated.terminate()
                     unrelated.wait(timeout=5)
 
-    def test_bounded_wait_does_not_end_or_relaunch_silent_app(self):
+    def test_bounded_wait_does_not_end_or_relaunch_a_silent_turn(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes",
-                             "claude:claude-opus-5-5:high", "--mode", "headless", "--view", "tui",
-                             "--skip-capacity", "--cap", "20", "--detach", mode="silent-work")
+                             "opencode:opencode/space-bunny-free", "--mode", "headless",
+                             "--skip-capacity", "--cap", "20", "--detach", mode="buffered-work")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         result = self.xcheck("wait", "--base", str(self.base), "--timeout", "1")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        lane_dir = self.base / "lanes" / "claude-opus-5-5-high"
+        lane_dir = self.base / "lanes" / "opencode-space-bunny-free"
         before = json.loads((lane_dir / "pids.json").read_text())
         self.assertFalse((lane_dir / "exit.json").exists())
         result = self.xcheck("wait", "--base", str(self.base), "--timeout", "25")
@@ -116,12 +117,12 @@ class RuntimeHandoff(unittest.TestCase):
         self.assertEqual(json.loads((lane_dir / "pids.json").read_text()), before)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "done", row)
-        self.assert_settled(row, "claude")
+        self.assert_settled(row)
 
     def test_native_rate_limit_ends_stream_even_while_retry_events_continue(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other",
                              "--lanes", "opencode:openrouter/qwen/qwen3.8-27b:free", "--mode", "headless",
-                             "--view", "stream", "--skip-capacity", "--cap", "8", mode="rate-limit-retry")
+                             "--skip-capacity", "--cap", "8", mode="rate-limit-retry")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "failed", row)
@@ -138,7 +139,7 @@ class RuntimeHandoff(unittest.TestCase):
     def test_review_text_quoting_rate_limit_is_not_a_native_error(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other",
                              "--lanes", "opencode:openrouter/qwen/qwen3.8-27b:free", "--mode", "headless",
-                             "--view", "stream", "--skip-capacity", "--cap", "8", mode="echo-upstream-limit")
+                             "--skip-capacity", "--cap", "8", mode="echo-upstream-limit")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "done", row)
@@ -151,7 +152,7 @@ class RuntimeHandoff(unittest.TestCase):
                 if index:
                     self.base = support.EndToEnd.second_base(self)
                 result = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lane,
-                                     "--mode", "headless", "--view", "stream", "--skip-capacity",
+                                     "--mode", "headless", "--skip-capacity",
                                      "--cap", "8", mode="error-retry")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
@@ -163,7 +164,7 @@ class RuntimeHandoff(unittest.TestCase):
     def test_codex_reconnect_notice_can_recover_to_a_valid_review(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other",
                              "--lanes", "codex:gpt-6.1-sol:high", "--mode", "headless",
-                             "--view", "stream", "--skip-capacity", "--cap", "8", mode="reconnect")
+                             "--skip-capacity", "--cap", "8", mode="reconnect")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "done", row)
@@ -172,21 +173,16 @@ class RuntimeHandoff(unittest.TestCase):
     def test_native_failure_without_newline_at_stdout_eof_stops_live_harness(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other",
                              "--lanes", "opencode:opencode/space-bunny-free", "--mode", "headless",
-                             "--view", "stream", "--skip-capacity", "--cap", "8", mode="error-no-newline")
+                             "--skip-capacity", "--cap", "8", mode="error-no-newline")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "failed", row)
         self.assertIn("temporarily rate-limited upstream", row["reason"])
         self.assert_settled(row)
 
-    def test_answer_temporarily_missing_during_replacement_is_not_a_runner_crash(self):
-        from xcheck import tui
-        with patch.object(Path, "read_text", side_effect=FileNotFoundError):
-            self.assertFalse(tui._committed(self.base / "ANSWER.md"))
-
-    def launch_detached(self, view="stream", mode="buffered-work", lanes="opencode:opencode/space-bunny-free", delay=7):
+    def launch_detached(self, mode="buffered-work", lanes="opencode:opencode/space-bunny-free", delay=5):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
-                             "--mode", "headless", "--view", view, "--skip-capacity", "--detach",
+                             "--mode", "headless", "--skip-capacity", "--detach",
                              mode=mode, delay=delay)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lane_dir = self.base / "lanes" / support.adapters.parse_lane(lanes.split(",")[-1]).name
@@ -221,15 +217,15 @@ class RuntimeHandoff(unittest.TestCase):
                 if index:
                     self.base = support.EndToEnd.second_base(self)
                 result = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lane,
-                                     "--mode", "headless", "--view", "stream", "--skip-capacity",
+                                     "--mode", "headless", "--skip-capacity",
                                      mode="terminal-hang", timeout=15)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
                 self.assertEqual(row["status"], "done", row)
                 self.assert_settled(row, lane.split(":", 1)[0])
 
-    def test_silent_unknown_app_stays_live_until_explicit_cancellation(self):
-        lane_dir = self.launch_detached(view="tui", mode="hang", lanes="claude:claude-opus-5-5:high")
+    def test_silent_turn_stays_live_until_explicit_cancellation(self):
+        lane_dir = self.launch_detached(mode="hang", lanes="claude:claude-opus-5-5:high")
         before = json.loads((lane_dir / "pids.json").read_text())
         result = self.xcheck("wait", "--base", str(self.base), "--timeout", "3")
         self.assertEqual(result.returncode, 3, result.stderr)
@@ -246,7 +242,7 @@ class RuntimeHandoff(unittest.TestCase):
 
     def test_supervisor_interruption_detaches_and_reattachment_preserves_work(self):
         import signal
-        lane_dir = self.launch_detached(delay=10)
+        lane_dir = self.launch_detached(delay=6)
         before = json.loads((lane_dir / "pids.json").read_text())
         supervisor = int((self.base / "supervisor.pid").read_text())
         os.kill(supervisor, signal.SIGTERM)
@@ -266,7 +262,7 @@ class RuntimeHandoff(unittest.TestCase):
         self.assertTrue(reader.completed)
 
     def test_different_lane_durations_do_not_change_slower_lane_lifetime(self):
-        lane_dir = self.launch_detached(mode="mixed-duration", delay=12,
+        lane_dir = self.launch_detached(mode="mixed-duration", delay=6,
                                         lanes="codex:gpt-6.1-sol:high,opencode:opencode/space-bunny-free")
         original = json.loads((lane_dir / "pids.json").read_text())
         fast = self.base / "lanes" / "codex-gpt-6.1-sol-high" / "exit.json"

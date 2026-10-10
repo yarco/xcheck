@@ -270,7 +270,7 @@ class ReportClaudePolicy(unittest.TestCase):
             before = cfg.read_bytes()
             with patch.object(adapters, 'CLAUDE_JSON', cfg):
                 lane = adapters.Lane('claude', 'claude-opus-5-5', 'high')
-                spec = adapters.launch(lane, Path(tmp), Path(tmp)/'m', Path(tmp)/'f', Path(tmp)/'l', True)
+                spec = adapters.launch(lane, Path(tmp), Path(tmp)/'m', Path(tmp)/'l', True)
                 argv = spec.argv
                 # strictMcpConfig and the connector strip ride _meta, and the
                 # approved set goes to --mcp-config as a file of ACP entries.
@@ -312,7 +312,7 @@ class ReportClaudePolicy(unittest.TestCase):
                          'update': {'sessionUpdate': 'agent_message_chunk',
                                     'content': {'type': 'text', 'text': chunk}}}})
         reader.feed({'jsonrpc': '2.0', 'id': 2, 'result': {'stopReason': 'end_turn'}})
-        reader.finish(Path('/nonexistent'))
+        reader.finish()
         self.assertTrue(reader.completed)
         self.assertIsNone(reader.error)
         self.assertEqual(reader.diagnostics[0]['outcome'], 'succeeded')
@@ -373,27 +373,22 @@ class ReportRuntime(unittest.TestCase):
     make_writable = staticmethod(runtime.RuntimeHandoff.make_writable)
     assert_settled = runtime.RuntimeHandoff.assert_settled
 
-    def test_authorized_grok_mode_finishes_with_orbstack_socket_in_both_views(self):
-        for view in ('stream', 'tui'):
-            with self.subTest(view=view):
-                if view == 'tui':
-                    self.base = support.EndToEnd.second_base(self)
-                result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                                     'grok:grok-4.7:xhigh,codex:gpt-6.1-sol:high', '--mode', 'headless',
-                                     '--view', view, '--skip-capacity', mode='socket-symlink', timeout=15)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                rows = {row['lane']: row for row in json.loads((self.base / 'STATUS.json').read_text())['lanes']}
-                for name in ('grok-4.7-xhigh', 'codex-gpt-6.1-sol-high'):
-                    row = rows[name]
-                    self.assertEqual(row['status'], 'done', row)
-                    self.assertEqual(row['reason'], 'RESULT_COMPLETE')
-                    self.assertTrue((self.base / f"RESULT-{name}.md").exists())
-                    self.assert_settled(row, 'grok' if name.startswith('grok') else 'codex')
+    def test_authorized_grok_mode_finishes_with_orbstack_socket(self):
+        result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
+                             'grok:grok-4.7:xhigh,codex:gpt-6.1-sol:high', '--mode', 'headless',
+                             '--skip-capacity', mode='socket-symlink', timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = {row['lane']: row for row in json.loads((self.base / 'STATUS.json').read_text())['lanes']}
+        for name in ('grok-4.7-xhigh', 'codex-gpt-6.1-sol-high'):
+            row = rows[name]
+            self.assertEqual(row['status'], 'done', row)
+            self.assertEqual(row['reason'], 'RESULT_COMPLETE')
+            self.assertTrue((self.base / f"RESULT-{name}.md").exists())
+            self.assert_settled(row, 'grok' if name.startswith('grok') else 'codex')
 
     def claude_run(self, mode):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'claude:claude-opus-5-5:high', '--mode', 'headless', '--view', 'stream',
-                             '--skip-capacity', mode=mode, timeout=15)
+                             'claude:claude-opus-5-5:high', '--mode', 'headless', '--skip-capacity', mode=mode, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assert_settled(row, 'claude')
@@ -429,7 +424,7 @@ class ReportRuntime(unittest.TestCase):
     def test_retryable_upstream_error_stops_child_and_releases_its_pool(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
                              'opencode:openrouter/qwen/qwen3.8-27b:free', '--mode', 'headless',
-                             '--view', 'stream', '--skip-capacity', mode='rate-limit-retry', timeout=15)
+                             '--skip-capacity', mode='rate-limit-retry', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'failed', row)
@@ -441,20 +436,18 @@ class ReportRuntime(unittest.TestCase):
         self.assertEqual(self.xcheck('wait', '--base', str(self.base), timeout=15).returncode, 0)
         self.assertEqual((self.base / 'lanes' / row['lane'] / 'pids.json').read_bytes(), pids)
 
-    def test_verified_completion_survives_runner_sigterm_for_stream_and_app(self):
-        for view in ('stream', 'tui'):
-            with self.subTest(view=view):
-                if view == 'tui':
+    def test_verified_completion_survives_runner_sigterm(self):
+        for index, lane in enumerate(('claude:claude-opus-5-5:high', 'opencode:opencode/space-bunny-free')):
+            with self.subTest(lane=lane):
+                if index:
                     self.base = support.EndToEnd.second_base(self)
-                result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                                     'claude:claude-opus-5-5:high' if view == 'tui' else 'opencode:opencode/space-bunny-free', '--mode', 'headless',
-                                     '--view', view, '--skip-capacity',
-                                     mode='terminal-hang' if view == 'stream' else 'ok', timeout=15)
+                result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes', lane,
+                                     '--mode', 'headless', '--skip-capacity', mode='terminal-hang', timeout=15)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
                 self.assertEqual(row['status'], 'done', row)
                 self.assertTrue(row['reason'].startswith('RESULT_COMPLETE'), row)
-                # A stream lane may exit on its own before the runner's kill lands.
+                # The client may exit on its own before the runner's kill lands.
                 self.assertIn(row['exit_code'], (0, -15))
                 self.assertIsNone(row['error'])
-                self.assert_settled(row, 'claude' if view == 'tui' else 'opencode')
+                self.assert_settled(row, lane.split(':', 1)[0])

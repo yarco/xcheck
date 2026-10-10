@@ -127,40 +127,44 @@ operator vars they legitimately read.
 
 ## Side inference: honest accounting
 
-A controlled smoke measured `usage.json modelCalls=2` for one review prompt
-that needed no tool iteration:
+A fresh Grok session makes one separate **initial title-sampling** attempt.
+Paired zero-tool native probes on 1.0.50 (one "Reply with exactly OK" turn,
+then a 20 s grace) showed it directly: the control session generated an
+automatic title; a session renamed before the prompt kept its manual title
+and still logged a generated title, discarded, after the answer. Both
+reported `usage.json modelCalls=1`. So `modelCalls` counts the main loop
+only, not the title call, and no title call can be derived by subtracting 1
+from it. Treat `usage.json`/`summary.json` counters as reported metrics,
+never as a complete inference or billing total; auxiliary failures and
+retries can change sampling too.
 
-1. the review call, and
-2. Grok's **initial title-generation** call.
-
-`modelCalls` counts every sampler invocation — a real review packet that
-iterated the tool loop logged `modelCalls=21` (20 tool-loop steps + the same
-+1 title call). The constant overhead is +1 per session, not per call.
+The title attempt has no supported off-switch. The public vendor extension
+`_x.ai/session/rename` (`sessionId`, `title`, optional `cwd`/`kind`/
+`resetToAuto`) is accepted before a prompt and persists
+`title_is_manual:true`, but on a fresh resident session it only freezes
+later refresh: the initial generator still samples and discards. Do not add
+a pre-prompt rename, seed native storage or patch Grok to save this call.
+The documented session `_meta` keys (`rules`, `systemPromptOverride`,
+`agentProfile`, `yoloMode`, `autoMode`) do not disable it either.
 
 Everything else is off and verified absent: `GROK_TITLE_REFRESH=0` +
-`features.title_refresh=false` stopped the early-turn title refresh (old
-headless lanes show `title_refresh_idx`; the ACP lane has none),
+`features.title_refresh=false` stopped the early-turn title refresh,
 `GROK_TURN_SUMMARY`/`GROK_SESSION_RECAP`/`GROK_SESSION_SEARCH`/
-`GROK_MEMORY`/`GROK_SUBAGENTS` are `0`/`false`, and the debug log shows no
-goal/dream/background activity.
-
-The initial title call has **no supported native off-switch**: the documented
-`_meta` session options are only `agentProfile`/`yoloMode`, and the one skip
-path Grok logs ("session already has a title") requires a manual title that
-no ACP method sets for this purpose. This is parity with the retired headless
-path, which made the same extra call plus refreshes. xcheck therefore claims
-**one** extra model call per review, with `usage.json`/`summary.json` as the
-evidence — not zero.
+`GROK_MEMORY`/`GROK_SUBAGENTS` are `0`/`false`, the profile excludes goal
+tools and the debug log shows no active goal. That is a statement about the
+observed lanes, not a claim that every auxiliary mechanism is disabled.
 
 ## Failure and completion semantics
 
-The shared ACP reader correlates request ids in both directions
-(`Reader._acp`): every request except the client's `session/prompt` is
-tracked, a reply to a tracked request is consumed, an untracked RPC error
-matching the prompt id is terminal immediately, a `session/prompt` result of
-`end_turn` completes the turn, and an acpx-level (id null) error is deferred
-to completion. Grok additionally surfaces `_x.ai/mcp/server_status`
-notifications as `mcp_startup` diagnostics when a server is not `ready`.
+The shared ACP reader (`adapters.Reader`) settles the turn on the
+`session/prompt` response, recognised by its `stopReason` (only a prompt
+response carries one, so id reuse by the agent cannot hide it): `end_turn`
+completes, any other reason fails. Request ids from both directions are
+counted until answered; an error carrying the prompt id while another
+request with that id is open is held until the remaining response at that id
+resolves which side sent it, or until acpx exits without completion. Grok
+additionally surfaces `_x.ai/mcp/server_status` notifications as
+`mcp_startup` diagnostics when a server is not `ready`.
 
 `xcheck doctor` keeps the native startup probe —
 `grok --sandbox off --cwd <tmp> version --json` (zero inference, sandbox

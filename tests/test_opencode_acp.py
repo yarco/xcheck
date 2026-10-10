@@ -38,7 +38,7 @@ class Reader(unittest.TestCase):
                       rpc(id=3, error={"message": "client permission denied"}), chunk("answer"),
                       rpc(id=3, result={"stopReason": "end_turn"})):
             reader.feed(event)
-        reader.finish(Path("/nonexistent"))
+        reader.finish()
         self.assertTrue(reader.completed)
         self.assertIsNone(reader.error)
 
@@ -68,7 +68,7 @@ class Lanes(unittest.TestCase):
         for variants in ({"low": {}, "high": {}}, {}):
             with self.subTest(variants=variants), patch.object(models, "client_metadata", return_value={peer.model: {
                     "variants": variants}}) as metadata:
-                spec = adapters.launch(peer, work, message, work / "final", self.base / "lanes" / peer.name / "harness.log", True)
+                spec = adapters.launch(peer, work, message, self.base / "lanes" / peer.name / "harness.log", True)
                 metadata.assert_called_once()
                 self.assertFalse(metadata.call_args.kwargs["refresh"])
                 self.assertEqual("effort=default" in spec.argv, bool(variants))
@@ -78,7 +78,7 @@ class Lanes(unittest.TestCase):
             with self.subTest(failure=failure), patch.object(models, "client_metadata", **(
                     {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure})):
                 with self.assertRaisesRegex(adapters.Unavailable, "startup-unavailable"):
-                    adapters.launch(peer, work, message, work / "final", self.base / "lanes" / peer.name / "harness.log", True)
+                    adapters.launch(peer, work, message, self.base / "lanes" / peer.name / "harness.log", True)
 
     def test_unlisted_model_without_effort_is_skipped_before_spend(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--lanes",
@@ -89,31 +89,26 @@ class Lanes(unittest.TestCase):
         self.assertIn("opencode/not-listed-free is not in `opencode models --verbose`", row["reason"])
         self.assertFalse((self.base / "lanes" / row["lane"] / "stream.jsonl").exists())
 
-    def test_spender_keeps_provider_pool_effort_and_stream_in_both_views(self):
-        for view in ("stream", "tui"):
-            with self.subTest(view=view):
-                if (self.base / ".launched").exists():
-                    self.base = self.second_base()
-                result = self.xcheck("run", "--base", str(self.base), "--orch", "codex",
-                                     "--lanes", "opencode:openrouter/qwen/qwen3.8-27b:free:high",
-                                     "--mode", "headless", "--view", view, "--skip-capacity",
-                                     mode="custody", env_extra={"ACPX_AUTH_TOKEN": "unapproved",
-                                                               "OPENCODE_CONFIG_CONTENT": '{"permission":"deny"}'})
-                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-                name = "opencode-openrouter-qwen-qwen3.8-27b-free-high"
-                directory = self.base / "lanes" / name
-                row = json.loads((directory / "exit.json").read_text())
-                self.assertEqual(row["status"], "done", row)
-                self.assertTrue((directory / "stream.jsonl").exists())
-                self.assertFalse((directory / "screen.log").exists())
-                probe = json.loads((self.root / ".lanes" / name / "probe.json").read_text())
-                self.assertTrue(probe["holds_busy"], "the native server must hold admission, not just acpx")
-                self.assertEqual(probe["config"], {"model": "openrouter/qwen/qwen3.8-27b:free",
-                                                  "mode": "build", "effort": "high"})
-                self.assertEqual(probe["acpx_env"], [])
-                held = pools.acquire(self.root, "opencode-openrouter", "next", time.monotonic() + 1)
-                self.assertIsNotNone(held)
-                held.release()
+    def test_spender_keeps_provider_pool_and_effort(self):
+        result = self.xcheck("run", "--base", str(self.base), "--orch", "codex",
+                             "--lanes", "opencode:openrouter/qwen/qwen3.8-27b:free:high",
+                             "--mode", "headless", "--skip-capacity",
+                             mode="custody", env_extra={"ACPX_AUTH_TOKEN": "unapproved",
+                                                       "OPENCODE_CONFIG_CONTENT": '{"permission":"deny"}'})
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        name = "opencode-openrouter-qwen-qwen3.8-27b-free-high"
+        directory = self.base / "lanes" / name
+        row = json.loads((directory / "exit.json").read_text())
+        self.assertEqual(row["status"], "done", row)
+        self.assertTrue((directory / "stream.jsonl").exists())
+        probe = json.loads((self.root / ".lanes" / name / "probe.json").read_text())
+        self.assertTrue(probe["holds_busy"], "the native server must hold admission, not just acpx")
+        self.assertEqual(probe["config"], {"model": "openrouter/qwen/qwen3.8-27b:free",
+                                          "mode": "build", "effort": "high"})
+        self.assertEqual(probe["acpx_env"], [])
+        held = pools.acquire(self.root, "opencode-openrouter", "next", time.monotonic() + 1)
+        self.assertIsNotNone(held)
+        held.release()
 
     def test_config_guard_refuses_before_admission(self):
         config = self.root / "acpx-config.json"

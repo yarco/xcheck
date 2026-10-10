@@ -49,7 +49,7 @@ class FinalReaderRepairs(unittest.TestCase):
                 lane._consume(reader, json.dumps(chunk(GOOD)).encode(), progress)
                 reader.feed(PROMPT)
                 lane._consume(reader, json.dumps(rpc(id=3, result={'stopReason': 'end_turn'})).encode(), progress)
-                reader.finish(Path('/nonexistent'))
+                reader.finish()
                 self.assertEqual(progress.observe.call_count, 2)
                 self.assertEqual(reader.text, GOOD)
                 self.assertIsNone(reader.error)
@@ -93,21 +93,24 @@ class FinalLifecycleRepairs(unittest.TestCase):
         self.assertIn('RESULT_COMPLETE', (self.base / f"RESULT-{row['lane']}.md").read_text())
         self.assert_settled(row)
 
-    def test_quiet_quoted_limit_survives_old_heuristic_and_native_exit_fails(self):
+    def test_quoted_limit_is_content_and_only_a_native_failure_fails(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'claude:claude-opus-5-5:high', '--mode', 'headless', '--view', 'tui',
-                             '--skip-capacity', mode='quoted-limit-silent', delay=18, timeout=30)
+                             'claude:claude-opus-5-5:high', '--mode', 'headless',
+                             '--skip-capacity', mode='echo402', timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'done', row)
+        self.assertIn("hit your limit", (self.base / f"RESULT-{row['lane']}.md").read_text())
         self.assert_settled(row, "claude")
         self.base = support.EndToEnd.second_base(self)
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'claude:claude-opus-5-5:high', '--mode', 'headless', '--view', 'tui',
-                             '--skip-capacity', mode='native-limit-exit', timeout=15)
+                             'claude:claude-opus-5-5:high', '--mode', 'headless',
+                             '--skip-capacity', mode='error', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'failed', row)
+        self.assertIn("hit your limit", row['reason'])
+        self.assertFalse((self.base / f"RESULT-{row['lane']}.md").exists())
         self.assert_settled(row, "claude")
 
     def test_dead_opencode_stream_runner_is_stopped_on_reattach(self):
@@ -164,15 +167,18 @@ class FinalLifecycleRepairs(unittest.TestCase):
             self.xcheck('cancel', '--base', str(self.base), '--reason', 'metadata test cleanup')
             self.xcheck('wait', '--base', str(self.base), '--timeout', '15')
 
-    def test_spawn_setup_failure_and_interruption_cleanup_both_views(self):
+    def test_spawn_setup_failure_and_interruption_cleanup(self):
         unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
         try:
-            for index, (view, fault) in enumerate((('stream', 'exception'), ('stream', 'signal'),
-                                                    ('tui', 'exception'), ('tui', 'signal'))):
-                with self.subTest(view=view, fault=fault):
+            for index, (spec, fault) in enumerate((('opencode:opencode/space-bunny-free', 'exception'),
+                                                    ('opencode:opencode/space-bunny-free', 'signal'),
+                                                    ('claude:claude-opus-5-5:high', 'exception'),
+                                                    ('claude:claude-opus-5-5:high', 'signal'))):
+                with self.subTest(lane=spec, fault=fault):
                     if index:
                         self.base = support.EndToEnd.second_base(self)
-                    name = 'claude-opus-5-5-high' if view == 'tui' else 'opencode-space-bunny-free'
+                    peer = adapters.parse_lane(spec)
+                    name = peer.name
                     directory = self.base / 'lanes' / name
                     directory.mkdir(parents=True)
                     (directory / 'message.txt').write_text('Review the packet')
@@ -181,9 +187,8 @@ class FinalLifecycleRepairs(unittest.TestCase):
                     for p in ('PACKET.md', 'PROMPT.md'):
                         shutil.copy2(self.base / p, snapshot / p)
                     shutil.copytree(self.base / 'evidence', snapshot / 'evidence')
-                    current = files.Run(self.base, {name: adapters.parse_lane('claude:claude-opus-5-5:high' if view == 'tui' else 'opencode:opencode/space-bunny-free')},
-                                        support.CONTRACT, False, 0, None, 'headless', 'other', 'now', {}, {},
-                                        view=view, capacity=False)
+                    current = files.Run(self.base, {name: peer}, support.CONTRACT, False, 0, None,
+                                        'headless', 'other', 'now', {}, {}, capacity=False)
                     current.save()
                     captured = self.base / 'captured-pid'
                     script = '''import json, os, signal, sys
@@ -210,7 +215,7 @@ sys.exit(lane.run_lane(Path(sys.argv[2]), sys.argv[3]))
                         with self.assertRaises(ProcessLookupError):
                             os.kill(pid, 0)
                         self.assertIsNone(unrelated.poll())
-                        held = pools.acquire(self.root, 'claude' if view == 'tui' else 'opencode', 'next-run', time.monotonic() + 1)
+                        held = pools.acquire(self.root, peer.pool, 'next-run', time.monotonic() + 1)
                         self.assertIsNotNone(held)
                         if held:
                             held.release()
@@ -263,8 +268,7 @@ class FinalSettlementRepairs(unittest.TestCase):
         name = next(iter(current.lanes))
         result = self.base / f'RESULT-{name}.md'
         result.write_text(GOOD)
-        with patch.object(run, 'fresh_answer', return_value=None):
-            run._settle_dead_runner(current, name)
+        run._settle_dead_runner(current, name)
         record = json.loads((current.lane_dir(name) / 'exit.json').read_text())
         self.assertEqual(record['status'], 'failed', record)
         self.assertEqual(result.read_text(), GOOD)
@@ -280,8 +284,7 @@ class FinalSettlementRepairs(unittest.TestCase):
                 events = [PROMPT, chunk(GOOD), rpc(id=3, error=dict(message='upstream failure', data=dict(service='session')))
                           if failure else rpc(id=3, result=dict(stopReason='end_turn'))]
                 (current.lane_dir(name) / 'stream.jsonl').write_text('\n'.join(map(json.dumps, events)))
-                with patch.object(run, 'fresh_answer', return_value=None):
-                    run._settle_dead_runner(current, name)
+                run._settle_dead_runner(current, name)
                 record = json.loads((current.lane_dir(name) / 'exit.json').read_text())
                 self.assertEqual(record['status'], 'failed' if failure else 'done', record)
 

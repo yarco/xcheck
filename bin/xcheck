@@ -42,9 +42,6 @@ def main() -> int:
                         + ", ".join(f"{l.kind}:{l.model}" for l in adapters.OPT_IN)
                         + "; more opencode selectors from `xcheck models`")
     r.add_argument("--mode", default="auto", choices=["auto", "headless", "herdr"])
-    r.add_argument("--view", default="auto", choices=["auto", "tui", "stream"],
-                   help="tui: each harness's own interactive app (default in Herdr); "
-                        "stream: its non-interactive event stream (default headless)")
     r.add_argument("--web", default="live", choices=["live", "packet"],
                    help="live (default): allow web; packet: disable built-in web and request no web (not isolation)")
     r.add_argument("--idle", type=int, default=None,
@@ -102,7 +99,7 @@ def main() -> int:
                 lanes = [l for l in adapters.DEFAULT_ROSTER if l.kind != a.orch]
             lanes += [adapters.parse_lane(s.strip()) for s in a.add]
             return run.start(a.base, lanes, a.mode, a.orch, a.web == "live", a.idle, a.cap,
-                             set(a.force_lane), a.skip_capacity, a.view)
+                             set(a.force_lane), a.skip_capacity)
         if a.cmd == "wait":
             return run.wait(a.base, a.timeout)
         if a.cmd == "status":

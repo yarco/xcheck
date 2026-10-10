@@ -19,7 +19,7 @@ class Reader(unittest.TestCase):
         lines = (support.FIX / "devin-acp-ok.jsonl").read_text().splitlines()
         for line in lines:
             reader.feed(json.loads(line))
-        reader.finish(Path("/nonexistent"))
+        reader.finish()
         self.assertTrue(reader.completed)
         self.assertIsNone(reader.error)
         self.assertIn("RESULT_COMPLETE", reader.text)
@@ -33,7 +33,7 @@ class Reader(unittest.TestCase):
                 reader = adapters.Reader("devin")
                 for obj in events:
                     reader.feed(obj)
-                reader.finish(Path("/nonexistent"))
+                reader.finish()
                 self.assertFalse(reader.completed)
                 self.assertEqual(bool(reader.error), bool(error))
                 if error:
@@ -45,31 +45,25 @@ class Lanes(unittest.TestCase):
     xcheck = support.EndToEnd.xcheck
     second_base = support.EndToEnd.second_base
 
-    def test_review_spender_holds_pool_and_uses_stream_in_both_views(self):
-        for view in ("stream", "tui"):
-            with self.subTest(view=view):
-                if (self.base / ".launched").exists():
-                    self.base = self.second_base()
-                p = self.xcheck("run", "--base", str(self.base), "--orch", "codex",
-                                "--lanes", "devin:swe-2-max", "--mode", "headless", "--view", view,
-                                "--skip-capacity", mode="custody", env_extra={
-                                    "DEVIN_PERMISSION_MODE": "dangerous", "DEVIN_REFUSAL_FALLBACK": "adaptive",
-                                    "DEVIN_SANDBOX": "1", "ACPX_AUTH_TOKEN": "t"})
-                self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
-                directory = self.base / "lanes" / PEER.name
-                row = json.loads((directory / "exit.json").read_text())
-                self.assertEqual(row["status"], "done", row)
-                self.assertTrue((directory / "stream.jsonl").exists())
-                self.assertFalse((directory / "screen.log").exists())
-                probe = json.loads((self.root / ".lanes" / PEER.name / "probe.json").read_text())
-                self.assertTrue(probe["holds_busy"], "Devin, not just acpx, must retain admission")
-                self.assertEqual(probe["devin_mode"], "accept-edits")
-                self.assertEqual(probe["devin_fallback"], "")
-                self.assertEqual(probe["devin_sandbox"], "false")
-                self.assertEqual(probe["acpx_env"], [])
-                held = pools.acquire(self.root, "devin", "next", time.monotonic() + 1)
-                self.assertIsNotNone(held)
-                held.release()
+    def test_review_spender_holds_pool(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "codex",
+                        "--lanes", "devin:swe-2-max", "--mode", "headless", "--skip-capacity", mode="custody", env_extra={
+                            "DEVIN_PERMISSION_MODE": "dangerous", "DEVIN_REFUSAL_FALLBACK": "adaptive",
+                            "DEVIN_SANDBOX": "1", "ACPX_AUTH_TOKEN": "t"})
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        directory = self.base / "lanes" / PEER.name
+        row = json.loads((directory / "exit.json").read_text())
+        self.assertEqual(row["status"], "done", row)
+        self.assertTrue((directory / "stream.jsonl").exists())
+        probe = json.loads((self.root / ".lanes" / PEER.name / "probe.json").read_text())
+        self.assertTrue(probe["holds_busy"], "Devin, not just acpx, must retain admission")
+        self.assertEqual(probe["devin_mode"], "accept-edits")
+        self.assertEqual(probe["devin_fallback"], "")
+        self.assertEqual(probe["devin_sandbox"], "false")
+        self.assertEqual(probe["acpx_env"], [])
+        held = pools.acquire(self.root, "devin", "next", time.monotonic() + 1)
+        self.assertIsNotNone(held)
+        held.release()
 
     def test_dead_runner_recovers_only_native_completion(self):
         for complete in (False, True):

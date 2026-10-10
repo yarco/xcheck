@@ -138,7 +138,7 @@ def feed_grok(events) -> str:
     r.feed({"id": 3, "method": "session/prompt"})
     for e in events:
         r.feed(e)
-    r.finish(pathlib.Path("/nonexistent"))
+    r.finish()
     return r.text
 
 

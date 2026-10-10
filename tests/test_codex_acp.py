@@ -34,7 +34,7 @@ class Reader(unittest.TestCase):
                     rpc(id=3, error={'message': 'client rejected permission'}), chunk('final answer'),
                     rpc(id=3, result={'stopReason': 'end_turn'})):
             reader.feed(obj)
-        reader.finish(Path('/nonexistent'))
+        reader.finish()
         self.assertTrue(reader.completed)
         self.assertIsNone(reader.error)
         self.assertEqual(reader.text, 'final answer')
@@ -65,7 +65,7 @@ class Lanes(unittest.TestCase):
     def test_launch_controls_override_inherited_adapter_settings(self):
         work = self.root / 'work'
         for web in (True, False):
-            spec = adapters.launch(PEER, work, work/'message', work/'final', self.base/'lanes'/PEER.name/'harness.log', web)
+            spec = adapters.launch(PEER, work, work/'message', self.base/'lanes'/PEER.name/'harness.log', web)
             hostile = {'CODEX_PATH': '/evil', 'CODEX_CONFIG': '{bad', 'INITIAL_AGENT_MODE': 'agent-full-access',
                        'DEFAULT_AUTH_REQUEST': 'secret', 'MODEL_PROVIDER': 'evil', 'CODEX_ACP_EPHEMERAL': '0',
                        'CODEX_THREAD_ID': 'orchestrator', 'CODEX_SESSION_ID': 'orchestrator', 'ACPX_AUTH_TOKEN': 'secret'}
@@ -98,27 +98,23 @@ class Lanes(unittest.TestCase):
                 self.assertEqual(adapters.codex_acp_problem() is None, features == expected)
                 self.assertEqual(probe.call_args.kwargs['env']['CODEX_PATH'], os.devnull)
 
-    def test_spender_rejoins_pool_and_uses_stream_in_both_views_without_trust_edits(self):
+    def test_spender_rejoins_pool_without_trust_edits(self):
         config = self.root/'codex-config.toml'
         config.write_text('model = "operator-model"\n')
-        for view in ('stream', 'tui'):
-            with self.subTest(view=view):
-                if (self.base/'.launched').exists(): self.base = self.second_base()
-                out = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                                  'codex:gpt-6.1-sol:high', '--mode', 'headless', '--view', view, '--skip-capacity', mode='custody')
-                self.assertEqual(out.returncode, 0, out.stdout+out.stderr)
-                d = self.base/'lanes'/PEER.name
-                row = json.loads((d/'exit.json').read_text())
-                self.assertEqual(row['status'], 'done', row)
-                probe = json.loads((self.root/'.lanes'/PEER.name/'probe.json').read_text())
-                self.assertTrue(probe['holds_busy'], 'the Codex child must hold admission after Node drops fds')
-                self.assertEqual(probe['config'], dict(model=PEER.model, mode='read-only', reasoning_effort='high'))
-                self.assertTrue((d/'stream.jsonl').is_file())
-                self.assertFalse((d/'screen.log').exists())
-                self.assertEqual(config.read_text(), 'model = "operator-model"\n')
-                held = pools.acquire(self.root, 'codex', 'next', time.monotonic()+1)
-                self.assertIsNotNone(held)
-                held.release()
+        out = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
+                          'codex:gpt-6.1-sol:high', '--mode', 'headless', '--skip-capacity', mode='custody')
+        self.assertEqual(out.returncode, 0, out.stdout+out.stderr)
+        d = self.base/'lanes'/PEER.name
+        row = json.loads((d/'exit.json').read_text())
+        self.assertEqual(row['status'], 'done', row)
+        probe = json.loads((self.root/'.lanes'/PEER.name/'probe.json').read_text())
+        self.assertTrue(probe['holds_busy'], 'the Codex child must hold admission after Node drops fds')
+        self.assertEqual(probe['config'], dict(model=PEER.model, mode='read-only', reasoning_effort='high'))
+        self.assertTrue((d/'stream.jsonl').is_file())
+        self.assertEqual(config.read_text(), 'model = "operator-model"\n')
+        held = pools.acquire(self.root, 'codex', 'next', time.monotonic()+1)
+        self.assertIsNotNone(held)
+        held.release()
 
     def test_unverified_adapter_is_skipped_without_starting_a_spender(self):
         out = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',

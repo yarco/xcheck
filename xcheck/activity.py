@@ -7,7 +7,6 @@ from contextlib import closing
 from pathlib import Path
 
 from .files import atomic_write, is_alive, now, workspace
-from .adapters import STREAM_ONLY
 
 
 class Activity:
@@ -17,10 +16,9 @@ class Activity:
         self.data = dict(events=0, completed_tools=0)
 
     def observe(self, obj):
-        event = obj.get('type')
-        if self.kind in STREAM_ONLY:  # ACP JSON-RPC: name the update, call or response
-            update = (obj.get('params') or {}).get('update') or {}
-            event = update.get('sessionUpdate') or obj.get('method') or ('error' if 'error' in obj else 'result')
+        # ACP JSON-RPC: name the update, call or response
+        update = (obj.get('params') or {}).get('update') or {}
+        event = update.get('sessionUpdate') or obj.get('method') or ('error' if 'error' in obj else 'result')
         at = now()
         self.data.update(events=self.data['events'] + 1, last_event=event, observed_at=at)
         if self.kind == 'opencode':
@@ -28,14 +26,8 @@ class Activity:
             if isinstance(session, str):
                 self.data['session_id'] = session
         tool = None
-        if self.kind in STREAM_ONLY and event == 'tool_call_update':
-            update = obj['params']['update']
-            if update.get('status') == 'completed':
-                tool = update.get('kind') or 'tool'
-        elif self.kind == 'claude' and event == 'user':
-            if any(b.get('type') == 'tool_result' and not b.get('is_error')
-                   for b in (obj.get('message') or {}).get('content', []) if isinstance(b, dict)):
-                tool = 'tool_result'
+        if event == 'tool_call_update' and update.get('status') == 'completed':
+            tool = update.get('kind') or 'tool'
         if tool:
             self.data['completed_tools'] += 1
             self.data['last_completed_tool'] = dict(kind=tool, observed_at=at)
@@ -54,8 +46,6 @@ def snapshot(run, name):
     session = result.get('stream', {}).get('session_id')
     if run.lane(name).kind == 'opencode' and session:
         result['native'] = opencode_native(run, name, session)
-    elif not (directory / 'stream.jsonl').exists():
-        result['observability'] = 'app display only; silence does not establish inactivity'
     result['note'] = 'Native state can persist after exit. Liveness, retry events and an open tool alone do not prove forward progress.'
     return result
 

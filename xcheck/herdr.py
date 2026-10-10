@@ -1,8 +1,8 @@
 """Herdr placement: one visible pane per lane, running the ordinary lane runner.
 
-In the default TUI view a pane shows the harness's interactive app, hosted by
-`xcheck lane`; stream view renders events instead. Completion is the lane's
-exit.json, never pane text. The runner replaces the pane's shell (`exec`), and
+A pane shows the lane runner's rendering of its ACP stream (tool calls,
+errors, the end of the turn). Completion is the lane's exit.json, never pane
+text. The runner replaces the pane's shell (`exec`), and
 Herdr closes a pane when its process exits, so each pane closes itself when its
 lane ends; nothing ever closes a pane by id.
 """

@@ -1,12 +1,13 @@
 """Per-harness knowledge: how to start a lane, and how to read what it streams.
 
-Every flag here was checked against CLI help and smoke runs. Codex ACP was
-verified with codex-cli 0.162.0, the reviewed codex-acp 2.1.1 automation build,
-and acpx 0.19.4. `xcheck doctor` re-checks flags against installed help.
+Every lane is an acpx (ACP client) exec against the harness's ACP server; the
+vendor-specific part is the server command, its environment and its native
+policy. Every flag here was checked against CLI help and smoke runs, and
+`xcheck doctor` re-checks flags against installed help.
 
-Stream lanes print their answer as a final message; the lane runner extracts
-that text from the harness's structured stream. Grok may write scratch files
-in its workspace while reviewing.
+Lanes print their answer as their final message; the one Reader below
+extracts it from the ACP stream and decides native completion. Grok,
+OpenCode and Devin may write scratch files in their workspace while reviewing.
 """
 
 from __future__ import annotations
@@ -114,9 +115,9 @@ class Launch:
     kind: str = ""  # lane kind, for kind-scoped env scrubbing
 
 
-def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: bool) -> Launch:
-    """Headless command for one lane (stream view). `work` is its workspace,
-    `log` its forensic log."""
+def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    """The acpx command for one lane. `work` is its workspace, `log` its
+    forensic log."""
     if lane.kind == "codex":
         return _codex_launch(lane, work, message, log, web)
     if lane.kind == "claude":
@@ -129,7 +130,7 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
         return _devin_launch(lane, work, message, log, web)
     if lane.kind == "opencode":
         return _opencode_launch(lane, work, message, log)
-    raise ValueError(f"{lane.kind} has no headless form; it runs as its app (tui)")
+    raise ValueError(f"unknown kind {lane.kind}")
 
 
 CODEX_ACP_VERSION = "2.1.1"  # re-verify permissions and native events before changing
@@ -290,10 +291,10 @@ GROK_ENV = {
     # scrubbed anyway; this refuses to use it if one ever leaked in).
     "GROK_DISABLE_API_KEY_AUTH": "1",
     "GROK_DISABLE_AUTOUPDATER": "1", "GROK_TELEMETRY_ENABLED": "0",
-    # No delegation, memory, or side sampling. Grok still makes exactly one
-    # title-generation call after the first prompt — the same one the headless
-    # path made; every other background sampler is off (see
-    # integrations/grok-acp/README.md).
+    # No delegation, memory, title refresh or other side sampling. A fresh
+    # session still samples one initial title: no supported switch disables
+    # it, and a pre-prompt _x.ai/session/rename only discards its result (see
+    # integrations/grok-acp/README.md). usage.json's modelCalls excludes it.
     "GROK_SUBAGENTS": "0", "GROK_MEMORY": "0",
     "GROK_TITLE_REFRESH": "0", "GROK_TURN_SUMMARY": "0", "GROK_SESSION_RECAP": "0",
     "GROK_SESSION_SEARCH": "0",
@@ -523,32 +524,50 @@ CLAUDE_FREE_MCP = {
     "keenable-free": "https://api.keenable.ai/mcp",
     "you-free": "https://api.you.com/mcp?profile=free&tools=you-search",
 }
+# A trusted local name is a trust decision about the command, not proof that
+# its registration is keyless: an approved entry may carry only these cache
+# locations in its env, and an HTTP one must be loopback without headers.
+# Anything else (a key, a token, a header helper, a remote URL) drops the
+# server instead of forwarding a credential channel past the lane's key scrub.
+LOCAL_MCP_ENV = {"UV_CACHE_DIR", "UV_TOOL_DIR", "NPM_CONFIG_CACHE"}
+LOOPBACK_URL = re.compile(r"http://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/[^\s?#@]*)?")
+
+
+def _local_mcp_ok(server: dict) -> bool:
+    if server.get("type", "stdio") == "stdio":
+        args, env = server.get("args", []), server.get("env", {})
+        return (set(server) <= {"type", "command", "args", "env"} and isinstance(server.get("command"), str)
+                and isinstance(args, list) and all(isinstance(a, str) for a in args)
+                and isinstance(env, dict) and set(env) <= LOCAL_MCP_ENV
+                and all(isinstance(v, str) for v in env.values()))
+    return (server.get("type") == "http" and set(server) == {"type", "url"}
+            and isinstance(server["url"], str) and LOOPBACK_URL.fullmatch(server["url"]) is not None)
 
 
 def _claude_review_servers(web: bool) -> dict:
+    """The operator's registrations a review may use: approved local readers in
+    the keyless shape above, plus (live web only) the exact keyless endpoints."""
     try:
         data = json.loads(CLAUDE_JSON.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return {name: server for name, server in (data.get("mcpServers") or {}).items()
-            if isinstance(server, dict) and (name in CLAUDE_LOCAL_MCP or (
-                web and name in CLAUDE_FREE_MCP and server.get("type") == "http"
-                and server.get("url") == CLAUDE_FREE_MCP[name] and not server.get("headers")))}
+    servers = data.get("mcpServers")
+    return {name: server for name, server in (servers.items() if isinstance(servers, dict) else ())
+            if isinstance(server, dict) and (
+                (name in CLAUDE_LOCAL_MCP and _local_mcp_ok(server))
+                or (web and name in CLAUDE_FREE_MCP and server == {"type": "http", "url": CLAUDE_FREE_MCP[name]}))}
 
 
 def _claude_mcp_file(path: Path, web: bool) -> Path:
     """Approved servers in acpx's --mcp-config shape (the ACP array: headers and
-    env are name/value pairs). Only the review selection is ever written."""
+    env are name/value pairs). Only the validated review selection is written."""
     servers = []
     for name, server in _claude_review_servers(web).items():
-        if server.get("type") in ("http", "sse"):
-            entry = {"name": name, "type": server["type"], "url": server["url"],
-                     "headers": [{"name": k, "value": v} for k, v in (server.get("headers") or {}).items()]}
-        elif isinstance(server.get("command"), str):
+        if server.get("type") == "http":
+            entry = {"name": name, "type": "http", "url": server["url"], "headers": []}
+        else:
             entry = {"name": name, "command": server["command"], "args": list(server.get("args") or []),
                      "env": [{"name": k, "value": v} for k, v in (server.get("env") or {}).items()]}
-        else:
-            continue  # a malformed entry is dropped, not forwarded
         servers.append(entry)
     path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
     return path
@@ -556,6 +575,9 @@ def _claude_mcp_file(path: Path, web: bool) -> Path:
 
 ACPX_REVIEWED = "0.19.4-xcheck.1"      # the session-meta build; stock acpx drops the flag
 CLAUDE_ACP_VERSION = "0.89.0"          # @agentclientprotocol/claude-agent-acp pin
+# Native flags the session options become on the operator's claude command line.
+CLAUDE_NATIVE_FLAGS = ("--restricted", "--strict-mcp-config", "--mcp-config", "--tools",
+                       "--allowedTools", "--disallowedTools")
 
 
 def _claude_acp_meta(lane: Lane, work: Path, log: Path, web: bool) -> Path:
@@ -567,9 +589,10 @@ def _claude_acp_meta(lane: Lane, work: Path, log: Path, web: bool) -> Path:
     it. allowedTools pre-approves the review tools and each approved MCP server
     by name (`mcp__<server>`), as the native --allowedTools did; without it
     --deny-all would deny their permission requests. settingSources [] keeps
-    user/project/managed settings out, strictMcpConfig + --mcp-config admit only
-    the review servers, disallowedTools strips account connectors, and title is
-    set so the adapter never spends a turn on one."""
+    user/project/local settings out; managed policy still applies, as it should,
+    and the CLI still reads its global ~/.claude.json state. strictMcpConfig +
+    --mcp-config admit only the review servers, disallowedTools strips account
+    connectors, and title is set so the adapter never spends a turn on one."""
     tools = ["Read", *(["WebSearch", "WebFetch"] if web else [])]
     options = {
         "settingSources": [],
@@ -662,11 +685,21 @@ def claude_acp_problem() -> str | None:
         return ("auth-required: `claude auth status` is not a first-party claude.ai subscription login "
                 "(scrubbed routing overrides expose a different source, or the Keychain login is missing); "
                 "run claude once to refresh it")
+    # The SDK passes these to the operator's CLI, which upgrades on its own
+    # schedule: a CLI that dropped one would ignore or refuse the lane's limits.
+    try:
+        help_text = subprocess.run([shutil.which("claude") or "claude", "--help"], env=env,
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        help_text = ""
+    if missing := [f for f in CLAUDE_NATIVE_FLAGS if f not in help_text]:
+        return (f"startup-unavailable: the installed claude no longer lists {', '.join(missing)}; "
+                "the lane's native limits depend on them — re-verify the adapter before running it")
     return None
 
 # Agy runs through acpx and Antigravity's own ACP server, the headless form
-# Antigravity ships for IDEs: `agy -p` ends the turn on any soft-denied tool and
-# the app needs a committed ANSWER.md. The chain, outermost first:
+# Antigravity ships for IDEs: `agy -p` ends the turn on any soft-denied tool.
+# The chain, outermost first:
 #   acpx --no-terminal --no-fs   transport only; no client-side fs or shell
 #   xcheck hold                  re-joins this run's pool (acpx passes only stdio)
 #   sandbox-exec -f agy.sb       writes only to the workspace and lane home
@@ -760,8 +793,6 @@ def _agy_profile(path: Path, work: Path, home: Path, uv: Path) -> Path:
 
 def unavailable(lane: Lane) -> str | None:
     """Why this lane cannot start here, before admission; None when it can."""
-    if lane.kind not in STREAM_ONLY:
-        return None
     if lane.kind == "claude":
         client = "xcheck-acpx"
         if not shutil.which(client):
@@ -801,35 +832,13 @@ def unavailable(lane: Lane) -> str | None:
                 "opening the link it prints")
     return None
 
-STREAM_ONLY = {"codex", "claude", "grok", "agy", "devin", "opencode"}
-
-
-def view_for(kind: str, view: str) -> str:
-    """The view a lane of `kind` actually runs in, given the run's view."""
-    return "stream" if kind in STREAM_ONLY else view
-
-# Terminal limit banners an app draws and then sits on, each seen on a real
-# screen: Claude "You've hit your limit · resets 7pm (America/Los_Angeles)",
-# tui.py counts them for diagnosis only.
-# Quoted banners and silent work are indistinguishable from a stopped app
-# without a native failure signal.
-APP_LIMIT = re.compile(r"^\W*You(?:['’]ve)? hit your (?:weekly )?limit\b")
-
-
-def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
-    """The harness's interactive app, started with its initial prompt as an
-    argument, so nothing is typed into it. The lane answers by writing
-    ANSWER.md in `work`; the runner publishes it."""
-    raise ValueError(f"unknown kind {lane.kind}")
-
-
 # Flags each adapter relies on, for `xcheck doctor` (help-text drift check).
 # Hidden-but-accepted flags are never used, so every entry must be listed.
 HELP_COMMANDS = {
     "codex app-server": (["codex", "app-server", "--help"], ["--stdio"]),
-    # The SDK, not xcheck, chooses the claude child's flags; admission pins the
-    # binary and probes `auth status` in unavailable(), so only that surface is
-    # a flag contract here.
+    # The SDK, not xcheck, writes the claude child's argv from the session
+    # options; admission also checks these, since the CLI upgrades separately.
+    "claude": (["claude", "--help"], list(CLAUDE_NATIVE_FLAGS)),
     "claude auth status": (["claude", "auth", "status", "--help"], ["--json"]),
     # claude-agent-acp prints no --help; its pin is probed in claude_acp_problem.
     "xcheck-acpx": (["xcheck-acpx", "--help"], ["--agent", "--cwd", "--session-meta", "--mcp-config",
@@ -858,19 +867,65 @@ HELP_COMMANDS = {
 # the final text and any structured error when the stream ends.
 
 
+def _id_key(value) -> str:
+    """JSON-RPC ids compare by JSON value: 1 and "1" are different requests."""
+    return json.dumps(value)
+
+
+def _error_text(error: dict) -> str:
+    detail = error.get("data")
+    return _clip(str((detail.get("message") if isinstance(detail, dict) else detail)
+                     or error.get("message") or error), 300)
+
+
 @dataclass
 class Reader:
+    """One lane's ACP stream (acpx `--format json`): the raw JSON-RPC traffic in
+    both directions, printed without its direction.
+
+    JSON-RPC ids belong to the side that sent the request, so an agent request
+    can reuse the id of acpx's own session/prompt. Correlation therefore never
+    assumes one id space:
+    - only a session/prompt response carries `stopReason` (ACP schema), so that
+      shape alone settles the turn, whichever id it reuses;
+    - every other request id, from either side, is counted until answered;
+    - an error carrying the prompt's id while another request with that id is
+      open is ambiguous: it is held until the other response at that id
+      resolves which side sent it, or until acpx — the client, which does know
+      the direction — exits without a completion.
+    Errors that answer other requests, and acpx's own id-null errors, are kept
+    only as the failure reason if the turn never completes.
+    The answer is the agent text after the last tool call."""
     kind: str
     text: str = ""
     error: str | None = None
-    _buf: list[str] = field(default_factory=list)
     completed: bool = False
     diagnostics: list[dict] = field(default_factory=list)
-    _mcp_calls: dict[str, dict] = field(default_factory=dict)
-    _mcp_seen: set = field(default_factory=set)
-    _prompt_id: object = None  # ACP: the JSON-RPC id of acpx's session/prompt
-    _failure: str | None = None  # ACP: an error that ends the turn unless it completes anyway
-    _client_requests: set = field(default_factory=set)  # ACP request ids are scoped to each direction
+    _buf: list[str] = field(default_factory=list)
+    _mcp_calls: dict[str, dict] = field(default_factory=dict)  # Claude: toolCallId → policy diagnostic
+    _prompt_id: object = None
+    _open: dict[str, int] = field(default_factory=dict)  # unanswered non-prompt requests per id
+    _held: str | None = None  # an ambiguous error at the prompt id
+    _failure: str | None = None  # the reason to report if the turn never completes
+
+    @classmethod
+    def replay(cls, kind: str, stream: Path) -> "Reader":
+        """Rebuild a lane's reader from its saved stream (recovery after a
+        runner died). Completion stays exactly what the live reader requires."""
+        reader = cls(kind)
+        try:
+            lines = stream.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                reader.feed(event)
+        reader.finish()
+        return reader
 
     def notes(self) -> list[str]:
         notes = []
@@ -886,61 +941,96 @@ class Reader:
                              f"{'execution unconfirmed; ' if outcome == 'attempted' else ''}billing unknown")
         return notes
 
-    def feed(self, obj: dict) -> str | None:
-        """Consume one stream object; return a short human line for the view."""
-        return (self._acp if self.kind in STREAM_ONLY else getattr(self, f"_{self.kind}"))(obj)
+    def finish(self) -> None:
+        self.text = "".join(self._buf)
+        head = self.text.strip()
+        # Agy's server reports an MCP server that will not start as the whole
+        # answer of a turn that still ends end_turn.
+        if self.kind == "agy" and re.fullmatch(r"The MCP server '[^'\n]+' failed to initialize[^\n]*", head):
+            self.error = _clip(head.splitlines()[0], 300)
+        elif not self.completed and not self.error and (self._held or self._failure):
+            self.error = self._held or self._failure
 
-    def finish(self, final_file: Path) -> None:
-        if self.kind in STREAM_ONLY:
-            self.text = "".join(self._buf)
-            head = self.text.lstrip()
-            # The server reports an MCP server that will not start as the whole
-            # answer of a turn that still ends end_turn.
-            if self.kind == "agy" and re.fullmatch(r"The MCP server '[^'\n]+' failed to initialize[^\n]*", head.strip()):
-                self.error = _clip(head.splitlines()[0], 300)
-            elif not self.completed and self._failure:
-                self.error = self._failure
+    def feed(self, o: dict) -> str | None:
+        """Consume one stream object; return a short human line for the view."""
+        if "method" in o:
+            if "id" in o:  # a request, from either side
+                if o["method"] == "session/prompt":
+                    self._prompt_id = o["id"]
+                else:
+                    key = _id_key(o["id"])
+                    self._open[key] = self._open.get(key, 0) + 1
+                return None
+            return self._notification(o)
+        if "result" in o or "error" in o:
+            return self._response(o)
         return None
 
-    # -- ACP lanes: acpx `--format json` is the raw ACP JSON-RPC stream in both
-    # directions. Request ids are correlated both ways: only the response to
-    # acpx's own session/prompt request ends the turn, and an RPC error
-    # answering it is terminal. An error carried by acpx itself (id null) is
-    # kept as the failure reason and decides only if no completion follows.
-    # The answer is the text after the last tool call.
-    def _acp(self, o: dict) -> str | None:
-        if self.kind == "claude" and o.get("method") == "_auth/status_update":
+    def _response(self, o: dict) -> str | None:
+        rid, result, error = o.get("id"), o.get("result"), o.get("error")
+        if isinstance(result, dict) and "stopReason" in result:
+            if self._prompt_id is None or rid != self._prompt_id:
+                return None
+            self._held = None  # an error held at this id answered the other request
+            reason = result["stopReason"]
+            if reason == "end_turn":
+                self.completed = True
+            else:
+                self.error = f"{self.kind.title()} ended without completing the review: {reason}"
+            return f"· end {reason}"
+        key = _id_key(rid)
+        is_prompt = self._prompt_id is not None and rid == self._prompt_id
+        if not isinstance(error, dict):
+            if self._open.get(key):
+                self._open[key] -= 1
+                if is_prompt and self._held:
+                    # The other request at this id is answered: the held error was the prompt's.
+                    self.error, self._held = self._held, None
+                    return f"! {self.error}"
+            return None
+        message = _error_text(error)
+        if is_prompt and self._open.get(key):
+            if self._held is None:
+                self._held = message
+                return f"! {message}"
+            # Both responses at this id are errors; one of them ended the prompt.
+            self._open[key] -= 1
+            self.error, self._held = f"{self._held}; {message}", None
+            return f"! {message}"
+        if is_prompt:
+            # The prompt's own failure: no result can legally follow it.
+            self.error = self._failure = message
+            return f"! {message}"
+        if self._open.get(key):
+            self._open[key] -= 1
+        # acpx's own id-null error (agent disconnected, --model refused) or an
+        # error answering another request: the reason, unless the turn completes.
+        self._failure = message
+        return f"! {message}"
+
+    def _notification(self, o: dict) -> str | None:
+        method, params = o.get("method"), o.get("params")
+        params = params if isinstance(params, dict) else {}  # a malformed event is ignored, never fatal
+        if self.kind == "claude" and method == "_auth/status_update":
             # The adapter reports the auth source it actually resolved; keep it
             # in exit.json diagnostics as the subscription evidence.
-            status = (o.get("params") or {}).get("authStatus") or {}
-            label = status.get("label")
+            status = params.get("authStatus")
+            label = status.get("label") if isinstance(status, dict) else None
             if label and all(d.get("label") != label for d in self.diagnostics):
                 self.diagnostics.append(dict(kind="auth", label=label))
             return None
-        # Requests in both directions share one id space, and an agent request
-        # may reuse a client id (a real capture had session/request_permission
-        # reuse the initialize id). Correlate before judging: every request
-        # other than the client's own session/prompt is tracked, and a
-        # response to a tracked request is consumed here — never read as the
-        # prompt's terminal reply.
-        if "method" in o and "id" in o:
-            if o.get("method") == "session/prompt":
-                self._prompt_id = o["id"]
-            else:
-                self._client_requests.add(o["id"])
+        if (self.kind == "grok" and method == "_x.ai/mcp/server_status"
+                and params.get("status") not in (None, "ready", "initialized")):
+            self.diagnostics.append(dict(kind="mcp_startup", server=params.get("name"),
+                                         status=params.get("reason") or params.get("status")))
             return None
-        if o.get("id") in self._client_requests:
-            self._client_requests.discard(o["id"])
-            return None
-        if (self.kind == "grok" and o.get("method") == "_x.ai/mcp/server_status"
-                and (o.get("params") or {}).get("status") not in (None, "ready", "initialized")):
-            p = o["params"]
-            self.diagnostics.append(dict(kind="mcp_startup", server=p.get("name"),
-                                         status=p.get("reason") or p.get("status")))
-        update = (o.get("params") or {}).get("update") or {}
+        update = params.get("update")
+        update = update if isinstance(update, dict) else {}
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
-            self._buf.append((update.get("content") or {}).get("text", ""))
+            content = update.get("content")
+            text = content.get("text") if isinstance(content, dict) else None
+            self._buf.append(text if isinstance(text, str) else "")
             return None
         if kind == "tool_call":
             self._buf.clear()
@@ -948,51 +1038,36 @@ class Reader:
                 self._claude_mcp_policy(update)
             return f"> {_clip(update.get('title') or update.get('kind') or 'tool', 120)}"
         if kind == "tool_call_update" and self.kind == "claude":
-            call = self._mcp_calls.get(update.get("toolCallId"))
+            call = self._mcp_calls.get(update.get("toolCallId")) or self._claude_mcp_policy(update)
             if call and update.get("status") == "completed":
                 call["outcome"] = "succeeded"
             elif call and update.get("status") == "failed":
                 call["outcome"] = "error"
-        result = o.get("result")
-        if (self._prompt_id is not None and isinstance(result, dict)
-                and "stopReason" in result and o.get("id") == self._prompt_id):
-            reason = result["stopReason"]
-            if reason == "end_turn":
-                self.completed = True
-            else:
-                self.error = f"{self.kind.title()} ended without completing the review: {reason}"
-            return f"· end {reason}"
-        error = o.get("error")
-        if isinstance(error, dict) and o.get("id") in (None, self._prompt_id):
-            detail = error.get("data")
-            self._failure = _clip(str((detail.get("message") if isinstance(detail, dict) else detail)
-                                     or error.get("message") or error), 300)
-            # An error answering the client's own session/prompt is terminal:
-            # no result can legally follow it. An id-null error is acpx's own
-            # carry (agent disconnected, --model refused) and is kept as the
-            # failure reason only if no completion follows.
-            if self._prompt_id is not None and o.get("id") == self._prompt_id:
-                self.error = self._failure
-            return f"! {self._failure}"
         return None
 
-    def _claude_mcp_policy(self, update: dict) -> None:
-        """An unapproved MCP tool reaching a claude lane as an ACP tool_call.
-        The adapter puts the SDK's tool name in `name` — the exact
-        `mcp__<server>__<tool>` spelling — so server extraction never matches
-        an MCP name merely quoted in rawInput. strictMcpConfig + disallowedTools
-        stop it inside the CLI; the diagnostic records that it was even
-        attempted, and tool_call_update upgrades it to succeeded/error."""
-        name = update.get("name") or ""
-        parts = name.split("__")
-        if len(parts) >= 3 and parts[0] == "mcp":
-            server = parts[1]
-            if server not in CLAUDE_LOCAL_MCP | CLAUDE_FREE_MCP.keys() and server not in self._mcp_seen:
-                self._mcp_seen.add(server)
-                diagnostic = dict(kind="mcp_policy", tool=name, outcome="attempted", billing="unknown")
-                self.diagnostics.append(diagnostic)
-                if update.get("toolCallId"):
-                    self._mcp_calls[update["toolCallId"]] = diagnostic
+    def _claude_mcp_policy(self, update: dict) -> dict | None:
+        """One diagnostic per unapproved MCP tool call reaching a Claude lane.
+
+        The adapter puts the SDK's tool name in `name`, the exact
+        `mcp__<server>__<tool>` spelling, so a name merely quoted in rawInput
+        or in text is never a call. Each toolCallId is one call: repeated
+        notifications for it update that diagnostic, while a later call to the
+        same server gets its own. A notification without an id is counted on
+        its own. strictMcpConfig and disallowedTools stop such calls inside the
+        CLI; the diagnostic records that one was attempted, and its updates
+        record whether it succeeded."""
+        call = update.get("toolCallId")
+        if call and call in self._mcp_calls:
+            return self._mcp_calls[call]
+        parts = (update.get("name") or "").split("__")
+        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in CLAUDE_LOCAL_MCP | CLAUDE_FREE_MCP.keys():
+            return None
+        diagnostic = dict(kind="mcp_policy", tool=update["name"], outcome="attempted", billing="unknown")
+        self.diagnostics.append(diagnostic)
+        if call:
+            self._mcp_calls[call] = diagnostic
+        return diagnostic
+
 
 def _clip(s: str, n: int = 160) -> str:
     s = re.sub(r"\s+", " ", s or "").strip()

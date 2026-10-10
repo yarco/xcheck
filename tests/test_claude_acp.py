@@ -25,7 +25,7 @@ def read(lines) -> adapters.Reader:
     reader = adapters.Reader('claude')
     for obj in lines:
         reader.feed(obj)
-    reader.finish(Path('/nonexistent'))
+    reader.finish()
     return reader
 
 
@@ -79,7 +79,7 @@ class Meta(unittest.TestCase):
         tmp = tmp or tempfile.mkdtemp()
         work = Path(tmp) / 'work'
         work.mkdir(exist_ok=True)
-        return adapters.launch(PEER, work, Path(tmp) / 'message', Path(tmp) / 'final',
+        return adapters.launch(PEER, work, Path(tmp) / 'message',
                                Path(tmp) / 'harness.log', web)
 
     def options(self, spec):
@@ -152,7 +152,8 @@ class Meta(unittest.TestCase):
 
 
 class Pins(unittest.TestCase):
-    def problem(self, versions=('0.19.4-xcheck.1', '0.89.0'), auth=None, code=0):
+    def problem(self, versions=('0.19.4-xcheck.1', '0.89.0'), auth=None, code=0,
+                flags=adapters.CLAUDE_NATIVE_FLAGS):
         auth = auth if auth is not None else {'loggedIn': True, 'authMethod': 'claude.ai',
                                               'apiProvider': 'firstParty'}
         outputs = {'xcheck-acpx': versions[0], 'claude-agent-acp': versions[1],
@@ -160,7 +161,8 @@ class Pins(unittest.TestCase):
 
         def fake_run(argv, **kw):
             name = Path(argv[0]).name
-            return subprocess.CompletedProcess(argv, code, outputs.get(name, ''), '')
+            out = ' '.join(flags) if argv[1:] == ['--help'] else outputs.get(name, '')
+            return subprocess.CompletedProcess(argv, code, out, '')
         with patch.object(adapters.shutil, 'which', side_effect=lambda n: f'/fixture/{n}'), \
                 patch.object(adapters.subprocess, 'run', side_effect=fake_run):
             return adapters.claude_acp_problem()
@@ -179,6 +181,13 @@ class Pins(unittest.TestCase):
 
     def test_probe_failures_fail_closed(self):
         self.assertIn('startup-unavailable', self.problem(code=1))
+
+    def test_a_cli_that_dropped_a_native_limit_flag_fails_closed(self):
+        for dropped in adapters.CLAUDE_NATIVE_FLAGS:
+            with self.subTest(dropped=dropped):
+                problem = self.problem(flags=[f for f in adapters.CLAUDE_NATIVE_FLAGS if f != dropped])
+                self.assertIn('startup-unavailable', problem)
+                self.assertIn(dropped, problem)
 
     def test_auth_probe_requires_the_subscription_source(self):
         for auth in ({'loggedIn': False},

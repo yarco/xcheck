@@ -1,5 +1,9 @@
-# Test-only dependency (tests/test_laws.py). bin/ and xcheck/ are stdlib-only.
-# Imported unguarded, so a checkout without it fails by name. Supplied by the
+# Test-only dependencies. bin/ and xcheck/ are stdlib-only. Supplied by the
 # runner command, never installed globally or into a venv:
-#     uv run --with 'hypothesis>=6.100' python3 -m unittest discover -s tests
+#     uv run --with-requirements requirements-test.txt pytest
+# Hypothesis (tests/test_laws.py) is imported unguarded, so a checkout without
+# it fails by name. pytest-xdist runs the unittest suite across all cores; every
+# test already owns its XCHECK_ROOT, pools and fakes, so no test is shared.
 hypothesis>=6.100
+pytest>=8
+pytest-xdist>=3.6

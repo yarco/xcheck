@@ -21,8 +21,9 @@
     "claudeCli": "operator PATH /Users/yarco/.local/bin/claude"
   },
   "validation": {
-    "acpxTestsPassed": 93,
-    "acpxGate": "pnpm run check: format + typecheck + lint + build + coverage, fail 0",
+    "acpxFullCheck": "pnpm run check (format + typecheck + lint + build + coverage): 3043 tests passed, 19 skipped, 0 failed",
+    "acpxCoverageSubset": "211 passed",
+    "acpxSelectedFeatureTests": "93 passed (session-meta and argv-scan tests only; not the full suite)",
     "liveProbes": "zero-turn session/new, one-turn exec: restricted read confinement, allowedTools pre-approval under --deny-all, title suppression differential, mode=default pin, --mcp-config forwarding past --session-meta"
   }
 }

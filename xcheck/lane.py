@@ -21,18 +21,10 @@ from contextlib import ExitStack
 
 import shutil
 
-from . import activity, adapters, capacity, pools, tui, validate
-from .files import ROOT, Run, atomic_write, defer_stop, end_group, fresh_answer, hold_life, now, signal_group, workspace
+from . import activity, adapters, capacity, pools, validate
+from .files import ROOT, Run, atomic_write, defer_stop, end_group, hold_life, now, signal_group, workspace
 
-TUI_IDLE = 0  # terminal silence does not establish model or tool inactivity
-STREAM_IDLE = 0
 LINGER = 3  # seconds a finished Herdr pane stays visible
-
-
-def idle_for(configured: int, view: str) -> int:
-    """Only an explicitly configured silence limit can stop quiet work."""
-    return configured or (TUI_IDLE if view == "tui" else STREAM_IDLE)
-
 TAIL_LINES = 40
 
 # The orchestrator's own session identity must not reach a peer: a child
@@ -44,7 +36,12 @@ TAIL_LINES = 40
 # exist and every herdr call inside a lane finds no server.
 # Provider API keys are removed unless the selected OpenCode provider needs
 # its own configured authentication.
-SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
+# Every CLAUDE* name goes: besides the orchestrator's identity (CLAUDECODE,
+# CLAUDE_CODE_*, CLAUDE_PID, CLAUDE_EFFORT, CLAUDE_PLUGIN_*), the pinned
+# claude-agent-acp reads CLAUDE_CONFIG_DIR (another settings/auth home),
+# CLAUDE_MODEL_CONFIG (model routing) and CLAUDE_AGENT_* (adapter switches).
+# A lane's own CLAUDE_CODE_EXECUTABLE is set after the scrub.
+SCRUB_PREFIXES = ("HERDR_", "CLAUDE", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE",  # an opencode orchestrator's session; any config override breaks the free tier
                   "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_",  # adapter and client overrides must not reach a peer
                   # Provider routing overrides: an ANTHROPIC_AUTH_TOKEN or
@@ -53,11 +50,12 @@ SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_"
                   # (proven: `claude auth status` flips to oauth_token/bedrock).
                   # ANTHROPIC_API_KEY is already caught by the *_API_KEY suffix
                   # rule; CLAUDE_CODE_* covers the USE_BEDROCK/VERTEX switches.
-                  "ANTHROPIC_", "AGENT_PROXY_", "CCR_", "CLAUDE_GATEWAY_")
+                  "ANTHROPIC_", "AGENT_PROXY_", "CCR_")
 SCRUB_KIND = {"grok": ("GROK_",)}
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
-SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
-               "OLDPWD", "CODEX_PATH", "CODEX_CONFIG", "INITIAL_AGENT_MODE",
+SCRUB_NAMES = {"OLDPWD",
+               # Claude effort and permission overrides read outside the CLAUDE prefix.
+               "MAX_THINKING_TOKENS", "IS_SANDBOX", "CODEX_PATH", "CODEX_CONFIG", "INITIAL_AGENT_MODE",
                "DEFAULT_AUTH_REQUEST", "MODEL_PROVIDER", "APP_SERVER_LOGS", "NO_BROWSER",
                "CODEX_SESSION_ID", "CODEX_THREAD_ID",
                # Vertex/Bedrock region selectors without an ANTHROPIC_/CLAUDE_CODE_
@@ -180,16 +178,18 @@ def run_lane(base: Path, name: str) -> int:
         (d / "runner-error.log").write_text(traceback.format_exc())
         if not (d / "exit.json").exists():
             status, reason, text = "failed", f"lane runner error: {e!r} (runner-error.log)", ""
-            salvaged = fresh_answer(d, workspace(name))
-            if salvaged:  # never lose a finished answer to a runner bug
-                text = salvaged
+            # Never lose a natively completed answer to a runner bug; never
+            # promote one that did not complete.
+            saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl")
+            if saved.completed and not saved.error and saved.text.strip():
+                text = saved.text
                 status, problems = validate.check(text, run.contract)
-                reason = "; ".join(problems) or validate.COMPLETE
-                reason += f"; salvaged after lane runner error {e!r}"
+                reason = "; ".join([*problems] or [validate.COMPLETE]) + f"; recovered after lane runner error {e!r}"
                 atomic_write(run.base / f"RESULT-{name}.md", text)
             atomic_write(d / "exit.json", json.dumps({
-                "lane": name, "status": status, "reason": reason, "exit_code": None, "error": None,
-                "ended": now(), "stderr_tail": [], "result_bytes": len(text.encode())}, indent=2))
+                "lane": name, "status": status, "reason": "; ".join([reason, *saved.notes()]),
+                "exit_code": None, "error": saved.error, "ended": now(), "stderr_tail": [],
+                "result_bytes": len(text.encode()), "diagnostics": saved.diagnostics}, indent=2))
         code = 1
     finally:
         _alive.close()
@@ -207,10 +207,9 @@ def _run_lane(base: Path, name: str) -> int:
     lane = run.lane(name)
     d = run.lane_dir(name)
     work, message = workspace(name), d / "message.txt"
-    final, stream_path, err_path = d / "final.md", d / "stream.jsonl", d / "stderr.log"
+    stream_path, err_path = d / "stream.jsonl", d / "stderr.log"
     log = d / "harness.log"  # the harness's own debug log: where root causes are found
-    view = adapters.view_for(lane.kind, run.view)
-    idle = idle_for(run.idle, view)
+    idle = run.idle  # 0: no silence limit; quiet work is not inactivity
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM):
         signal.signal(sig, _raise_stop)
     signal.alarm(bound(run.cap))
@@ -253,11 +252,8 @@ def _run_lane(base: Path, name: str) -> int:
             if not reading.ok:
                 return _finish(run, name, started, "skipped", note, None, reader, err_path)
         atomic_write(d / "phase.json", json.dumps(dict(phase="starting")))
-        if view == "tui":
-            return _run_tui(run, name, lane, d, work, message, log, started, reader, held, idle)
-
         try:
-            spec = adapters.launch(lane, work, message, final, log, run.web)
+            spec = adapters.launch(lane, work, message, log, run.web)
         except adapters.Unavailable as e:
             return _finish(run, name, started, "skipped", str(e), None, reader, err_path)
         env = lane_env(spec, work)
@@ -330,7 +326,7 @@ def _run_lane(base: Path, name: str) -> int:
                         code = proc.wait()
                         _reap_group(proc.pid)
                         proc.stdout.close()
-        reader.finish(final)
+        reader.finish()
         if status is None:
             if reader.error:
                 status, reason = "failed", reader.error
@@ -366,35 +362,6 @@ def _stage(run: Run, work: Path) -> None:
         shutil.copy2(run.base / ".packet" / f, work / f)
     if (run.base / ".packet" / "evidence").is_dir():
         shutil.copytree(run.base / ".packet" / "evidence", work / "evidence")
-
-
-def _run_tui(run: Run, name: str, lane, d: Path, work: Path, message: Path, log: Path,
-             started: float, reader: adapters.Reader, held, idle: int) -> int:
-    """The harness's own interactive app, in a pty this runner owns (Herdr wall)."""
-    spec = adapters.tui(lane, work, message.read_text(encoding="utf-8").strip(), log, run.web)
-    os.set_inheritable(held.fileno(), True)  # the app holds the pool while it can spend
-    answer, screen = work / "ANSWER.md", d / "screen.log"
-
-    def spawned(pid: int) -> None:
-        atomic_write(d / "phase.json", json.dumps(dict(phase="running")))
-        atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": pid}))
-
-    try:
-        status, reason, code, text = tui.run(spec.argv, lane_env(spec, work), work, answer, screen,
-                                             idle, run.cap, spawned)
-    except _Stop as stop:
-        status, reason = _stop_status(stop, run.cap, run.lane_dir(name))
-        code = None
-        text = answer.read_text(encoding="utf-8", errors="replace") if answer.exists() else ""
-    reader.text = text
-    tail = tui.screen_tail(screen)
-    if text.strip() and status is None:
-        status, problems = validate.check(text, run.contract)
-        reason = "; ".join(problems) or validate.COMPLETE
-    elif status is None:
-        status = "failed"
-        reason = "the app ended without writing ANSWER.md; last screen: " + " / ".join(tail[-4:])
-    return _finish(run, name, started, status, reason, code, reader, screen, tail=tail)
 
 
 def hold(pool: str, run_id: str, log: Path | None, argv: list[str]) -> int:
@@ -473,15 +440,13 @@ def _kill(proc: subprocess.Popen) -> None:
             continue
 
 
-def _finish(run: Run, name: str, started: float, status: str, reason: str, code, reader, err_path,
-            tail: list[str] | None = None) -> int:
+def _finish(run: Run, name: str, started: float, status: str, reason: str, code, reader, err_path) -> int:
     reason = "; ".join([reason, *reader.notes()])
     text = reader.text
     if text.strip():
         atomic_write(run.base / f"RESULT-{name}.md", text if text.endswith("\n") else text + "\n")
-    if tail is None:
-        tail = err_path.read_text(encoding="utf-8", errors="replace").splitlines()[-TAIL_LINES:] \
-            if err_path.exists() else []
+    tail = err_path.read_text(encoding="utf-8", errors="replace").splitlines()[-TAIL_LINES:] \
+        if err_path.exists() else []
     record = {
         "lane": name, "status": status, "reason": reason, "exit_code": code,
         "error": reader.error, "started": now(started), "ended": now(),

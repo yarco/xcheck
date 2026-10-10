@@ -19,18 +19,12 @@ import time
 from pathlib import Path
 
 from . import adapters, herdr, validate
-from .files import ROOT, Run, atomic_write, end_group, fresh_answer, hold_life, is_alive, now, workspace
+from .files import ROOT, Run, atomic_write, end_group, hold_life, is_alive, now, workspace
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 STILL_RUNNING = 3
+POLL = 0.2  # seconds between local file/lock checks; no model is involved
 
-DELIVER = {
-    "stream": "Do not create, modify, or delete any file. Print your complete answer as "
-              "your final message; the harness saves it.",
-    "tui": "Create, modify, or delete no file except these two: write your complete answer to "
-           "./ANSWER.md in a single write, ending with its final line. After all review "
-           "work and the answer write finish, write ./ANSWER.ready containing exactly "
-           "ANSWER_READY on its own line. This commits your answer; do not edit it afterwards.",
-}
+DELIVER = "Print your complete answer as your final message; the harness saves it."
 
 MESSAGE = (
     "You are one reviewer in a multi-model review that the owner of these files "
@@ -60,8 +54,7 @@ class RunError(Exception):
 
 
 def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: bool,
-          idle: int | None, cap: int | None, force_lanes: set[str], skip_capacity: bool,
-          view: str = "auto") -> int:
+          idle: int | None, cap: int | None, force_lanes: set[str], skip_capacity: bool) -> int:
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
         raise RunError(f"BASE must live under {ROOT} (got {base}); stage it as {ROOT}/<slug>")
@@ -87,13 +80,11 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         # inherit it. Herdr panes are spawned by the Herdr server, outside it.
         raise RunError("a Grok orchestrator must use Herdr mode (headless lanes would run in its sandbox)")
     mode = "herdr" if ctx else "headless"
-    view = ("tui" if mode == "herdr" else "stream") if view == "auto" else view
     try:
         (base / ".launched").mkdir()
     except FileExistsError:
         raise RunError(f"{base} was already launched; use `xcheck wait` or a fresh BASE")
-    # Zero means each runner chooses its own view's default.
-    idle = idle or 0
+    idle = idle or 0  # zero: no silence limit
 
     try:
         snapshot = base / ".packet"
@@ -110,14 +101,13 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         raise
     run = Run(base=base, lanes={l.name: l for l in lanes}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
-              herdr=ctx or {}, view=view, capacity=not skip_capacity, forced=sorted(force_lanes),
+              herdr=ctx or {}, capacity=not skip_capacity, forced=sorted(force_lanes),
               epoch=time.time())
     try:
         for name in run.lanes:
             d = run.lane_dir(name)
             d.mkdir(parents=True)
-            lane_view = adapters.view_for(run.lanes[name].kind, view)
-            (d / "message.txt").write_text(_message(lane_view, web, run.lanes[name].kind), encoding="utf-8")
+            (d / "message.txt").write_text(_message(web, run.lanes[name].kind), encoding="utf-8")
         run.save()
     except BaseException:
         shutil.rmtree(base / "lanes", ignore_errors=True)
@@ -126,7 +116,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         raise
     atomic_write(base / "supervisor.pid", str(os.getpid()))  # for operators; liveness is the lock
     _alive = hold_life(base / "supervisor.alive")
-    print(f"xcheck: {len(run.lanes)} lanes ({mode}, {view}) → {', '.join(run.lanes)}", flush=True)
+    print(f"xcheck: {len(run.lanes)} lanes ({mode}) → {', '.join(run.lanes)}", flush=True)
 
     children: dict[str, subprocess.Popen] = {}
     if mode == "headless":
@@ -160,15 +150,12 @@ def settle_placement_failure(run, exc: herdr.HerdrError) -> None:
                     f"Herdr placement failed before this lane started: {exc}")
 
 
-def _message(view: str, web: bool, kind: str) -> str:
+def _message(web: bool, kind: str) -> str:
     shell = kind in ("grok", "opencode", "devin")
     scope = SHELL_SCOPE if shell else (
         "use only tools that read (files, commands that change nothing"
         + (", web search" if web else "") + ").")
-    deliver = DELIVER[view] if not shell else (
-        "Print your complete answer as your final message; the harness saves it."
-        if view == "stream" else
-        "Write your complete answer to ./ANSWER.md. After all review work and the answer write finish, write ./ANSWER.ready containing exactly ANSWER_READY on its own line. This commits your answer; do not edit it afterwards.")
+    deliver = DELIVER if shell else "Do not create, modify, or delete any file. " + DELIVER
     return MESSAGE.format(deliver=deliver, tool_scope=scope, web=(
         " Search the web when it can settle a fact your answer depends on, and cite"
         " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
@@ -196,7 +183,7 @@ def detach(argv: list[str], base: Path) -> int:
                   f"Retain one completion operation: xcheck wait --base {base}\n"
                   "If this host has no completion callback, disclose pending collection; do not schedule master polling.")
             return 0
-        time.sleep(0.2)
+        time.sleep(POLL)
     print(f"xcheck: supervisor pid {p.pid} started; see {log}")
     return 0
 
@@ -232,7 +219,7 @@ def wait(base: Path, timeout: int | None) -> int:
                 return _wait(run, {}, until)
         if until and time.time() >= until:
             return _still_running(run)
-        time.sleep(2)
+        time.sleep(POLL)
 
 
 def _still_running(run: Run) -> int:
@@ -267,7 +254,7 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
                 pending.discard(name)
             # Unknown startup remains pending; elapsed time cannot prove a failed launch.
         if pending:
-            time.sleep(1)
+            time.sleep(POLL)
     status = render_status(run)
     if interrupted:
         print(status + f"xcheck: supervisor interrupted ({interrupted[0]}); "
@@ -318,27 +305,17 @@ def _settle_dead_runner(run: Run, name: str) -> None:
     elif harness:
         note += "; harness identity unverified (exited or process table unreadable)"
     result = run.base / f"RESULT-{name}.md"
-    diagnostics = []
-    salvaged = fresh_answer(d, workspace(name))
-    if not salvaged and (d / "stream.jsonl").is_file():
-        reader = adapters.Reader(run.lane(name).kind)
-        for line in (d / "stream.jsonl").read_text(errors="replace").splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(event, dict):
-                reader.feed(event)
-        reader.finish(d / "final.md")
-        diagnostics = reader.diagnostics
-        if reader.notes():
-            note += "; " + "; ".join(reader.notes())
-        if reader.completed and not reader.error:
-            salvaged = reader.text
+    # Only a natively completed turn in the saved stream is an answer; a
+    # complete-looking RESULT file or draft is not.
+    reader = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl")
+    diagnostics = reader.diagnostics
+    if reader.notes():
+        note += "; " + "; ".join(reader.notes())
+    salvaged = reader.text if reader.completed and not reader.error and reader.text.strip() else None
     if salvaged:
         atomic_write(result, salvaged)
         status, problems = validate.check(salvaged, run.contract)
-        _write_exit(run, name, status, f"{note}; committed answer: {'; '.join(problems) or 'valid'}", diagnostics)
+        _write_exit(run, name, status, f"{note}; natively completed answer: {'; '.join(problems) or 'valid'}", diagnostics)
     else:
         if result.exists():
             note += "; retained output is diagnostic; native completion unverified"
@@ -405,7 +382,7 @@ def render_status(run: Run) -> str:
         {"base": str(run.base), "mode": run.mode, "orch": run.orch, "started": run.started,
          "contract": vars(run.contract), "lanes": rows}, indent=2))
     lines = [f"# xcheck status — {run.base}", "",
-             f"- mode `{run.mode}` · view `{run.view}` · orchestrator `{run.orch}` · started {run.started}", "",
+             f"- mode `{run.mode}` · orchestrator `{run.orch}` · started {run.started}", "",
              "| lane | status | seconds | note |", "|---|---|---|---|"]
     for r in rows:
         note = (r.get("reason") or "").replace("|", "\\|").replace("\n", " ")

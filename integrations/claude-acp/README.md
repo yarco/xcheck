@@ -82,6 +82,37 @@ xcheck doctor
 `--ignore-scripts` is required: the operator's npm blocks install scripts and
 acpx's `prepare: husky` is dev-only; the package ships a prebuilt `dist/`.
 
+## Policy boundaries
+
+- `settingSources:[]` excludes user, project and local settings. It does not
+  exclude managed policy, which still applies with its normal precedence,
+  and it does not stop the CLI reading its global `~/.claude.json` state.
+- `tools` sets the built-in catalog, `strictMcpConfig` + `--mcp-config` set
+  the MCP registrations, `allowedTools` only pre-approves, and acpx
+  `--deny-all` refuses any remaining permission request. Keep all four.
+- MCP registrations come from the operator's `~/.claude.json`, validated
+  before forwarding (`adapters._local_mcp_ok`): a local reader (`semble`,
+  `fff`, `qmd`, `pond`) must be a stdio command whose env holds only cache
+  locations (`UV_CACHE_DIR`, `UV_TOOL_DIR`, `NPM_CONFIG_CACHE`), or a
+  loopback HTTP URL with no headers; the two web endpoints must be exactly
+  `{type, url}` with the pinned URL. Anything else drops that server. A
+  trusted name is a decision about the command, not proof it is keyless.
+- The lane environment drops every `CLAUDE*` name (the pinned adapter reads
+  `CLAUDE_CONFIG_DIR`, `CLAUDE_MODEL_CONFIG` and `CLAUDE_AGENT_*`),
+  `MAX_THINKING_TOKENS`, `IS_SANDBOX` and every `ANTHROPIC_*`, then sets its
+  own `CLAUDE_CODE_EXECUTABLE`. Admission probes `claude auth status` in that
+  same environment and requires a first-party claude.ai login.
+- The SDK turns these options into flags on the operator's `claude`, which
+  upgrades separately; admission and `doctor` require `claude --help` to
+  list `--restricted`, `--strict-mcp-config`, `--mcp-config`, `--tools`,
+  `--allowedTools` and `--disallowedTools`.
+- Visibility gap: the stock adapter does not forward the CLI's MCP startup
+  statuses (failed / needs-auth), so a Claude lane cannot report them.
+  The unapproved-call audit (`Reader._claude_mcp_policy`) works per
+  `toolCallId` on the adapter's exact tool `name`. Its test fixtures are
+  derived from a real native call and the pinned renderer, not a live ACP
+  capture of a forbidden success.
+
 ## Custody chain
 
 acpx gives the agent command only stdio, so each hop rejoins the run's pool:
