@@ -5,6 +5,7 @@ metadata supplies client support and Zen capabilities/release dates only.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
 import urllib.request
@@ -151,8 +152,15 @@ def fetch(url: str, *, as_json: bool = True):
 
 
 def client_metadata(*, refresh: bool = True, env: dict | None = None, cwd: Path | None = None) -> dict:
-    listing = subprocess.run(["opencode", "models", "--verbose", *(["--refresh"] if refresh else [])],
-                             env=env, cwd=cwd, capture_output=True, text=True, timeout=60, check=True)
+    # Lanes of one run list at the same moment; a listing that overlaps
+    # OpenCode refreshing its models cache once came back truncated. One
+    # listing at a time per xcheck root.
+    from .files import ROOT
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with open(ROOT / ".opencode-models.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        listing = subprocess.run(["opencode", "models", "--verbose", *(["--refresh"] if refresh else [])],
+                                 env=env, cwd=cwd, capture_output=True, text=True, timeout=60, check=True)
     decoder = json.JSONDecoder()
     remaining = listing.stdout.strip()
     result = {}
