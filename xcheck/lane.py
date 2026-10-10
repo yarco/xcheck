@@ -22,6 +22,7 @@ from contextlib import ExitStack
 import shutil
 
 from . import activity, adapters, capacity, pools, validate
+from .view import Pane, header as pane_header
 from .files import ROOT, Run, atomic_write, defer_stop, end_group, hold_life, now, signal_group, workspace
 
 LINGER = 3  # seconds a finished Herdr pane stays visible
@@ -271,6 +272,7 @@ def _run_lane(base: Path, name: str) -> int:
             err = stack.enter_context(open(err_path, "ab"))
             sel = stack.enter_context(selectors.DefaultSelector())
             proc = None
+            pane = None
             try:
                 with defer_stop() as previous:
                     proc = subprocess.Popen(
@@ -279,7 +281,8 @@ def _run_lane(base: Path, name: str) -> int:
                         preexec_fn=partial(signal.pthread_sigmask, signal.SIG_SETMASK, previous))
                 atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": proc.pid}))
                 atomic_write(d / "phase.json", json.dumps(dict(phase="running")))
-                print(f"xcheck lane {name}: {' '.join(spec.argv[:3])} … (pid {proc.pid})", flush=True)
+                pane = Pane(tty=sys.stdout.isatty())
+                print(pane_header(name, lane.model, lane.effort, proc.pid, now(started)), flush=True)
                 sel.register(proc.stdout, selectors.EVENT_READ)
                 last = spend_from = time.monotonic()
                 pending = b""
@@ -291,7 +294,7 @@ def _run_lane(base: Path, name: str) -> int:
                         chunk = os.read(key.fd, 65536)
                         if not chunk:
                             if pending:
-                                _consume(reader, pending, progress)
+                                _consume(reader, pending, progress, pane)
                                 pending = b""
                             sel.unregister(key.fileobj)
                             break
@@ -301,7 +304,7 @@ def _run_lane(base: Path, name: str) -> int:
                         pending += chunk
                         *lines, pending = pending.split(b"\n")
                         for raw in lines:
-                            _consume(reader, raw, progress)
+                            _consume(reader, raw, progress, pane)
                     # An explicit limit is checked before a completion or failure
                     # read in the same pass: work finished after the cap is not done.
                     t = time.monotonic()
@@ -321,10 +324,13 @@ def _run_lane(base: Path, name: str) -> int:
                     if proc.poll() is not None and (not sel.get_map() or time.monotonic() - last > DRAIN):
                         break
                 if pending:
-                    _consume(reader, pending, progress)
+                    _consume(reader, pending, progress, pane)
             except _Stop as stop:
                 status, reason = _stop_status(stop, run.cap, d)
             finally:
+                if pane is not None:
+                    for line in pane.flush():
+                        print(line, flush=True)
                 if proc is not None:
                     with defer_stop():
                         _kill(proc)
@@ -343,7 +349,7 @@ def _run_lane(base: Path, name: str) -> int:
             else:
                 status = "failed"
                 reason = _first_stderr_line(err_path) or f"no answer (exit {code})"
-        return _finish(run, name, started, status, reason, code, reader, err_path)
+        return _finish(run, name, started, status, reason, code, reader, err_path, pane)
     finally:
         held.release()
 
@@ -389,7 +395,7 @@ def hold(pool: str, run_id: str, log: Path | None, argv: list[str]) -> int:
     os.execv(argv[0], argv)
 
 
-def _consume(reader: adapters.Reader, raw: bytes, progress=None) -> None:
+def _consume(reader: adapters.Reader, raw: bytes, progress=None, pane: Pane | None = None) -> None:
     line = raw.decode("utf-8", errors="replace").strip()
     if not line:
         return
@@ -406,9 +412,10 @@ def _consume(reader: adapters.Reader, raw: bytes, progress=None) -> None:
                 progress.observe(obj)
             except Exception:
                 pass
-        view = reader.feed(obj)
-        if view:
-            print(view, flush=True)
+        reader.feed(obj)  # state only; the pane is a separate display of this event
+        if pane is not None:
+            for shown in pane.feed(obj):
+                print(shown, flush=True)
 
 
 def _first_stderr_line(path: Path) -> str:
@@ -437,7 +444,8 @@ def _kill(proc: subprocess.Popen) -> None:
             continue
 
 
-def _finish(run: Run, name: str, started: float, status: str, reason: str, code, reader, err_path) -> int:
+def _finish(run: Run, name: str, started: float, status: str, reason: str, code, reader, err_path,
+            pane: Pane | None = None) -> int:
     reason = "; ".join([reason, *reader.notes()])
     text = reader.text
     if text.strip():
@@ -452,6 +460,9 @@ def _finish(run: Run, name: str, started: float, status: str, reason: str, code,
     }
     atomic_write(run.lane_dir(name) / "exit.json", json.dumps(record, indent=2))
     print(f"xcheck lane {name}: {status} — {reason}", flush=True)
+    if pane is not None:
+        for line in pane.answer(name, text):
+            print(line, flush=True)
     return 0
 
 
