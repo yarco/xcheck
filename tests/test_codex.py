@@ -46,22 +46,89 @@ class Reader(unittest.TestCase):
         self.assertEqual(r.error, "Reconnecting... 1/5")
 
 
+def server(name, kind="stdio", **transport):
+    return {"name": name, "enabled": True, "transport": {"type": kind, **transport}}
+
+
+SERVERS = [server("semble", command="uvx", env={"UV_CACHE_DIR": "/c"}),
+           server("qmd", "streamable_http", url="http://127.0.0.1:8181/mcp"),
+           server("keenable-free", "streamable_http", url="https://api.keenable.ai/mcp"),
+           server("perplexity", command="pwm-mcp"),
+           server("keenable", "streamable_http", url="https://api.keenable.ai/mcp", http_headers={"X-API-Key": "k"})]
+
+
 class Controls(unittest.TestCase):
+    def launch(self, web=True, servers=SERVERS):
+        def listing(features, overrides, env, work):
+            off = {o.split(".")[1] for o in overrides if o.startswith("mcp_servers.")}
+            return [s for s in servers if s["name"] not in off]
+        with patch.object(adapters, "_codex_mcp_enabled", side_effect=listing):
+            return adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), web)
+
     def test_native_read_only_ephemeral_exec_with_explicit_model_effort_and_web(self):
         for web, value in ((False, 'web_search="disabled"'), (True, 'web_search="live"')):
-            spec = adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), web)
+            spec = self.launch(web)
             argv = spec.argv
-            self.assertEqual(argv[1:3], ["exec", "--skip-git-repo-check"])
+            exec_at = argv.index("exec")
+            self.assertEqual(argv[exec_at + 1], "--skip-git-repo-check")
             self.assertIn("--ephemeral", argv)
-            self.assertEqual(argv[argv.index("-s") + 1], "read-only")
-            self.assertEqual(argv[argv.index("-C") + 1], "/w")
-            self.assertEqual(argv[argv.index("-m") + 1], "gpt-6.1-sol")
+            self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+            self.assertEqual(argv[argv.index("--cd") + 1], "/w")
+            self.assertEqual(argv[argv.index("--model") + 1], "gpt-6.1-sol")
             self.assertIn('model_reasoning_effort="high"', argv)
             self.assertIn(value, argv)
             self.assertIn("check_for_update_on_startup=false", argv)
             self.assertNotIn("--search", argv)
             self.assertEqual(argv[-2:], ["--json", "-"])
             self.assertEqual(spec.stdin, Path("/m"))
+            # every dash flag the launch emits is one doctor pins (no short aliases)
+            pinned = {*adapters.HELP_COMMANDS["codex exec"][1], "--disable"}
+            self.assertTrue({a for a in argv if a.startswith("-") and a != "-"} <= pinned)
+
+    def test_review_features_are_off_before_the_subcommand(self):
+        argv = self.launch().argv
+        features = [argv[i + 1] for i, a in enumerate(argv[:argv.index("exec")]) if a == "--disable"]
+        self.assertEqual(features, list(adapters.CODEX_DISABLED_FEATURES))
+
+    def test_only_approved_keyless_mcp_servers_stay_enabled(self):
+        for web, kept in ((True, {"semble", "qmd", "keenable-free"}), (False, {"semble", "qmd"})):
+            with self.subTest(web=web):
+                argv = self.launch(web).argv
+                off = {argv[i + 1].split(".")[1] for i, a in enumerate(argv) if a == "--config"
+                       and argv[i + 1].startswith("mcp_servers.")}
+                self.assertEqual({s["name"] for s in SERVERS} - off, kept)
+        for bad in (server("semble", command="uvx", env={"EXA_API_KEY": "k"}),
+                    server("semble", command="uvx", env_vars=["EXA_API_KEY"]),
+                    server("qmd", "streamable_http", url="https://qmd.example/mcp"),
+                    server("qmd", "streamable_http", url="http://127.0.0.1:8181/mcp", bearer_token_env_var="T"),
+                    server("you-free", "streamable_http", url="https://api.you.com/mcp?profile=paid")):
+            with self.subTest(bad=bad):
+                self.assertFalse(adapters._codex_review_mcp(bad, True))
+
+    def test_an_unprovable_mcp_selection_skips_before_spending(self):
+        with patch.object(adapters, "_codex_mcp_enabled", return_value=SERVERS):  # overrides ignored
+            with self.assertRaisesRegex(adapters.Unavailable, "still enables unapproved"):
+                adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
+        with patch.object(adapters, "_codex_mcp_enabled", side_effect=ValueError("exit 1")):
+            with self.assertRaisesRegex(adapters.Unavailable, "could not be proved"):
+                adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
+        odd = [server("bad name", command="x")]
+        with patch.object(adapters, "_codex_mcp_enabled", return_value=odd):
+            with self.assertRaisesRegex(adapters.Unavailable, "cannot disable"):
+                adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
+
+    def test_an_unapproved_mcp_call_that_slips_through_is_audited(self):
+        r = adapters.Reader("codex")
+        for event in ({"type": "item.started", "item": {"id": "c1", "type": "mcp_tool_call", "server": "perplexity",
+                                                        "tool": "search"}},
+                      {"type": "item.completed", "item": {"id": "c1", "type": "mcp_tool_call", "server": "perplexity",
+                                                          "tool": "search", "status": "completed"}},
+                      {"type": "item.completed", "item": {"id": "c2", "type": "mcp_tool_call", "server": "qmd",
+                                                          "tool": "query", "status": "completed"}}):
+            r.feed(event)
+        self.assertEqual([(d["tool"], d["outcome"]) for d in r.diagnostics],
+                         [("mcp__perplexity__search", "succeeded")])
+        self.assertIn("POLICY VIOLATION", "; ".join(r.notes()))
 
     def test_a_missing_cli_skips_before_admission(self):
         with patch.object(adapters.shutil, "which", return_value=None):
@@ -72,9 +139,20 @@ class Lanes(unittest.TestCase):
     setUp = support.EndToEnd.setUp
     xcheck = support.EndToEnd.xcheck
 
+    def test_an_unprovable_mcp_selection_skips_the_lane_without_a_spender(self):
+        for state in ("broken", "stuck"):
+            with self.subTest(state=state):
+                if (self.base / ".launched").exists():
+                    self.base = support.EndToEnd.second_base(self)
+                out = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "codex:gpt-6.1-sol:high",
+                                  "--mode", "headless", "--skip-capacity", env_extra={"FAKE_CODEX_MCP": state})
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
+                self.assertEqual(row["status"], "skipped", row)
+                self.assertIn("MCP", row["reason"])
+                self.assertFalse((self.base / "lanes" / PEER.name / "stream.jsonl").exists())
+
     def test_the_native_child_holds_the_pool_and_reads_the_message_on_stdin(self):
-        config = self.root / "codex-config.toml"
-        config.write_text('model = "operator-model"\n')
         out = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes",
                           "codex:gpt-6.1-sol:high", "--mode", "headless", "--skip-capacity", mode="custody")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
@@ -83,7 +161,10 @@ class Lanes(unittest.TestCase):
         probe = json.loads((self.root / ".lanes" / PEER.name / "probe.json").read_text())
         self.assertTrue(probe["holds_busy"], "the Codex process itself must hold admission")
         self.assertIn("Read ./PACKET.md", probe["stdin"])
-        self.assertEqual(config.read_text(), 'model = "operator-model"\n')  # no trust or config edits
+        argv = probe["argv"]
+        self.assertIn("mcp_servers.perplexity.enabled=false", argv)  # the real fake listing's unapproved servers
+        self.assertIn("mcp_servers.keenable.enabled=false", argv)
+        self.assertNotIn("mcp_servers.semble.enabled=false", argv)
         held = pools.acquire(self.root, "codex", "next", time.monotonic() + 1)
         self.assertIsNotNone(held)
         held.release()

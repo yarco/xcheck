@@ -19,8 +19,29 @@ mode = os.environ.get("FAKE_MODE", "ok")
 argv = sys.argv[1:]
 
 if kind == "codex" and "--help" in argv:
-    print("--skip-git-repo-check --ephemeral --sandbox --cd --model --config --json"
-          if argv[:1] == ["exec"] else "--stdio")
+    print("--skip-git-repo-check --ephemeral --sandbox --cd --model --config --json --disable"
+          if argv[:1] == ["exec"] else "--json --config --disable" if argv[:2] == ["mcp", "list"] else "--stdio")
+    sys.exit(0)
+
+# `codex [--disable F]… [--config K=V]… mcp list --json`: the effective MCP set.
+# FAKE_CODEX_MCP=broken fails the listing; =stuck ignores the overrides.
+if kind == "codex" and argv[-3:] == ["mcp", "list", "--json"]:
+    if os.environ.get("FAKE_CODEX_MCP") == "broken":
+        sys.exit(1)
+    servers = [
+        {"name": "semble", "transport": {"type": "stdio", "command": "uvx", "env": {"UV_CACHE_DIR": "/c"}}},
+        {"name": "qmd", "transport": {"type": "streamable_http", "url": "http://127.0.0.1:8181/mcp"}},
+        {"name": "keenable-free", "transport": {"type": "streamable_http", "url": "https://api.keenable.ai/mcp"}},
+        {"name": "perplexity", "transport": {"type": "stdio", "command": "pwm-mcp"}},
+        {"name": "keenable", "transport": {"type": "streamable_http", "url": "https://api.keenable.ai/mcp",
+                                           "http_headers": {"X-API-Key": "fixture"}}}]
+    if "plugins" not in [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--disable"]:
+        servers.append({"name": "cua_repl", "transport": {"type": "stdio", "command": "node"}})
+    off = {argv[i + 1].split(".")[1] for i, a in enumerate(argv[:-1])
+           if a == "--config" and argv[i + 1].startswith("mcp_servers.") and argv[i + 1].endswith(".enabled=false")}
+    if os.environ.get("FAKE_CODEX_MCP") == "stuck":
+        off = set()
+    print(json.dumps([{**s, "enabled": s["name"] not in off} for s in servers]))
     sys.exit(0)
 
 if kind == "grok" and mode == "socket-symlink" and "--sandbox" in argv and argv[argv.index("--sandbox") + 1] != "off":
@@ -442,7 +463,12 @@ class CodexStream:
 
 
 def native_turn(stream, server, work):
-    """One headless run in the CLI's own event shapes, with review_turn's modes."""
+    """One headless run in the CLI's own event shapes. Modes: ok, invalid,
+    declined, echo402, custody, silent-exit, hang, slow, progress-hang,
+    reconnect, buffered-work, mixed-duration, error and its retry variants,
+    text-only, terminal-hang; Claude adds mcp-policy-audit, mcp-policy-probe
+    and mcp-startup-warning. Other review_turn modes are ACP-only and fall
+    through to an ordinary answer here."""
     token = [l for l in (work / "evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
     good = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
     if os.environ.get("FAKE_ENV_DUMP"):
@@ -485,8 +511,8 @@ def native_turn(stream, server, work):
     sys.exit(0)
 
 
-if kind == "codex" and argv[:1] == ["exec"]:
-    native_turn(CodexStream(), "codex", Path(argv[argv.index("-C") + 1]))
+if kind == "codex" and "exec" in argv:
+    native_turn(CodexStream(), "codex", Path(argv[argv.index("--cd") + 1]))
 
 
 # Quota meters (xcheck/capacity.py), FAKE_CAPACITY=eligible|reserve-low.

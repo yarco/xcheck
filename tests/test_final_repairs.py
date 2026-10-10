@@ -295,3 +295,42 @@ class FinalSettlementRepairs(unittest.TestCase):
         text = output.call_args.args[0]
         self.assertNotIn('call `xcheck wait', text)
         self.assertIn('do not schedule another master turn', text)
+
+
+class CapBeforeCompletion(unittest.TestCase):
+    setUp = support.EndToEnd.setUp
+
+    def test_a_completion_read_after_the_cap_is_a_timeout(self):
+        from types import SimpleNamespace
+        from xcheck import lane
+        peer = adapters.parse_lane('codex:gpt-6.1-sol:high')
+        snapshot = self.base / '.packet'
+        snapshot.mkdir()
+        for name in ('PACKET.md', 'PROMPT.md'):
+            shutil.copy2(self.base / name, snapshot / name)
+        shutil.copytree(self.base / 'evidence', snapshot / 'evidence')
+        current = files.Run(self.base, {peer.name: peer}, support.CONTRACT, False, 0, 60, 'headless', 'other', 'now',
+                            {}, {}, capacity=False)
+        current.lane_dir(peer.name).mkdir(parents=True)
+        (current.lane_dir(peer.name) / 'message.txt').write_text('Review the packet')
+        current.save()
+        stream = current.lane_dir(peer.name) / 'stream.jsonl'
+
+        def clock():
+            # The cap has passed by the time the completion is read, never before.
+            done = stream.exists() and b'"turn.completed"' in stream.read_bytes()
+            return time.monotonic() + (1000 if done else 0)
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM)}
+        try:
+            with patch.object(lane, 'ROOT', self.root), \
+                    patch.object(lane, 'workspace', return_value=self.root / '.lanes' / peer.name), \
+                    patch.object(lane, 'time', SimpleNamespace(monotonic=clock, time=time.time, sleep=time.sleep)), \
+                    patch.dict(os.environ, {'PATH': f'{self.bin}:{os.environ["PATH"]}', 'FAKE_MODE': 'ok'}):
+                lane.run_lane(self.base, peer.name)
+        finally:
+            signal.alarm(0)
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+        record = json.loads((current.lane_dir(peer.name) / 'exit.json').read_text())
+        self.assertEqual(record['status'], 'timeout', record)
+        self.assertIn('60s cap', record['reason'])

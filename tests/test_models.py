@@ -116,8 +116,11 @@ class Discovery(unittest.TestCase):
                        {"pricing": {"prompt": True, "completion": "0"}},
                        {"supported_parameters": []}, {"deprecated": True},
                        {"architecture": {"input_modalities": ["image"], "output_modalities": ["text"]}},
+                       {"architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]}},
+                       {"architecture": {"input_modalities": ["text", "audio", "video"], "output_modalities": ["text"]}},
+                       {"architecture": {"input_modalities": ["text"], "output_modalities": ["text", "image"]}},
                        {"architecture": {**self.item["architecture"], "tokenizer": "Router"}},
-                       {"expiration_date": "2025-01-01"}]:
+                       {"expiration_date": "2025-01-01"}, {"expiration_date": "2099-12-31"}]:
             with self.subTest(change=change):
                 self.assertEqual(self.discover({**self.item, **change})["models"], [])
 

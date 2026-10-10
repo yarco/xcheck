@@ -6,7 +6,8 @@ vendor-specific part is the command, its environment and its native policy. Ever
 `xcheck doctor` re-checks flags against installed help.
 
 Lanes print their answer as their final message; the one Reader below
-extracts it from the ACP stream and decides native completion. Grok,
+extracts it from the lane's stream (native for Codex and Claude, ACP for the
+rest) and decides native completion. Grok,
 OpenCode and Devin may write scratch files in their workspace while reviewing.
 """
 
@@ -116,8 +117,8 @@ class Launch:
 
 
 def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
-    """The acpx command for one lane. `work` is its workspace, `log` its
-    forensic log."""
+    """The command for one lane. `work` is its workspace, `log` its forensic
+    log."""
     if lane.kind == "codex":
         return _codex_launch(lane, work, message, log, web)
     if lane.kind == "claude":
@@ -133,18 +134,67 @@ def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launc
     raise ValueError(f"unknown kind {lane.kind}")
 
 
+# Codex features a review never needs: plugins bring their own MCP servers
+# (a computer-use REPL among them), hooks can block a lane, apps and browser
+# or computer use act outside the packet.
+CODEX_DISABLED_FEATURES = ("plugins", "hooks", "apps", "computer_use", "browser_use")
+
+
+def _codex_review_mcp(server: dict, web: bool) -> bool:
+    """One entry of `codex mcp list --json` that a review may keep: an approved
+    name in a keyless shape (the same rule as Claude's registrations)."""
+    name, transport = server.get("name"), server.get("transport") or {}
+    if transport.get("type") == "stdio":
+        env = transport.get("env") or {}
+        return (name in REVIEW_LOCAL_MCP and isinstance(env, dict) and set(env) <= LOCAL_MCP_ENV
+                and not transport.get("env_vars"))
+    if transport.get("type") != "streamable_http" or any(
+            transport.get(k) for k in ("bearer_token_env_var", "http_headers", "env_http_headers", "http_headers_helper")):
+        return False
+    url = transport.get("url")
+    return ((name in REVIEW_LOCAL_MCP and isinstance(url, str) and LOOPBACK_URL.fullmatch(url) is not None)
+            or (web and url == REVIEW_FREE_MCP.get(name)))
+
+
+def _codex_mcp_enabled(features: list[str], overrides: list[str], env: dict, work: Path) -> list[dict]:
+    out = subprocess.run([shutil.which("codex") or "codex", *features, *overrides, "mcp", "list", "--json"],
+                         env=env, cwd=work, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    servers = json.loads(out.stdout) if out.returncode == 0 else None
+    if not isinstance(servers, list):
+        raise ValueError(f"`codex mcp list --json` failed (exit {out.returncode})")
+    return [s for s in servers if isinstance(s, dict) and s.get("enabled")]
+
+
 def _codex_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
     """Codex's own headless form: `codex exec --json`, the message on stdin.
-    `--ephemeral` keeps no session files, `-s read-only` is the native sandbox
-    (exec never asks for approval), and the operator's config still loads, so
-    connected MCP servers are available. The installed binary is the direct
-    child, so it holds the pool descriptor itself. The ACP form of this lane
-    (codex-acp) is kept on the `acp/codex` branch."""
-    argv = [shutil.which("codex") or "codex", "exec", "--skip-git-repo-check", "--ephemeral",
-            "-s", "read-only", "-C", str(work), "-m", lane.model,
-            "-c", f'model_reasoning_effort="{lane.effort}"',
-            "-c", f'web_search="{"live" if web else "disabled"}"',
-            "-c", "check_for_update_on_startup=false", "--json", "-"]
+    `--ephemeral` keeps no session files and `--sandbox read-only` is the
+    native sandbox (exec never asks for approval). MCP follows the review
+    rule: Codex's effective server list is read zero-turn, every server that
+    is not an approved keyless one is disabled by name, and the list is read
+    again to prove it; a lane whose list cannot be proved does not start.
+    The installed binary is the runner's direct child and holds the pool
+    itself. The ACP form of this lane (codex-acp) is kept on the `acp/codex`
+    branch."""
+    from .lane import lane_env
+    features = [arg for f in CODEX_DISABLED_FEATURES for arg in ("--disable", f)]
+    env = lane_env(Launch([], message), work)
+    try:
+        enabled = _codex_mcp_enabled(features, [], env, work)
+        refused = sorted(str(s.get("name")) for s in enabled if not _codex_review_mcp(s, web))
+        if bad := [n for n in refused if not re.fullmatch(r"[A-Za-z0-9_-]+", n)]:
+            raise ValueError(f"cannot disable MCP server(s) {bad} by name")
+        overrides = [arg for n in refused for arg in ("--config", f"mcp_servers.{n}.enabled=false")]
+        left = [s.get("name") for s in _codex_mcp_enabled(features, overrides, env, work)
+                if not _codex_review_mcp(s, web)]
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        raise Unavailable(f"startup-unavailable: Codex MCP selection could not be proved ({_clip(str(e), 200)})") from e
+    if left:
+        raise Unavailable(f"startup-unavailable: Codex still enables unapproved MCP server(s) {left} after disabling them")
+    argv = [shutil.which("codex") or "codex", *features, "exec", "--skip-git-repo-check", "--ephemeral",
+            "--sandbox", "read-only", "--cd", str(work), "--model", lane.model,
+            "--config", f'model_reasoning_effort="{lane.effort}"',
+            "--config", f'web_search="{"live" if web else "disabled"}"',
+            "--config", "check_for_update_on_startup=false", *overrides, "--json", "-"]
     return Launch(argv, message)
 
 
@@ -483,8 +533,8 @@ def _devin_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -
 # ("claude.ai Gmail" -> mcp__claude_ai_Gmail). bypassPermissions is refused
 # in restricted mode.
 CLAUDE_JSON = Path.home() / ".claude.json"
-CLAUDE_LOCAL_MCP = {"semble", "fff", "qmd", "pond"}
-CLAUDE_FREE_MCP = {
+REVIEW_LOCAL_MCP = {"semble", "fff", "qmd", "pond"}
+REVIEW_FREE_MCP = {
     "keenable-free": "https://api.keenable.ai/mcp",
     "you-free": "https://api.you.com/mcp?profile=free&tools=you-search",
 }
@@ -518,8 +568,8 @@ def _claude_review_servers(web: bool) -> dict:
     servers = data.get("mcpServers")
     return {name: server for name, server in (servers.items() if isinstance(servers, dict) else ())
             if isinstance(server, dict) and (
-                (name in CLAUDE_LOCAL_MCP and _local_mcp_ok(server))
-                or (web and name in CLAUDE_FREE_MCP and server == {"type": "http", "url": CLAUDE_FREE_MCP[name]}))}
+                (name in REVIEW_LOCAL_MCP and _local_mcp_ok(server))
+                or (web and name in REVIEW_FREE_MCP and server == {"type": "http", "url": REVIEW_FREE_MCP[name]}))}
 
 
 def _claude_mcp_file(path: Path, web: bool) -> Path:
@@ -805,7 +855,8 @@ def unavailable(lane: Lane) -> str | None:
 # Hidden-but-accepted flags are never used, so every entry must be listed.
 HELP_COMMANDS = {
     "codex exec": (["codex", "exec", "--help"], ["--skip-git-repo-check", "--ephemeral", "--sandbox",
-                   "--cd", "--model", "--config", "--json"]),
+                   "--cd", "--model", "--config", "--json", "--disable"]),
+    "codex mcp list": (["codex", "mcp", "list", "--help"], ["--json", "--config", "--disable"]),
     # The capacity meter reads account/rateLimits/read from the app server.
     "codex app-server": (["codex", "app-server", "--help"], ["--stdio"]),
     # The SDK, not xcheck, writes the claude child's argv from the session
@@ -852,15 +903,18 @@ def _error_text(error: dict) -> str:
 
 @dataclass
 class Reader:
-    """One lane's ACP stream (acpx `--format json`): the raw JSON-RPC traffic in
-    both directions, printed without its direction.
+    """One lane's stream. Codex and Claude read their native streams (the
+    `_codex` / `_claude` methods); every other kind reads acpx `--format json`,
+    the raw ACP JSON-RPC traffic in both directions, printed without its
+    direction.
 
     JSON-RPC ids belong to the side that sent the request, so an agent request
     can reuse the id of acpx's own session/prompt. Correlation therefore never
     assumes one id space:
     - only a session/prompt response carries `stopReason` (ACP schema), so that
       shape alone settles the turn, whichever id it reuses;
-    - every other request id, from either side, is counted until answered;
+    - every other request id, from either side, is counted until answered, and
+      a sender reuses an id only once its earlier request at it is answered;
     - an error carrying the prompt's id while another request with that id is
       open is ambiguous: it is held until the other response at that id
       resolves which side sent it, or until acpx — the client, which does know
@@ -942,6 +996,12 @@ class Reader:
                     self._prompt_id = o["id"]
                 else:
                     key = _id_key(o["id"])
+                    if self._held is not None and self._open.get(key) and o["id"] == self._prompt_id:
+                        # A sender reuses an id only once its earlier request at
+                        # that id is answered, and the prompt is still open, so
+                        # the held error answered that earlier request.
+                        self._open[key] -= 1
+                        self._held = None
                     self._open[key] = self._open.get(key, 0) + 1
                 return None
             return self._notification(o)
@@ -1058,12 +1118,31 @@ class Reader:
             if item["type"] == "command_execution":
                 return f"$ {_clip(str(item.get('command', '')), 120)}"
             return f"> {item['type']}"
+        if item.get("type") == "mcp_tool_call" and t in ("item.started", "item.completed"):
+            self._codex_mcp_policy(item, t)
         if t == "item.completed" and item.get("type") == "agent_message":
             self.text = item.get("text") if isinstance(item.get("text"), str) else ""
             return None
         if t == "item.completed" and isinstance(item.get("type"), str):
             return f"> {item['type']}"
         return None
+
+    def _codex_mcp_policy(self, item: dict, event: str) -> None:
+        """A call to an MCP server the launch did not approve (it should have
+        been disabled): one diagnostic per item id, updated on completion."""
+        server = item.get("server")
+        if not isinstance(server, str) or server in REVIEW_LOCAL_MCP | REVIEW_FREE_MCP.keys():
+            return
+        call = item.get("id") if isinstance(item.get("id"), str) else None
+        diagnostic = self._mcp_calls.get(call) if call else None
+        if diagnostic is None:
+            diagnostic = dict(kind="mcp_policy", tool=f"mcp__{server}__{item.get('tool')}", outcome="attempted",
+                              billing="unknown")
+            self.diagnostics.append(diagnostic)
+            if call:
+                self._mcp_calls[call] = diagnostic
+        if event == "item.completed":
+            diagnostic["outcome"] = "error" if item.get("status") == "failed" or item.get("error") else "succeeded"
 
     def _claude_mcp_policy(self, update: dict) -> dict | None:
         """One diagnostic per unapproved MCP tool call reaching a Claude lane.
@@ -1080,7 +1159,7 @@ class Reader:
         if call and call in self._mcp_calls:
             return self._mcp_calls[call]
         parts = (update.get("name") or "").split("__")
-        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in CLAUDE_LOCAL_MCP | CLAUDE_FREE_MCP.keys():
+        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in REVIEW_LOCAL_MCP | REVIEW_FREE_MCP.keys():
             return None
         diagnostic = dict(kind="mcp_policy", tool=update["name"], outcome="attempted", billing="unknown")
         self.diagnostics.append(diagnostic)
