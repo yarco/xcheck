@@ -1,30 +1,34 @@
 [
   {
-    "stream_type": "assistant",
-    "tool": {
-      "type": "tool_use",
-      "id": "toolu_fixture_7b90da61b2f79380308560cc",
-      "name": "mcp__cloudflare-browser-rendering__get_url_links",
-      "input": {
-        "url": "https://herdr.dev/docs/",
-        "visibleLinksOnly": true
-      },
-      "caller": {
-        "type": "direct"
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "s1",
+      "update": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "toolu_fixture_7b90da61b2f79380308560cc",
+        "name": "mcp__cloudflare-browser-rendering__get_url_links",
+        "title": "get_url_links",
+        "kind": "fetch",
+        "status": "pending",
+        "rawInput": {
+          "url": "https://herdr.dev/docs/",
+          "visibleLinksOnly": true
+        }
       }
     }
   },
   {
-    "stream_type": "user",
-    "tool_result": {
-      "tool_use_id": "toolu_fixture_7b90da61b2f79380308560cc",
-      "type": "tool_result",
-      "content": [
-        {
-          "type": "text",
-          "text": "{\"result\":[\"https://herdr.dev/\",\"https://herdr.dev/docs/\",\"https://herdr.dev/plugins/\",\"https://herdr.dev/blog/\",\"https://github.com/herdrdev/herdr\",\"https://herdr.dev/docs/install/\",\"https://herdr.dev/docs/quick-start/\",\"https://herdr.dev/docs/concepts/\",\"https://herdr.dev/docs/configuration/#keybindings\",\"https://herdr.dev/docs/agents/\",\"https://herdr.dev/docs/connecting-machines/\",\"https://herdr.dev/docs/session-state/\",\"https://herdr.dev/docs/configuration/\",\"https://herdr.dev/docs/socket-api/\",\"https://herdr.dev/docs/plugins/\",\"https://herdr.dev/docs/marketplace/\",\"https://github.com/herdrdev/herdr/blob/master/docs/versions/0.9.3/website/src/content/docs/index.mdx\"]}"
-        }
-      ]
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "s1",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "toolu_fixture_7b90da61b2f79380308560cc",
+        "status": "completed",
+        "rawOutput": "{\"result\":[\"https://herdr.dev/\",\"https://herdr.dev/docs/\",\"https://herdr.dev/plugins/\",\"https://herdr.dev/blog/\",\"https://github.com/herdrdev/herdr\",\"https://herdr.dev/docs/install/\",\"https://herdr.dev/docs/quick-start/\",\"https://herdr.dev/docs/concepts/\",\"https://herdr.dev/docs/configuration/#keybindings\",\"https://herdr.dev/docs/agents/\",\"https://herdr.dev/docs/connecting-machines/\",\"https://herdr.dev/docs/session-state/\",\"https://herdr.dev/docs/socket-api/\",\"https://herdr.dev/docs/plugins/\",\"https://herdr.dev/docs/marketplace/\",\"https://github.com/herdrdev/herdr/blob/master/docs/versions/0.9.3/website/src/content/docs/index.mdx\"]}"
+      }
     }
   }
 ]

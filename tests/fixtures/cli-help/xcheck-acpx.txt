@@ -1,0 +1,97 @@
+Usage: acpx [options] [command] [prompt...]
+
+Headless CLI client for the Agent Client Protocol
+
+Arguments:
+  prompt                                  Prompt text
+
+Options:
+  -V, --version                           output the version number
+  --agent <command>                       Raw ACP agent command (escape hatch)
+  --cwd <dir>                             Working directory (default: "/private/tmp/xcheck-worktrees/claude/tests/fixtures/cli-help")
+  --auth-policy <policy>                  Authentication policy: skip or fail when auth is required
+  --approve-all                           Auto-approve all permission requests
+  --approve-reads                         Auto-approve read/search requests and prompt for writes
+  --deny-all                              Deny all permission requests
+  --non-interactive-permissions <policy>  When prompting is unavailable: deny or fail
+  --permission-policy <json-or-file>      Permission policy JSON or path (autoApprove, autoDeny, escalate, defaultAction)
+  --policy <json-or-file>                 Alias for --permission-policy
+  --format <fmt>                          Output format: text, json, quiet
+  --suppress-reads                        Suppress raw read-file contents in output
+  --model <id>                            Agent model id
+  --allowed-tools <list>                  Allowed tool names as a comma-separated list (use "" for no tools)
+  --max-turns <count>                     Maximum turns for the session
+  --system-prompt <text>                  Replace the agent system prompt (claude-agent-acp via ACP _meta.systemPrompt)
+  --append-system-prompt <text>           Append text to the agent system prompt (claude-agent-acp via ACP _meta.systemPrompt.append)
+  --prompt-retries <count>                Retry failed prompt turns on transient errors (default: 0)
+  --json-strict                           Strict JSON mode: requires --format json and suppresses non-JSON stderr output
+  --no-fs                                 Do not advertise ACP filesystem capabilities
+  --no-terminal                           Do not advertise ACP terminal capability
+  --timeout <seconds>                     Maximum time to wait for agent response
+  --ttl <seconds>                         Queue owner idle TTL before shutdown (0 = keep alive forever) (default: 300)
+  --mcp-config <path>                     Load MCP servers from a JSON config file instead of project/global mcpServers
+  --session-meta <json-or-file>           Session _meta JSON object or file path (deep-merged over generated session metadata)
+  --verbose                               Enable verbose debug logs
+  -h, --help                              display help for command
+
+Commands:
+  pi [options] [prompt...]                Use pi agent
+  openclaw [options] [prompt...]          Use openclaw agent
+  codex [options] [prompt...]             Use codex agent
+  claude [options] [prompt...]            Use claude agent
+  gemini [options] [prompt...]            Use gemini agent
+  cursor [options] [prompt...]            Use cursor agent
+  copilot [options] [prompt...]           Use copilot agent
+  antigravity [options] [prompt...]       Use antigravity agent
+  devin [options] [prompt...]             Use devin agent
+  droid [options] [prompt...]             Use droid agent
+  fast-agent [options] [prompt...]        Use fast-agent agent
+  fx [options] [prompt...]                Use fx agent
+  grok-build [options] [prompt...]        Use grok-build agent
+  iflow [options] [prompt...]             Use iflow agent
+  junie [options] [prompt...]             Use junie agent
+  kilocode [options] [prompt...]          Use kilocode agent
+  kimi [options] [prompt...]              Use kimi agent
+  kiro [options] [prompt...]              Use kiro agent
+  mcode [options] [prompt...]             Use mcode agent
+  mux [options] [prompt...]               Use mux agent
+  opencode [options] [prompt...]          Use opencode agent
+  pool [options] [prompt...]              Use pool agent
+  qoder [options] [prompt...]             Use qoder agent
+  qwen [options] [prompt...]              Use qwen agent
+  trae [options] [prompt...]              Use trae agent
+  zeroclaw [options] [prompt...]          Use zeroclaw agent
+  prompt [options] [prompt...]            Prompt using codex by default
+  exec [options] [prompt...]              One-shot prompt using codex by default
+  cancel [options]                        Cancel active prompt for codex by default
+  set-mode [options] <mode>               Set session mode for codex by default
+  set [options] <key> <value>             Set session config option for codex by default
+  status [options]                        Show local status for codex by default
+  sessions [options]                      List, ensure, create, or close sessions for this agent
+  config                                  Inspect and initialize acpx configuration
+  compare [options] <args...>             Run one prompt across multiple agents and summarize the results
+  flow                                    Run multi-step ACP workflows from flow files
+  help [command]                          display help for command
+
+Examples:
+  acpx pi "review recent changes"
+  acpx openclaw exec "summarize active session state"
+  acpx codex sessions new
+  acpx codex "fix the tests"
+  acpx codex prompt "fix the tests"
+  acpx codex --no-wait "queue follow-up task"
+  acpx codex exec "what does this repo do"
+  acpx codex cancel
+  acpx codex set-mode plan
+  acpx codex set model 'gpt-5.2[high]'
+  acpx codex -s backend "fix the API"
+  acpx codex sessions
+  acpx codex sessions new --name backend
+  acpx codex sessions ensure --name backend
+  acpx codex sessions close backend
+  acpx codex status
+  acpx config show
+  acpx config init
+  acpx --ttl 30 codex "investigate flaky tests"
+  acpx claude "refactor auth"
+  acpx --agent ./my-custom-server "do something"

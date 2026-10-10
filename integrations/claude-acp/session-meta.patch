@@ -1,0 +1,729 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 85d3c54..c1c7773 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -8,0 +9,4 @@ Repo: https://github.com/openclaw/acpx
++### Changes
++
++- Sessions: add `--session-meta <json-or-file>`, a vendor-neutral session metadata option that deep-merges a JSON object over generated `_meta` on `session/new`, `session/load`, and `session/resume` across one-shot and persistent sessions. Explicit values win per leaf; arrays and scalars replace, objects merge recursively.
++
+diff --git a/docs/CLI.md b/docs/CLI.md
+index bd822a6..bd255ad 100644
+--- a/docs/CLI.md
++++ b/docs/CLI.md
+@@ -49,0 +50,8 @@ For a persistent session, close the existing session before switching its MCP co
++The global `--session-meta <json-or-file>` option attaches caller-defined metadata to the `_meta`
++field of `session/new`, `session/load`, and `session/resume` requests. The value must be a JSON
++object: inline when it starts with `{`, otherwise a file path resolved from `--cwd`. Explicit keys
++deep-merge over the `_meta` acpx generates — plain objects merge recursively while arrays and
++scalars replace — so callers can pin agent-specific namespaces such as `claudeCode.options` or any
++vendor-specific profile without dedicated flags. The metadata is persisted with the session record
++and re-applied on reconnect.
++
+diff --git a/package.json b/package.json
+index 19ddb7e..e52b5a2 100644
+--- a/package.json
++++ b/package.json
+@@ -3 +3 @@
+-  "version": "0.19.4",
++  "version": "0.19.4-xcheck.1",
+diff --git a/src/acp/agent-command.ts b/src/acp/agent-command.ts
+index 4e8eb85..005162a 100644
+--- a/src/acp/agent-command.ts
++++ b/src/acp/agent-command.ts
+@@ -1,0 +2 @@ import { CopilotAcpUnsupportedError } from "../errors.js";
++import { mergeSessionMeta } from "../session-meta.js";
+@@ -265,0 +267,12 @@ export function buildClaudeCodeOptionsMeta(
++): Record<string, unknown> | undefined {
++  const generated = generatedSessionMeta(options, isolateUserSettings);
++  // Explicit session metadata wins per leaf over generated metadata, so a
++  // caller can pin values such as settingSources without forking the CLI.
++  const merged = mergeSessionMeta(generated, options?.meta);
++
++  return merged && Object.keys(merged).length > 0 ? merged : undefined;
++}
++
++function generatedSessionMeta(
++  options: AcpClientOptions["sessionOptions"],
++  isolateUserSettings: boolean,
+@@ -282,5 +295 @@ export function buildClaudeCodeOptionsMeta(
+-  if (Object.keys(meta).length === 0) {
+-    return undefined;
+-  }
+-
+-  return meta;
++  return Object.keys(meta).length === 0 ? undefined : meta;
+diff --git a/src/cli-core.ts b/src/cli-core.ts
+index e581c28..ad321d4 100644
+--- a/src/cli-core.ts
++++ b/src/cli-core.ts
+@@ -65,0 +66 @@ const TOP_LEVEL_VERSION_VALUE_FLAG_VALUES = [
++  "--session-meta",
+diff --git a/src/cli/command-handlers.ts b/src/cli/command-handlers.ts
+index fa488fe..ca9ffa6 100644
+--- a/src/cli/command-handlers.ts
++++ b/src/cli/command-handlers.ts
+@@ -133,0 +134 @@ function buildSessionStartOptions(params: {
++  sessionOptions: Awaited<ReturnType<typeof sessionOptionsFromGlobalFlags>>;
+@@ -144 +145 @@ function buildSessionStartOptions(params: {
+-    sessionOptions: sessionOptionsFromGlobalFlags(params.globalFlags),
++    sessionOptions: params.sessionOptions,
+@@ -277 +278 @@ export async function handlePrompt(
+-    sessionOptions: sessionOptionsFromGlobalFlags(globalFlags),
++    sessionOptions: await sessionOptionsFromGlobalFlags(globalFlags),
+@@ -340 +341 @@ export async function handleExec(
+-    sessionOptions: sessionOptionsFromGlobalFlags(globalFlags),
++    sessionOptions: await sessionOptionsFromGlobalFlags(globalFlags),
+@@ -689,0 +691 @@ export async function handleSessionsNew(
++      sessionOptions: await sessionOptionsFromGlobalFlags(globalFlags),
+@@ -730,0 +733 @@ export async function handleSessionsEnsure(
++      sessionOptions: await sessionOptionsFromGlobalFlags(globalFlags),
+diff --git a/src/cli/compare-command.ts b/src/cli/compare-command.ts
+index 529425c..f6490ea 100644
+--- a/src/cli/compare-command.ts
++++ b/src/cli/compare-command.ts
+@@ -252 +252 @@ async function runAgentForCompare(params: {
+-      sessionOptions: sessionOptionsFromGlobalFlags(params.globalFlags),
++      sessionOptions: await sessionOptionsFromGlobalFlags(params.globalFlags),
+diff --git a/src/cli/flags.ts b/src/cli/flags.ts
+index ef401da..6486b36 100644
+--- a/src/cli/flags.ts
++++ b/src/cli/flags.ts
+@@ -54,0 +55 @@ export type GlobalFlags = PermissionFlags & {
++  sessionMeta?: string;
+@@ -386,0 +388,4 @@ export function addGlobalFlags(command: Command): Command {
++    .option(
++      "--session-meta <json-or-file>",
++      "Session _meta JSON object or file path (deep-merged over generated session metadata)",
++    )
+@@ -498,0 +504 @@ export function resolveGlobalFlags(command: Command, config: ResolvedAcpxConfig)
++    sessionMeta: stringOption(opts.sessionMeta),
+diff --git a/src/cli/invocation-options.ts b/src/cli/invocation-options.ts
+index 5f7dfe4..413865f 100644
+--- a/src/cli/invocation-options.ts
++++ b/src/cli/invocation-options.ts
+@@ -2,0 +3 @@ import { loadPermissionPolicySpec } from "../permission-policy.js";
++import { loadSessionMetaSpec, type SessionMeta } from "../session-meta.js";
+@@ -11 +12 @@ import type { GlobalFlags } from "./flags.js";
+-export function sessionOptionsFromGlobalFlags(
++export async function sessionOptionsFromGlobalFlags(
+@@ -13 +14 @@ export function sessionOptionsFromGlobalFlags(
+-): NonNullable<SessionCreateOptions["sessionOptions"]> {
++): Promise<NonNullable<SessionCreateOptions["sessionOptions"]>> {
+@@ -18,0 +20 @@ export function sessionOptionsFromGlobalFlags(
++    meta: await resolveSessionMetaFromFlags(globalFlags),
+@@ -47,0 +50,11 @@ export async function resolvePermissionPolicyFromFlags(
++
++export async function resolveSessionMetaFromFlags(
++  globalFlags: GlobalFlags,
++): Promise<SessionMeta | undefined> {
++  try {
++    return await loadSessionMetaSpec(globalFlags.sessionMeta, globalFlags.cwd);
++  } catch (error) {
++    const message = error instanceof Error ? error.message : String(error);
++    throw new InvalidArgumentError(`Invalid session meta: ${message}`);
++  }
++}
+diff --git a/src/flows/cli.ts b/src/flows/cli.ts
+index 627ad2d..ff97434 100644
+--- a/src/flows/cli.ts
++++ b/src/flows/cli.ts
+@@ -62 +62 @@ export async function handleFlowRun(
+-    sessionOptions: sessionOptionsFromGlobalFlags(globalFlags),
++    sessionOptions: await sessionOptionsFromGlobalFlags(globalFlags),
+diff --git a/src/persisted-key-policy.ts b/src/persisted-key-policy.ts
+index dcfca1b..8261564 100644
+--- a/src/persisted-key-policy.ts
++++ b/src/persisted-key-policy.ts
+@@ -27,0 +28 @@ const OPAQUE_VALUE_PATHS = new Set([
++  "acpx.session_options.meta",
+diff --git a/src/runtime/engine/session-options.ts b/src/runtime/engine/session-options.ts
+index c6d4ef4..a357bf7 100644
+--- a/src/runtime/engine/session-options.ts
++++ b/src/runtime/engine/session-options.ts
+@@ -0,0 +1 @@
++import { mergeSessionMeta, type SessionMeta } from "../../session-meta.js";
+@@ -9,0 +11,8 @@ export type SessionAgentOptions = {
++  /**
++   * Vendor-neutral session metadata deep-merged over the `_meta` acpx
++   * generates for session/new, session/load, and session/resume. Plain
++   * objects merge recursively; arrays and scalars replace. Use it for
++   * agent-specific namespaces such as `claudeCode.options` that have no
++   * dedicated acpx flag.
++   */
++  meta?: SessionMeta;
+@@ -26,0 +36,10 @@ export function mergeSessionOptions(
++  assignPreferredScalarOptions(merged, preferred);
++  assignDefinedOption(merged, "meta", mergeSessionMeta(fallback?.meta, preferred?.meta));
++  assignDefinedOption(merged, "env", mergeEnvRecords(fallback?.env, preferred?.env));
++  return Object.keys(merged).length > 0 ? merged : undefined;
++}
++
++function assignPreferredScalarOptions(
++  merged: SessionAgentOptions,
++  preferred: SessionAgentOptions | undefined,
++): void {
+@@ -31,2 +49,0 @@ export function mergeSessionOptions(
+-  assignDefinedOption(merged, "env", mergeEnvRecords(fallback?.env, preferred?.env));
+-  return Object.keys(merged).length > 0 ? merged : undefined;
+@@ -39,2 +56,2 @@ export function normalizeSessionOptionShape(
+-  if (normalized?.env !== undefined && Object.keys(normalized.env).length === 0) {
+-    delete normalized.env;
++  if (normalized === undefined) {
++    return undefined;
+@@ -42 +59,7 @@ export function normalizeSessionOptionShape(
+-  return normalized && Object.keys(normalized).length > 0 ? normalized : undefined;
++  for (const key of ["env", "meta"] as const) {
++    const value = normalized[key];
++    if (value !== undefined && Object.keys(value).length === 0) {
++      delete normalized[key];
++    }
++  }
++  return Object.keys(normalized).length > 0 ? normalized : undefined;
+@@ -99,0 +123 @@ export function sessionOptionsFromRecord(record: SessionRecord): SessionAgentOpt
++  assignDefinedOption(sessionOptions, "meta", storedSessionMeta(stored.meta));
+@@ -114,0 +139 @@ function persistedSessionOptions(
++    meta: storedSessionMeta(options.meta),
+@@ -125,0 +151 @@ function hasPersistedSessionOptions(options: PersistedSessionOptions): boolean {
++    options.meta !== undefined ||
+@@ -129,0 +156,7 @@ function hasPersistedSessionOptions(options: PersistedSessionOptions): boolean {
++function storedSessionMeta(value: unknown): SessionMeta | undefined {
++  if (value === null || typeof value !== "object" || Array.isArray(value)) {
++    return undefined;
++  }
++  return structuredClone(value) as SessionMeta;
++}
++
+diff --git a/src/runtime/public/contract.ts b/src/runtime/public/contract.ts
+index 041cf09..e33c070 100644
+--- a/src/runtime/public/contract.ts
++++ b/src/runtime/public/contract.ts
+@@ -92,3 +92,4 @@ export type AcpRuntimeEnsureInput = {
+-   * record. Ignored when an existing persistent session is reused — system
+-   * prompts are fixed at `newSession` time, so changing them requires a
+-   * different sessionKey or prepareFreshSession on the prior record first.
++   * record; `meta` deep-merges over the generated `_meta` payload. Ignored
++   * when an existing persistent session is reused — system prompts are
++   * fixed at `newSession` time, so changing them requires a different
++   * sessionKey or prepareFreshSession on the prior record first.
+diff --git a/src/session-meta.ts b/src/session-meta.ts
+new file mode 100644
+index 0000000..ba4e385
+--- /dev/null
++++ b/src/session-meta.ts
+@@ -0,0 +1,77 @@
++import fs from "node:fs/promises";
++import path from "node:path";
++
++/**
++ * Vendor-neutral session metadata forwarded as `_meta` on session/new,
++ * session/load, and session/resume. Values must be JSON-serializable.
++ */
++export type SessionMeta = Record<string, unknown>;
++
++export function isSessionMetaRecord(value: unknown): value is SessionMeta {
++  return !!value && typeof value === "object" && !Array.isArray(value);
++}
++
++export function parseSessionMeta(value: unknown, source = "session meta"): SessionMeta {
++  if (!isSessionMetaRecord(value)) {
++    throw new Error(`${source}: session meta must be a JSON object`);
++  }
++  return value;
++}
++
++export function cloneSessionMeta(meta: SessionMeta): SessionMeta {
++  return structuredClone(meta);
++}
++
++/**
++ * Deep-merges explicit session metadata over generated metadata. Plain
++ * objects merge recursively; arrays and scalars replace. Overlay values win
++ * per leaf, so an explicit `[]` or scalar always beats a generated default.
++ */
++export function mergeSessionMeta(
++  base: SessionMeta | undefined,
++  overlay: SessionMeta | undefined,
++): SessionMeta | undefined {
++  if (!isSessionMetaRecord(base)) {
++    return isSessionMetaRecord(overlay) ? cloneSessionMeta(overlay) : undefined;
++  }
++  if (!isSessionMetaRecord(overlay)) {
++    return cloneSessionMeta(base);
++  }
++
++  const merged: SessionMeta = cloneSessionMeta(base);
++  for (const [key, overlayValue] of Object.entries(overlay)) {
++    // Arbitrary JSON keys include __proto__ and inherited names like
++    // constructor: read own values only and define the merged key as an
++    // enumerable own property so prototypes are never read or mutated.
++    const baseValue = Object.hasOwn(merged, key) ? merged[key] : undefined;
++    const mergedValue =
++      isSessionMetaRecord(baseValue) && isSessionMetaRecord(overlayValue)
++        ? mergeSessionMeta(baseValue, overlayValue)
++        : structuredClone(overlayValue);
++    Object.defineProperty(merged, key, {
++      value: mergedValue,
++      writable: true,
++      enumerable: true,
++      configurable: true,
++    });
++  }
++  return merged;
++}
++
++export async function loadSessionMetaSpec(
++  spec: string | undefined,
++  cwd: string,
++): Promise<SessionMeta | undefined> {
++  const trimmed = spec?.trim();
++  if (!trimmed) {
++    return undefined;
++  }
++
++  if (trimmed.startsWith("{")) {
++    return parseSessionMeta(JSON.parse(trimmed), "--session-meta");
++  }
++
++  const metaPath = path.resolve(cwd, trimmed);
++  const raw = await fs.readFile(metaPath, "utf8");
++  return parseSessionMeta(JSON.parse(raw), metaPath);
++}
+diff --git a/src/session/persistence/parse.ts b/src/session/persistence/parse.ts
+index e55fd73..a36b572 100644
+--- a/src/session/persistence/parse.ts
++++ b/src/session/persistence/parse.ts
+@@ -527,0 +528,4 @@ function assignParsedSessionOptions(state: SessionAcpxState, raw: unknown): void
++  const meta = asRecord(sessionOptions.meta);
++  if (meta) {
++    parsedSessionOptions.meta = structuredClone(meta);
++  }
+diff --git a/src/session/queue/messages.ts b/src/session/queue/messages.ts
+index 54b98c0..90cab19 100644
+--- a/src/session/queue/messages.ts
++++ b/src/session/queue/messages.ts
+@@ -277,11 +277,15 @@ function parseSessionOptions(value: unknown): QueueSessionOptions | null | undef
+-  if (!assignSessionModel(sessionOptions, record.model)) {
+-    return null;
+-  }
+-  if (!assignSessionAllowedTools(sessionOptions, record.allowedTools)) {
+-    return null;
+-  }
+-  if (!assignSessionMaxTurns(sessionOptions, record.maxTurns)) {
+-    return null;
+-  }
+-  if (!assignSessionSystemPrompt(sessionOptions, record.systemPrompt)) {
+-    return null;
++  const assigned = [
++    assignSessionModel(sessionOptions, record.model),
++    assignSessionAllowedTools(sessionOptions, record.allowedTools),
++    assignSessionMaxTurns(sessionOptions, record.maxTurns),
++    assignSessionSystemPrompt(sessionOptions, record.systemPrompt),
++    assignSessionMeta(sessionOptions, record.meta),
++    assignSessionEnv(sessionOptions, record.env),
++  ];
++
++  return assigned.every(Boolean) ? sessionOptions : null;
++}
++
++function assignSessionMeta(options: QueueSessionOptions, value: unknown): boolean {
++  if (value == null) {
++    return true;
+@@ -289,2 +293,3 @@ function parseSessionOptions(value: unknown): QueueSessionOptions | null | undef
+-  if (!assignSessionEnv(sessionOptions, record.env)) {
+-    return null;
++  const meta = asRecord(value);
++  if (!meta) {
++    return false;
+@@ -292,2 +297,2 @@ function parseSessionOptions(value: unknown): QueueSessionOptions | null | undef
+-
+-  return sessionOptions;
++  options.meta = structuredClone(meta);
++  return true;
+diff --git a/src/session/queue/owner-input.ts b/src/session/queue/owner-input.ts
+index 887b2e2..400c730 100644
+--- a/src/session/queue/owner-input.ts
++++ b/src/session/queue/owner-input.ts
+@@ -139,0 +140 @@ function assignQueueOwnerSessionOptions(
++  assignSessionMeta(options.sessionOptions, sessionOpts.meta);
+@@ -142,0 +144,10 @@ function assignQueueOwnerSessionOptions(
++function assignSessionMeta(
++  options: NonNullable<QueueOwnerRuntimeOptions["sessionOptions"]>,
++  value: unknown,
++): void {
++  const meta = asRecord(value);
++  if (meta) {
++    options.meta = structuredClone(meta);
++  }
++}
++
+diff --git a/src/types.ts b/src/types.ts
+index 3f1ed29..1185ac9 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -310,0 +311 @@ export type AcpClientOptions = {
++    meta?: Record<string, unknown>;
+@@ -459,0 +461 @@ export type SessionAcpxState = {
++    meta?: Record<string, unknown>;
+diff --git a/test/cli-flags.test.ts b/test/cli-flags.test.ts
+index 3aecf36..1777a16 100644
+--- a/test/cli-flags.test.ts
++++ b/test/cli-flags.test.ts
+@@ -220,0 +221 @@ test("resolveGlobalFlags validates and normalizes dynamic Commander options", ()
++      sessionMeta: '{"a":1}',
+@@ -244,0 +246 @@ test("resolveGlobalFlags validates and normalizes dynamic Commander options", ()
++    sessionMeta: '{"a":1}',
+@@ -421,0 +424,2 @@ test("global flag registration parses each supported option", () => {
++    "--session-meta",
++    '{"claudeCode":{"options":{"persistSession":false}}}',
+@@ -443,0 +448 @@ test("global flag registration parses each supported option", () => {
++    sessionMeta: '{"claudeCode":{"options":{"persistSession":false}}}',
+diff --git a/test/client.test.ts b/test/client.test.ts
+index 1208438..52166c8 100644
+--- a/test/client.test.ts
++++ b/test/client.test.ts
+@@ -1033,0 +1034,27 @@ for (const scenario of [
++  {
++    name: "AcpClient createSession deep-merges sessionOptions.meta over generated _meta",
++    options: {
++      agentCommand: "npx -y @agentclientprotocol/claude-agent-acp",
++      sessionOptions: {
++        model: "sonnet",
++        meta: {
++          claudeCode: { options: { settingSources: [], persistSession: false } },
++          agentProfile: { tier: 2 },
++        },
++      },
++    },
++    meta: {
++      claudeCode: {
++        options: { settingSources: [], persistSession: false, model: "sonnet" },
++      },
++      agentProfile: { tier: 2 },
++    },
++  },
++  {
++    name: "AcpClient createSession forwards meta only for non-Claude agents",
++    options: {
++      agentCommand: "npx -y @agentclientprotocol/codex-acp",
++      sessionOptions: { meta: { agentProfile: { tier: "review" } } },
++    },
++    meta: { agentProfile: { tier: "review" } },
++  },
+@@ -1054 +1081,6 @@ for (const method of ["load", "resume"] as const) {
+-        sessionOptions: { allowedTools: ["Read"], maxTurns: 5, systemPrompt: "synthetic" },
++        sessionOptions: {
++          allowedTools: ["Read"],
++          maxTurns: 5,
++          systemPrompt: "synthetic",
++          meta: { claudeCode: { options: { persistSession: false } } },
++        },
+@@ -1072 +1104,6 @@ for (const method of ["load", "resume"] as const) {
+-          options: { settingSources: ["project", "local"], allowedTools: ["Read"], maxTurns: 5 },
++          options: {
++            settingSources: ["project", "local"],
++            allowedTools: ["Read"],
++            maxTurns: 5,
++            persistSession: false,
++          },
+diff --git a/test/integration.test.ts b/test/integration.test.ts
+index e73387d..e8a2187 100644
+--- a/test/integration.test.ts
++++ b/test/integration.test.ts
+@@ -3053,0 +3054,54 @@ test("integration: --mcp-config loads session-scoped MCP servers", async () => {
++test("integration: --session-meta does not hide a following --mcp-config", async () => {
++  await withTempHome(async (homeDir) => {
++    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-meta-mcp-cwd-"));
++    const metaPath = path.join(homeDir, "job-meta.json");
++    const mcpConfigPath = path.join(homeDir, "job-mcp.json");
++    await fs.writeFile(metaPath, `${JSON.stringify({ vendor: { flag: true } })}\n`, "utf8");
++    await fs.writeFile(
++      mcpConfigPath,
++      `${JSON.stringify({
++        mcpServers: [
++          { name: "job-stdio", type: "stdio", command: "./bin/job-mcp", args: ["--serve"] },
++        ],
++      })}\n`,
++      "utf8",
++    );
++
++    try {
++      const result = await runCli(
++        [
++          "--agent",
++          MOCK_AGENT_COMMAND,
++          "--approve-all",
++          "--cwd",
++          cwd,
++          "--session-meta",
++          metaPath,
++          "--mcp-config",
++          mcpConfigPath,
++          "--format",
++          "json",
++          "exec",
++          "echo meta-mcp",
++        ],
++        homeDir,
++      );
++      assert.equal(result.code, 0, result.stderr);
++      const messages = parseJsonRpcOutputLines(result.stdout);
++      const newSessionRequest = messages.find(
++        (message) => message.method === "session/new" && extractJsonRpcId(message) !== undefined,
++      );
++      assert(newSessionRequest, `expected session/new request in output:\n${result.stdout}`);
++      const params = newSessionRequest.params as
++        | { mcpServers?: unknown; _meta?: { vendor?: { flag?: boolean } } }
++        | undefined;
++      assert.equal(params?._meta?.vendor?.flag, true);
++      assert.deepEqual(params?.mcpServers, [
++        { name: "job-stdio", command: "./bin/job-mcp", args: ["--serve"], env: [] },
++      ]);
++    } finally {
++      await fs.rm(cwd, { recursive: true, force: true });
++    }
++  });
++});
++
+diff --git a/test/queue-messages.test.ts b/test/queue-messages.test.ts
+index 54b9407..908c5e7 100644
+--- a/test/queue-messages.test.ts
++++ b/test/queue-messages.test.ts
+@@ -68,0 +69 @@ test("parseQueueRequest accepts prompt session options", () => {
++      meta: { claudeCode: { options: { persistSession: false } } },
+@@ -90,0 +92 @@ test("parseQueueRequest accepts prompt session options", () => {
++      meta: { claudeCode: { options: { persistSession: false } } },
+@@ -124,0 +127,13 @@ test("parseQueueRequest rejects invalid prompt session options", () => {
++  assert.equal(
++    parseQueueRequest({
++      type: "submit_prompt",
++      requestId: "req-session-options-invalid-meta",
++      message: "hello",
++      permissionMode: "approve-reads",
++      sessionOptions: {
++        meta: ["not", "an", "object"],
++      },
++      waitForCompletion: true,
++    }),
++    null,
++  );
+diff --git a/test/queue-owner-input.test.ts b/test/queue-owner-input.test.ts
+index ac9d74d..5236475 100644
+--- a/test/queue-owner-input.test.ts
++++ b/test/queue-owner-input.test.ts
+@@ -34,0 +35 @@ describe("parseQueueOwnerPayload", () => {
++          meta: { claudeCode: { options: { settingSources: [] } } },
+@@ -70,0 +72 @@ describe("parseQueueOwnerPayload", () => {
++      meta: { claudeCode: { options: { settingSources: [] } } },
+diff --git a/test/runtime-manager.test.ts b/test/runtime-manager.test.ts
+index 25f7494..5539632 100644
+--- a/test/runtime-manager.test.ts
++++ b/test/runtime-manager.test.ts
+@@ -5022,0 +5023 @@ test("AcpRuntimeManager forwards sessionOptions to createClient on fresh session
++    meta: undefined,
+@@ -5094,0 +5096 @@ test("AcpRuntimeManager persists sessionOptions { append } and model/allowedTool
++    meta: undefined,
+@@ -5113,0 +5116 @@ test("persistSessionOptions preserves an explicit empty allowedTools list", () =
++    meta: undefined,
+@@ -5137,0 +5141 @@ test("persistSessionOptions preserves session env as a serialized record", () =>
++    meta: undefined,
+@@ -5170,0 +5175,27 @@ test("sessionOptionsFromRecord restores session env from a persisted record", ()
++test("session meta persists and restores through a session record", () => {
++  const record = makeSessionRecord({
++    acpxRecordId: "meta-session",
++    acpSessionId: "meta-sid",
++    agentCommand: "claude",
++    cwd: "/workspace",
++  });
++  const meta = JSON.parse(
++    '{"claudeCode":{"options":{"settingSources":[],"strictMcpConfig":true}},"agentProfile":{"mode":"review"}}',
++  ) as Record<string, unknown>;
++
++  persistSessionOptions(record, { meta });
++
++  assert.deepEqual(record.acpx?.session_options, {
++    model: undefined,
++    allowed_tools: undefined,
++    max_turns: undefined,
++    system_prompt: undefined,
++    meta,
++    env: undefined,
++  });
++
++  const restored = sessionOptionsFromRecord(record);
++  assert.deepEqual(restored?.meta, meta);
++  assert.notEqual(restored?.meta, meta, "restored metadata is a copy, not the caller's object");
++});
++
+diff --git a/test/session-meta.test.ts b/test/session-meta.test.ts
+new file mode 100644
+index 0000000..f1b2bdc
+--- /dev/null
++++ b/test/session-meta.test.ts
+@@ -0,0 +1,166 @@
++import assert from "node:assert/strict";
++import fs from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
++import test from "node:test";
++import { buildClaudeCodeOptionsMeta } from "../src/acp/agent-command.js";
++import {
++  mergeSessionOptions,
++  normalizeSessionOptionShape,
++  persistSessionOptions,
++  sessionOptionsFromRecord,
++} from "../src/runtime/engine/session-options.js";
++import { loadSessionMetaSpec, mergeSessionMeta, parseSessionMeta } from "../src/session-meta.js";
++import type { SessionRecord } from "../src/types.js";
++
++test("parseSessionMeta accepts JSON objects", () => {
++  assert.deepEqual(parseSessionMeta({ a: 1 }), { a: 1 });
++  assert.deepEqual(parseSessionMeta({}), {});
++});
++
++test("parseSessionMeta rejects non-object roots", () => {
++  for (const value of [null, undefined, "x", 3, [1, 2], true]) {
++    assert.throws(() => parseSessionMeta(value), /must be a JSON object/);
++  }
++});
++
++test("mergeSessionMeta deep-merges objects and replaces arrays and scalars", () => {
++  const merged = mergeSessionMeta(
++    {
++      claudeCode: { options: { settingSources: ["project", "local"], model: "m" } },
++      keep: { a: 1 },
++    },
++    {
++      claudeCode: { options: { settingSources: [] } },
++      keep: { b: 2 },
++      extra: [1, 2],
++    },
++  );
++
++  assert.deepEqual(merged, {
++    claudeCode: { options: { settingSources: [], model: "m" } },
++    keep: { a: 1, b: 2 },
++    extra: [1, 2],
++  });
++});
++
++test("mergeSessionMeta treats dangerous JSON keys as data, never prototypes", () => {
++  const base = JSON.parse('{"claudeCode":{"options":{"a":1}}}') as Record<string, unknown>;
++  const overlay = JSON.parse(
++    '{"__proto__":{"polluted":true},"constructor":{"x":1},"claudeCode":{"options":{"b":2}}}',
++  ) as Record<string, unknown>;
++
++  const merged = mergeSessionMeta(base, overlay);
++  assert(merged !== undefined);
++
++  assert.equal(({} as { polluted?: unknown }).polluted, undefined);
++  assert.equal(Object.getPrototypeOf(merged), Object.prototype);
++  assert.deepEqual(Object.getOwnPropertyDescriptor(merged, "__proto__"), {
++    value: { polluted: true },
++    writable: true,
++    enumerable: true,
++    configurable: true,
++  });
++  assert.deepEqual(merged.constructor, { x: 1 });
++  assert.deepEqual(merged.claudeCode, { options: { a: 1, b: 2 } });
++});
++
++test("mergeSessionMeta does not alias base or overlay state", () => {
++  const overlay = { nested: { list: [1] } };
++  const merged = mergeSessionMeta(undefined, overlay);
++  overlay.nested.list.push(2);
++  assert.deepEqual(merged, { nested: { list: [1] } });
++});
++
++test("loadSessionMetaSpec parses inline JSON", async () => {
++  const meta = await loadSessionMetaSpec('{"agentProfile":{"tier":2}}', process.cwd());
++  assert.deepEqual(meta, { agentProfile: { tier: 2 } });
++});
++
++test("loadSessionMetaSpec resolves file paths against cwd", async (t) => {
++  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-meta-"));
++  t.after(() => fs.rm(dir, { recursive: true, force: true }));
++  await fs.writeFile(
++    path.join(dir, "meta.json"),
++    JSON.stringify({ claudeCode: { options: { persistSession: false } } }),
++  );
++
++  const meta = await loadSessionMetaSpec("meta.json", dir);
++  assert.deepEqual(meta, { claudeCode: { options: { persistSession: false } } });
++});
++
++test("loadSessionMetaSpec rejects malformed JSON and non-object roots", async (t) => {
++  await assert.rejects(loadSessionMetaSpec("{invalid", process.cwd()), SyntaxError);
++
++  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-meta-"));
++  t.after(() => fs.rm(dir, { recursive: true, force: true }));
++  await fs.writeFile(path.join(dir, "array.json"), '["a"]');
++  await assert.rejects(loadSessionMetaSpec("array.json", dir), /must be a JSON object/);
++
++  assert.equal(await loadSessionMetaSpec(undefined, process.cwd()), undefined);
++  assert.equal(await loadSessionMetaSpec("  ", process.cwd()), undefined);
++});
++
++test("buildClaudeCodeOptionsMeta lets explicit meta override generated leaves", () => {
++  const meta = buildClaudeCodeOptionsMeta(
++    {
++      model: "sonnet",
++      meta: { claudeCode: { options: { settingSources: [] } } },
++    },
++    true,
++  );
++
++  assert.deepEqual(meta, {
++    claudeCode: { options: { settingSources: [], model: "sonnet" } },
++  });
++});
++
++test("buildClaudeCodeOptionsMeta forwards vendor-neutral namespaces untouched", () => {
++  const meta = buildClaudeCodeOptionsMeta(
++    {
++      meta: { agentProfile: { tier: "review", flags: ["a"] } },
++    },
++    false,
++  );
++
++  assert.deepEqual(meta, { agentProfile: { tier: "review", flags: ["a"] } });
++});
++
++test("mergeSessionOptions merges meta leaves with preferred winning", () => {
++  const merged = mergeSessionOptions(
++    { meta: { claudeCode: { options: { persistSession: false } } } },
++    { meta: { claudeCode: { options: { settingSources: [] } }, lane: "a" } },
++  );
++
++  assert.deepEqual(merged?.meta, {
++    claudeCode: { options: { settingSources: [], persistSession: false } },
++    lane: "a",
++  });
++});
++
++test("normalizeSessionOptionShape drops empty meta", () => {
++  assert.equal(normalizeSessionOptionShape({ meta: {} }), undefined);
++  assert.deepEqual(normalizeSessionOptionShape({ meta: { a: 1 } }), { meta: { a: 1 } });
++});
++
++test("session options meta round-trips through the persisted record", () => {
++  const record = {} as SessionRecord;
++  persistSessionOptions(record, {
++    meta: { claudeCode: { options: { settingSources: [] } }, agentProfile: { tier: 2 } },
++  });
++
++  assert.deepEqual(record.acpx?.session_options?.meta, {
++    claudeCode: { options: { settingSources: [] } },
++    agentProfile: { tier: 2 },
++  });
++  assert.deepEqual(sessionOptionsFromRecord(record), {
++    meta: { claudeCode: { options: { settingSources: [] } }, agentProfile: { tier: 2 } },
++  });
++});
++
++test("session options meta ignores malformed persisted values", () => {
++  const record = {
++    acpx: { session_options: { meta: ["not", "an", "object"] } },
++  } as unknown as SessionRecord;
++  assert.equal(sessionOptionsFromRecord(record), undefined);
++});

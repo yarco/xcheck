@@ -233,14 +233,18 @@ class ReportClaudePolicy(unittest.TestCase):
             before = cfg.read_bytes()
             with patch.object(adapters, 'CLAUDE_JSON', cfg):
                 lane = adapters.Lane('claude', 'claude-opus-5-5', 'high')
-                for spec in (adapters.launch(lane, Path(tmp), Path(tmp)/'m', Path(tmp)/'f', Path(tmp)/'l', True),
-                             adapters.tui(lane, Path(tmp), 'review', Path(tmp)/'l', True)):
-                    argv = spec.argv
-                    self.assertIn('--strict-mcp-config', argv)
-                    registered = json.loads(argv[argv.index('--mcp-config') + 1])['mcpServers']
-                    self.assertEqual(set(registered), {'fff', 'keenable-free', 'you-free'})
-                    self.assertIn('mcp__claude_ai_*', argv[argv.index('--disallowedTools') + 1])
-                    self.assertNotIn('secret-fixture', ' '.join(argv))
+                spec = adapters.launch(lane, Path(tmp), Path(tmp)/'m', Path(tmp)/'f', Path(tmp)/'l', True)
+                argv = spec.argv
+                # strictMcpConfig and the connector strip ride _meta, and the
+                # approved set goes to --mcp-config as a file of ACP entries.
+                options = json.loads(Path(argv[argv.index('--session-meta') + 1])
+                                     .read_text())['claudeCode']['options']
+                self.assertIs(options['strictMcpConfig'], True)
+                registered = json.loads(Path(argv[argv.index('--mcp-config') + 1])
+                                        .read_text())['mcpServers']
+                self.assertEqual({s['name'] for s in registered}, {'fff', 'keenable-free', 'you-free'})
+                self.assertIn('mcp__claude_ai_*', options['disallowedTools'])
+                self.assertNotIn('secret-fixture', Path(argv[argv.index('--mcp-config') + 1]).read_text())
             self.assertEqual(cfg.read_bytes(), before)
 
     def test_free_name_cannot_enable_authenticated_or_paid_endpoint(self):
@@ -251,8 +255,7 @@ class ReportClaudePolicy(unittest.TestCase):
                             'headers': {'Authorization': 'secret-fixture'}}):
                 cfg.write_text(json.dumps({'mcpServers': {'you-free': server}}))
                 with patch.object(adapters, 'CLAUDE_JSON', cfg):
-                    argv = adapters.claude_mcp()
-                self.assertEqual(json.loads(argv[argv.index('--mcp-config') + 1])['mcpServers'], {})
+                    self.assertEqual(adapters._claude_review_servers(web=True), {})
 
     def test_packet_mode_registers_local_tools_without_remote_retrieval(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -260,17 +263,19 @@ class ReportClaudePolicy(unittest.TestCase):
             cfg.write_text(json.dumps({'mcpServers': {'fff': {'type': 'stdio', 'command': 'fff'},
                                                      'keenable-free': {'type': 'http', 'url': 'https://api.keenable.ai/mcp'}}}))
             with patch.object(adapters, 'CLAUDE_JSON', cfg):
-                argv = adapters.claude_mcp(web=False)
-            self.assertEqual(set(json.loads(argv[argv.index('--mcp-config') + 1])['mcpServers']), {'fff'})
+                self.assertEqual(set(adapters._claude_review_servers(web=False)), {'fff'})
 
     def test_real_successful_disallowed_call_is_audited_separately_from_completion(self):
         reader = adapters.Reader('claude')
-        rows = json.loads((support.FIX / 'claude-cloudflare-call.json').read_text())
-        for row in rows:
-            block = row['tool'] if row['stream_type'] == 'assistant' else row['tool_result']
-            reader.feed({'type': row['stream_type'], 'message': {'content': [block]}})
-        reader.feed({'type': 'result', 'is_error': False, 'result':
-                     f'1) VERDICT: The technical review completed.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n'})
+        for row in json.loads((support.FIX / 'claude-cloudflare-call.json').read_text()):
+            reader.feed(row)
+        reader.feed({'jsonrpc': '2.0', 'id': 2, 'method': 'session/prompt', 'params': {}})
+        for chunk in '1) VERDICT: The technical review completed.\n6) PROOF: ' + support.TOKEN + '\nRESULT_COMPLETE\n':
+            reader.feed({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
+                         'update': {'sessionUpdate': 'agent_message_chunk',
+                                    'content': {'type': 'text', 'text': chunk}}}})
+        reader.feed({'jsonrpc': '2.0', 'id': 2, 'result': {'stopReason': 'end_turn'}})
+        reader.finish(Path('/nonexistent'))
         self.assertTrue(reader.completed)
         self.assertIsNone(reader.error)
         self.assertEqual(reader.diagnostics[0]['outcome'], 'succeeded')
@@ -278,21 +283,26 @@ class ReportClaudePolicy(unittest.TestCase):
         self.assertIn('POLICY VIOLATION', '; '.join(reader.notes()))
         self.assertEqual(support.validate.check(reader.text, support.CONTRACT)[0], 'done')
 
-    def test_startup_failures_and_refused_calls_are_not_successful_invocations(self):
+    def test_refused_calls_are_not_successful_invocations(self):
         reader = adapters.Reader('claude')
-        reader.feed({'type': 'system', 'subtype': 'init', 'mcp_servers': [
-            {'name': 'parallel-search', 'status': 'failed'},
-            {'name': 'claude.ai Paybox', 'status': 'needs-auth'},
-            {'name': 'cloudflare-browser-rendering', 'status': 'connected'}]})
-        self.assertEqual(len(reader.diagnostics), 2)
-        self.assertFalse(any(d['kind'] == 'mcp_policy' for d in reader.diagnostics))
-        reader.feed({'type': 'assistant', 'message': {'content': [
-            {'type': 'tool_use', 'id': 'test-call', 'name': 'mcp__cloudflare-browser-rendering__get_url_links'}]}})
-        reader.feed({'type': 'user', 'message': {'content': [
-            {'type': 'tool_result', 'tool_use_id': 'test-call', 'is_error': True, 'content': 'denied'}]}})
+        reader.feed({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
+                     'update': {'sessionUpdate': 'tool_call', 'toolCallId': 'test-call',
+                                'name': 'mcp__cloudflare-browser-rendering__get_url_links'}}})
+        self.assertEqual(reader.diagnostics[-1]['outcome'], 'attempted')
+        reader.feed({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
+                     'update': {'sessionUpdate': 'tool_call_update', 'toolCallId': 'test-call',
+                                'status': 'failed'}}})
         self.assertEqual(reader.diagnostics[-1]['outcome'], 'error')
         self.assertNotIn('succeeded', '; '.join(reader.notes()))
         self.assertIsNone(reader.error)
+
+    def test_an_mcp_name_quoted_in_another_call_is_not_a_call(self):
+        # rawInput text mentioning an unapproved server must not register one.
+        reader = adapters.Reader('claude')
+        reader.feed({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
+                     'update': {'sessionUpdate': 'tool_call', 'toolCallId': 'test-call', 'name': 'Read',
+                                'rawInput': {'file_path': 'notes on mcp__cloudflare-browser-rendering__x'}}}})
+        self.assertFalse(reader.diagnostics)
 
     def test_dead_runner_recovery_preserves_policy_diagnostics(self):
         from xcheck import files, run
@@ -303,12 +313,13 @@ class ReportClaudePolicy(unittest.TestCase):
                                 'headless', 'other', 'now', {}, {})
             directory = current.lane_dir(peer.name)
             directory.mkdir(parents=True)
-            events = []
-            for row in json.loads((support.FIX / 'claude-cloudflare-call.json').read_text()):
-                block = row['tool'] if row['stream_type'] == 'assistant' else row['tool_result']
-                events.append({'type': row['stream_type'], 'message': {'content': [block]}})
-            events.append({'type': 'result', 'is_error': False, 'result':
-                           f'1) VERDICT: The technical review completed.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n'})
+            events = [{'jsonrpc': '2.0', 'id': 2, 'method': 'session/prompt', 'params': {}}]
+            events += json.loads((support.FIX / 'claude-cloudflare-call.json').read_text())
+            text = f'1) VERDICT: The technical review completed.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n'
+            events.append({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 's',
+                           'update': {'sessionUpdate': 'agent_message_chunk',
+                                      'content': {'type': 'text', 'text': text}}}})
+            events.append({'jsonrpc': '2.0', 'id': 2, 'result': {'stopReason': 'end_turn'}})
             (directory / 'stream.jsonl').write_text('\n'.join(map(json.dumps, events)))
             with patch.object(run, '_pid_cmd', return_value=''), \
                     patch.object(run, 'workspace', return_value=base/'work'):
@@ -354,7 +365,7 @@ class ReportRuntime(unittest.TestCase):
     def test_fake_global_paid_connector_is_not_offered_by_installed_review(self):
         row = self.claude_run('mcp-policy-probe')
         self.assertEqual(row['status'], 'done', row)
-        self.assertFalse(row['diagnostics'], row)
+        self.assertFalse([d for d in row['diagnostics'] if d['kind'] == 'mcp_policy'], row)
         stream = (self.base / 'lanes' / row['lane'] / 'stream.jsonl').read_text()
         self.assertNotIn('cloudflare-browser-rendering', stream)
 
@@ -363,15 +374,20 @@ class ReportRuntime(unittest.TestCase):
         self.assertEqual(row['status'], 'done', row)
         self.assertIn('POLICY VIOLATION', row['reason'])
         self.assertIn('billing unknown', row['reason'])
-        self.assertEqual(row['diagnostics'][0]['outcome'], 'succeeded')
+        policy = [d for d in row['diagnostics'] if d['kind'] == 'mcp_policy']
+        self.assertEqual(policy[0]['outcome'], 'succeeded')
         self.assertIn('POLICY VIOLATION', (self.base / 'STATUS.md').read_text())
         self.assertTrue((self.base / f"RESULT-{row['lane']}.md").exists())
 
-    def test_optional_mcp_auth_failure_is_visible_without_failing_review(self):
+    def test_refused_unapproved_call_is_visible_without_failing_review(self):
+        # ACP carries no per-server startup status (the native init mcp_servers
+        # list); what reaches the wire is the refused call itself.
         row = self.claude_run('mcp-startup-warning')
         self.assertEqual(row['status'], 'done', row)
-        self.assertIn('MCP startup optional-fake: needs-auth', row['reason'])
-        self.assertEqual(row['diagnostics'][0]['kind'], 'mcp_startup')
+        self.assertIn('MCP policy warning', row['reason'])
+        self.assertIn('mcp__optional-fake', row['reason'])
+        policy = [d for d in row['diagnostics'] if d['kind'] == 'mcp_policy']
+        self.assertEqual(policy[0]['outcome'], 'error')
 
     def test_retryable_upstream_error_stops_child_and_releases_its_pool(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
@@ -400,7 +416,8 @@ class ReportRuntime(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
                 self.assertEqual(row['status'], 'done', row)
-                self.assertEqual(row['reason'], 'RESULT_COMPLETE')
-                self.assertEqual(row['exit_code'], -15)
+                self.assertTrue(row['reason'].startswith('RESULT_COMPLETE'), row)
+                # A stream lane may exit on its own before the runner's kill lands.
+                self.assertIn(row['exit_code'], (0, -15))
                 self.assertIsNone(row['error'])
                 self.assert_settled(row, 'claude' if view == 'tui' else 'opencode')
