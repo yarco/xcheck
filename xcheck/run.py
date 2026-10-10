@@ -328,11 +328,14 @@ def cancel(run: Run, name: str | None, reason: str) -> int:
     names = [name] if name else list(run.lanes)
     if any(n not in run.lanes for n in names):
         raise ValueError('unknown lane')
-    targets, unstarted = [], []
+    targets, unstarted, dead = [], [], []
     for selected in names:
         d = run.lane_dir(selected)
         if (d / 'exit.json').exists():
             print(f'xcheck: {selected} already ended')
+            continue
+        if is_alive(d / 'alive') is False:  # its lock was released: the runner is gone
+            dead.append(selected)
             continue
         try:
             pid = json.loads((d / 'pids.json').read_text())['runner']
@@ -355,6 +358,9 @@ def cancel(run: Run, name: str | None, reason: str) -> int:
     for selected, d, pid in targets:
         _signal(pid, signal.SIGTERM)
         print(f'xcheck: cancellation sent to {selected}')
+    for selected in dead:
+        _settle_dead_runner(run, selected)
+        print(f'xcheck: {selected} settled; its runner had already exited')
     for selected, lock in unstarted:
         _write_exit(run, selected, 'interrupted', f'cancelled: {reason.strip()}; no runner had started')
         lock.close()
