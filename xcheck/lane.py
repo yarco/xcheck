@@ -43,22 +43,31 @@ TAIL_LINES = 40
 # default socket, so the lane points HERDR_SOCKET_PATH at a path that cannot
 # exist and every herdr call inside a lane finds no server.
 # Provider API keys are removed unless the selected OpenCode provider needs
-# its own configured authentication. User preferences such as
-# GROK_TELEMETRY_* stay.
+# its own configured authentication.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "OPENCODE",  # an opencode orchestrator's session; any config override breaks the free tier
                   "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_")  # adapter and client overrides must not reach a peer
+# Per-kind prefixes: only the Grok lane reads GROK_*, so only it must not
+# inherit them — it rebuilds every Grok knob itself, and the prefix covers
+# config-overlay, home, managed-config and auth-path injection.
+SCRUB_KIND = {"grok": ("GROK_",)}
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
 SCRUB_NAMES = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
-               "GROK_SANDBOX",  # the operator's default profile; the adapter picks the lane's
                "OLDPWD", "CODEX_PATH", "CODEX_CONFIG", "INITIAL_AGENT_MODE",
                "DEFAULT_AUTH_REQUEST", "MODEL_PROVIDER", "APP_SERVER_LOGS", "NO_BROWSER",
-               "CODEX_SESSION_ID", "CODEX_THREAD_ID"}
+               "CODEX_SESSION_ID", "CODEX_THREAD_ID",
+               # GROK_* names that reconfigure or redirect a Grok subprocess:
+               # inert to the named peers, but a peer's shell tool could pass
+               # them to a nested grok. Harmless operator pins still inherit.
+               "GROK_SANDBOX", "GROK_HOME", "GROK_AUTH_PATH", "GROK_CONFIG",
+               "GROK_CONFIG_DIR", "GROK_MANAGED_CONFIG_DIR", "GROK_AGENT_PROFILE",
+               "GROK_MODEL", "GROK_REASONING_EFFORT", "GROK_TOOLS"}
 
 
 def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
+    prefixes = SCRUB_PREFIXES + SCRUB_KIND.get(spec.kind, ())
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_NAMES
+           if not k.startswith(prefixes) and k not in SCRUB_NAMES
            and not k.endswith("_API_KEY")}
     # The inherited PWD names the orchestrator's directory, and opencode roots
     # its file tools and shell there instead of at its real cwd.
@@ -78,7 +87,7 @@ def grok_startup_check(work: Path) -> str | None:
     and --help. Never expose stdout from other commands as a diagnostic.
     """
     spec = adapters.Launch(["grok", *adapters.GROK_SANDBOX_ARGS, "--cwd", str(work),
-                            "version", "--json"], None, env_set=adapters.GROK_ENV)
+                            "version", "--json"], None, env_set=adapters.GROK_ENV, kind="grok")
     try:
         out = subprocess.run(spec.argv, cwd=work, env=lane_env(spec, work),
                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)

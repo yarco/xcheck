@@ -34,12 +34,16 @@ if kind == "codex" and "--help" in argv:
     print("--stdio")
     sys.exit(0)
 
-if kind == "grok" and mode == "socket-symlink" and argv[argv.index("--sandbox") + 1] != "off":
+if kind == "grok" and mode == "socket-symlink" and "--sandbox" in argv and argv[argv.index("--sandbox") + 1] != "off":
     sys.stderr.write((Path(__file__).resolve().parent.parent / "fixtures/grok-sandbox-refusal.stderr").read_text())
     sys.exit(1)
 if kind == "grok" and argv[-2:] == ["version", "--json"]:
     assert argv[argv.index("--sandbox") + 1] == "off"
     print(json.dumps({"currentVersion": "fixture-version", "channel": "stable"}))
+    sys.exit(0)
+if kind == "grok" and "--help" in argv:
+    print("--model --reasoning-effort --always-approve --agent-profile --no-leader --debug-file stdio"
+          if argv[:1] == ["agent"] else "--sandbox --cwd")
     sys.exit(0)
 
 
@@ -129,12 +133,15 @@ if kind == "acpx":
     emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "agent disconnected"}})
     sys.exit(1)
 
-# Native ACP servers; both join pool custody, and Agy also runs in Seatbelt.
+# Native ACP servers; all join pool custody, and Agy also runs in Seatbelt.
 if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in argv and "--help" not in argv)
+        or (kind == "grok" and "stdio" in argv)
         or (kind == "codex" and os.environ.get("XCHECK_CODEX_RUN") and "app-server" in argv)):
     configured = {}
     if kind == "devin":
         selected = argv[argv.index("--model") + 1]
+    elif kind == "grok":
+        selected = argv[argv.index("-m") + 1]
     if os.environ.get("FAKE_ENV_DUMP"):
         path = Path("env.agy.json") if kind == "agy_acp_server.par" else Path(os.environ["FAKE_ENV_DUMP"]).with_suffix(f".{kind}.json")
         path.write_text(json.dumps(dict(os.environ)))  # Agy's Seatbelt: only the workspace
@@ -153,8 +160,8 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
                     {"id": "model", "type": "select", "currentValue": offered[0], "options": [{"value": m} for m in offered]}]}})
                 continue
             emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "models": {
-                "currentModelId": selected if kind == "devin" else "gemini-3.8-flash-high", "availableModels":
-                    [{"modelId": selected}] if kind == "devin" else [
+                "currentModelId": selected if kind in ("devin", "grok") else "gemini-3.8-flash-high", "availableModels":
+                    [{"modelId": selected}] if kind in ("devin", "grok") else [
                     {"modelId": "gemini-3.8-flash-high"}, {"modelId": "gemini-pro-agent"}]}}})
         elif msg.get("method") == "session/set_config_option":
             configured[msg["params"]["configId"]] = msg["params"]["value"]
@@ -183,6 +190,9 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
                 Path("probe.json").write_text(json.dumps({
                     "holds_busy": held, "wrote_outside": wrote_outside,
                     "gemini_home": os.environ.get("GEMINI_HOME"),
+                    "grok_home": os.environ.get("GROK_HOME"),
+                    "grok_auth_path": os.environ.get("GROK_AUTH_PATH"),
+                    "grok_env": sorted(k for k in os.environ if k.startswith("GROK_")),
                     "devin_mode": os.environ.get("DEVIN_PERMISSION_MODE"),
                     "devin_fallback": os.environ.get("DEVIN_REFUSAL_FALLBACK"),
                     "devin_sandbox": os.environ.get("DEVIN_SANDBOX"),
@@ -204,7 +214,9 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
             if mode == "buffered-work" or (mode == "mixed-duration" and kind != "codex"):
                 time.sleep(float(os.environ.get("FAKE_DELAY", "7")))
             if mode in ("error", "error-retry", "rate-limit-retry", "error-no-newline"):
-                message = UPSTREAM_LIMIT if kind == "opencode" else "usage limit reached" if kind == "codex" else "Individual quota reached"
+                message = (UPSTREAM_LIMIT if kind == "opencode" else "usage limit reached" if kind == "codex"
+                           else "HTTP 402 Grok Build usage balance exhausted" if kind == "grok"
+                           else "Individual quota reached")
                 emit({"jsonrpc": "2.0", "id": pid, "error": {"code": -32603, "message": message,
                       "data": {"service": "session", "errorName": "APIError"}}})
                 continue

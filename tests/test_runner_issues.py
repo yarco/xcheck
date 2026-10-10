@@ -44,10 +44,11 @@ class ReportStartup(unittest.TestCase):
         self.assertNotIn('PRIVATE CONFIG SENTINEL', problem)
 
     def test_native_startup_success_scrubs_keys_and_inherited_sandbox(self):
-        with patch.dict(os.environ, {'GROK_SANDBOX': 'off', 'TEST_API_KEY': 'SECRET', 'CLAUDECODE': '1'}):
+        with patch.dict(os.environ, {'GROK_SANDBOX': 'strict', 'GROK_EXTRA': 'x', 'TEST_API_KEY': 'SECRET', 'CLAUDECODE': '1'}):
             problem, kwargs = self.probe(subprocess.CompletedProcess([], 0, '{"currentVersion":"1.0.46"}', ''))
         self.assertIsNone(problem)
-        self.assertNotIn('GROK_SANDBOX', kwargs['env'])
+        self.assertNotIn('GROK_SANDBOX', kwargs['env'])  # the inherited value is scrubbed; argv carries the pin
+        self.assertNotIn('GROK_EXTRA', kwargs['env'])
         self.assertNotIn('TEST_API_KEY', kwargs['env'])
         self.assertNotIn('CLAUDECODE', kwargs['env'])
         self.assertEqual(kwargs['env']['GROK_DISABLE_AUTOUPDATER'], '1')
@@ -107,7 +108,7 @@ class ReportStartup(unittest.TestCase):
                                     (support.FIX / 'grok-sandbox-refusal.stderr').read_text()))
         self.assertEqual(code, 1)
         self.assertIn('endpoint is a symlink', text)
-        self.assertIn('grok: 13 flags present', text)
+        self.assertIn('grok: 2 flags present', text)
 
     def test_doctor_accepts_native_startup_and_current_pins(self):
         code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"fixture"}', ''))

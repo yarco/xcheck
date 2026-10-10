@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -109,6 +110,7 @@ class Launch:
     argv: list[str]
     stdin: Path | None  # file to feed on stdin, or None for /dev/null
     env_set: dict[str, str] = field(default_factory=dict)
+    kind: str = ""  # lane kind, for kind-scoped env scrubbing
 
 
 def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: bool) -> Launch:
@@ -130,17 +132,7 @@ def launch(lane: Lane, work: Path, message: Path, final: Path, log: Path, web: b
         ]
         return Launch(argv, message, env_set=CLAUDE_ENV)
     if lane.kind == "grok":
-        tools = "read_file,grep,list_dir,run_terminal_cmd,web_search,web_fetch" if web else "read_file,grep,list_dir,run_terminal_cmd"
-        argv = [
-            "grok", "--prompt-file", str(message), "-m", lane.model,
-            "--reasoning-effort", lane.effort, "--cwd", str(work),
-            "--tools", tools, "--no-subagents", "--no-plan",
-            *GROK_SANDBOX_ARGS, "--always-approve", "--debug-file", str(log),
-            "--output-format", "streaming-json",
-        ]
-        if not web:
-            argv.append("--disable-web-search")
-        return Launch(argv, None, env_set=GROK_ENV)
+        return _grok_launch(lane, work, message, log, web)
     if lane.kind == "agy":
         return _agy_launch(lane, work, message, log, web)
     if lane.kind == "devin":
@@ -268,12 +260,195 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
     return env
 
 
-# Grok reviews use the operator-authorized unrestricted profile: read-only
-# refuses OrbStack's symlinked Docker socket. --always-approve is the native
-# automatic approval flag; there is no documented --yolo. Review-only scope
-# is an instruction. Memory and the updater remain off.
-GROK_ENV = {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"}
+# Grok reviews run Grok's documented native ACP server (`grok agent … stdio`)
+# through acpx, in the same hold custody as the other ACP lanes:
+#   acpx --no-terminal --no-fs        transport only; no client-side fs or shell
+#   xcheck hold                     re-joins this run's pool (acpx passes only stdio)
+#   grok agent stdio                the vendor server; --always-approve resolves
+#                                   permissions in-agent, as the stream showed
+# The lane gets its own GROK_HOME beside the harness log: the operator's
+# config.toml registers paid-capable and credential-bearing MCP servers
+# (keenable and parallel-search carry auth headers) and session/new mcpServers
+# only adds to that set, so inheriting it would leak both. The lane config
+# pins the review contract and copies only the keyless MCP entries verbatim.
+# Auth stays in the operator's real ~/.grok/auth.json via GROK_AUTH_PATH, so
+# subscription custody and token refresh live in exactly one file; nothing
+# secret is copied into the run. Sessions persist under the lane home, which
+# keeps them out of the operator's session registry too.
+# The unrestricted sandbox is the operator-authorized policy: read-only
+# refuses OrbStack's symlinked Docker socket. Write/MCP limits are an
+# instruction, not an OS boundary — the same honest claim the native path made.
+# Kept current by the operator's own login; XCHECK_GROK_HOME points tests at a fake.
+GROK_DIR = Path(os.environ.get("XCHECK_GROK_HOME") or Path.home() / ".grok")
+GROK_AUTH_FILE = GROK_DIR / "auth.json"
+GROK_CONFIG_FILE = GROK_DIR / "config.toml"
+GROK_REQUIREMENTS = GROK_DIR / "requirements.toml"
+# Operator-config MCP names a review may use: local commands or keyless HTTP
+# endpoints. perplexity bills Pro searches, composio connects arbitrary apps,
+# and keenable/parallel-search carry credentials — all excluded.
+GROK_MCP_ALLOWED = ("qmd", "semble", "deepwiki")
+GROK_REVIEW_TOOLS = ("read_file", "grep", "list_dir", "run_terminal_cmd")
+GROK_WEB_TOOLS = ("web_search", "web_fetch")
+GROK_ENV = {
+    # A subscription session, never a paid API-key fallback (XAI_API_KEY is
+    # scrubbed anyway; this refuses to use it if one ever leaked in).
+    "GROK_DISABLE_API_KEY_AUTH": "1",
+    "GROK_DISABLE_AUTOUPDATER": "1", "GROK_TELEMETRY_ENABLED": "0",
+    # No delegation, memory, or side sampling. Grok still makes exactly one
+    # title-generation call after the first prompt — the same one the headless
+    # path made; every other background sampler is off (see
+    # integrations/grok-acp/README.md).
+    "GROK_SUBAGENTS": "0", "GROK_MEMORY": "0",
+    "GROK_TITLE_REFRESH": "0", "GROK_TURN_SUMMARY": "0", "GROK_SESSION_RECAP": "0",
+    "GROK_SESSION_SEARCH": "0",
+    # Imported vendor integrations can carry MCP credentials, executable
+    # hooks and orchestrator instructions; the lane config is the only source.
+    **{f"GROK_{v}_{k}_ENABLED": "0" for v in ("CLAUDE", "CURSOR", "CODEX")
+       for k in ("MCPS", "HOOKS", "RULES", "SKILLS", "AGENTS", "SESSIONS")},
+    "GROK_MANAGED_MCPS_ENABLED": "0", "GROK_MANAGED_MCP_GATEWAY_TOOLS_ENABLED": "0",
+    "GROK_OFFICIAL_MARKETPLACE_AUTO_REGISTER": "0",
+}
 GROK_SANDBOX_ARGS = ("--sandbox", "off")
+
+
+def _toml_key(k: str) -> str:
+    return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
+
+
+def _toml_value(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_value(x)}" for k, x in v.items()) + " }"
+    raise TypeError(f"no TOML rendering for {type(v).__name__}")
+
+
+def _grok_mcp() -> dict[str, dict]:
+    """Keyless MCP entries copied verbatim from the operator's config.
+
+    An allowlisted name is dropped if the entry gained any credential channel;
+    a lane must never inherit a key it was not designed to hold."""
+    try:
+        cfg = tomllib.loads(GROK_CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    servers = {}
+    for name in GROK_MCP_ALLOWED:
+        s = (cfg.get("mcp_servers") or {}).get(name)
+        if not isinstance(s, dict):
+            continue
+        if s.get("headers") or s.get("env") or s.get("env_vars"):
+            continue
+        servers[name] = s
+    return servers
+
+
+def _grok_disabled_plugins(home: Path | None = None) -> list[str]:
+    """Names of plugins the operator enabled in vendor plugin stores.
+
+    Grok scans `~/.claude/plugins` (and sibling vendor stores) on every
+    launch, honors the vendor's own enabled-state file, and loads the
+    plugins' executable hooks; there is no supported global plugin kill —
+    `plugins.disabled` takes explicit names/IDs only, `["*"]` does not
+    match. Each store's `installed_plugins.json` keys are `name@store`; the
+    bare name is an accepted `plugins.disabled` entry (verified: loading
+    stops, discovery still counts the plugin)."""
+    names = set()
+    for vendor in ("claude", "cursor", "codex"):
+        f = (home or Path.home()) / f".{vendor}/plugins/installed_plugins.json"
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        names.update(k.split("@", 1)[0] for k in (data.get("plugins") or {}) if isinstance(k, str))
+    return sorted(names)
+
+
+def _grok_home(home: Path, lane: Lane, web: bool) -> Path:
+    """The lane's GROK_HOME: its own config, sessions, caches and plugins dir."""
+    home.mkdir(parents=True, exist_ok=True)
+    if GROK_REQUIREMENTS.is_file():
+        # The enterprise pin layer must survive isolation, not be sidestepped.
+        shutil.copy2(GROK_REQUIREMENTS, home / "requirements.toml")
+    lines = [
+        "# Written by xcheck for one Grok review lane. See integrations/grok-acp/README.md.",
+        # Root-level key (struct Config), not a [features] entry: it must sit
+        # before the first table header or TOML would bind it to the last one.
+        f"disable_web_search = {_toml_value(not web)}", "",
+        "[cli]", "auto_update = false", "use_leader = false", "",
+        "[features]", "telemetry = false", "title_refresh = false", "turn_summary = false",
+        "session_recap = false", "session_search = false", f"web_fetch = {_toml_value(web)}", "",
+        "[models]", f"default = {_toml_value(lane.model)}",
+        f"default_reasoning_effort = {_toml_value(lane.effort)}", "",
+        "[ui]", 'permission_mode = "always-approve"', "",
+        # The authorized unrestricted policy. The generated file is the pin:
+        # GROK_SANDBOX itself is scrubbed globally, so no env value can
+        # override it, and env cannot carry it anyway (see SCRUB_NAMES).
+        "[sandbox]", 'profile = "off"', "",
+        "[harness]", "disable_workspace_teleport = true", "",
+        "[subagents]", "enabled = false", "",
+        "[memory]", "enabled = false", "",
+        # Vendor plugin hooks execute real commands in-agent; disable every
+        # installed plugin by name (no wildcard exists). `enabled` stays
+        # unset: project plugins already default off.
+        "[plugins]", f"disabled = {_toml_value(_grok_disabled_plugins())}", "",
+        # No operator marketplace sources; the official one is env-gated.
+        "[marketplace]", "sources = []",
+    ]
+    for name, server in _grok_mcp().items():
+        lines += ["", f"[mcp_servers.{_toml_key(name)}]",
+                  *(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in server.items())]
+    (home / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return home
+
+
+def _grok_profile(path: Path, web: bool) -> Path:
+    """The reviewed agent profile: an exact tool allowlist, nothing more.
+
+    `tools` are Grok's internal tool ids (the headless --tools names); the
+    doc's friendlier names fail open to the full toolset, so this list is
+    asserted by tests and verified in the agent's debug log."""
+    tools = ", ".join((*GROK_REVIEW_TOOLS, *(GROK_WEB_TOOLS if web else ())))
+    path.write_text("---\n"
+                    "name: xcheck-review\n"
+                    "description: Review-only agent profile for multi-model cross-check lanes.\n"
+                    "prompt_mode: full\n"
+                    "agents_md: true\n"
+                    f"tools: [{tools}]\n"
+                    "---\n\n"
+                    "You are one reviewer in a multi-model code review. Follow the packet instructions exactly.\n",
+                    encoding="utf-8")
+    return path
+
+
+def _grok_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    from .files import ROOT
+    d = log.parent
+    home = _grok_home(d / "grok-home", lane, web)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", str(d.parent.parent), "--log", str(log), "--",
+             shutil.which("grok") or "grok", "agent",
+             "--always-approve", "--no-leader", "-m", lane.model,
+             "--reasoning-effort", lane.effort,
+             "--agent-profile", str(_grok_profile(d / "grok-profile.md", web)),
+             "--debug-file", str(d / "grok-agent.log"), "stdio"]
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), "--model", lane.model,
+            # --always-approve resolves tool permission in-agent; --approve-all
+            # is the acpx-side equivalent for any request that still arrives.
+            "--approve-all", "--auth-policy", "skip", "--no-terminal", "--no-fs",
+            "--prompt-retries", "0", "--format", "json", "exec",
+            "--config-option", f"reasoning_effort={lane.effort}", "--file", str(message)]
+    return Launch(argv, None, env_set={**GROK_ENV, "GROK_HOME": str(home),
+                                       "GROK_AUTH_PATH": str(GROK_AUTH_FILE), "XCHECK_ROOT": str(ROOT)},
+                  kind="grok")
+
 
 # Native accept-edits keeps the app path's workspace-edit permissions. Rules
 # approve shell/MCP/fetch; acpx denies any remaining permission request. The
@@ -472,6 +647,13 @@ def unavailable(lane: Lane) -> str | None:
         return codex_acp_problem()
     if lane.kind in ("devin", "opencode"):
         return None if shutil.which(lane.kind) else f"startup-unavailable: {lane.kind} is not on PATH"
+    if lane.kind == "grok":
+        if not shutil.which("grok"):
+            return "startup-unavailable: grok is not on PATH"
+        if not GROK_AUTH_FILE.is_file():
+            return ("auth-required: no Grok subscription login at ~/.grok/auth.json; "
+                    "run `grok` once to sign in")
+        return None
     login = subprocess.run(AGY_LOGIN, capture_output=True).returncode
     if login == 36:
         return "auth-required: the login keychain is locked; run keychain-unlock-gui at the screen"
@@ -481,7 +663,7 @@ def unavailable(lane: Lane) -> str | None:
                 "opening the link it prints")
     return None
 
-STREAM_ONLY = {"codex", "agy", "devin", "opencode"}
+STREAM_ONLY = {"codex", "agy", "devin", "opencode", "grok"}
 
 
 def view_for(kind: str, view: str) -> str:
@@ -508,16 +690,6 @@ def tui(lane: Lane, work: Path, message: str, log: Path, web: bool) -> Launch:
             "--model", lane.model, "--effort", lane.effort, "--debug-file", str(log), message,
         ]
         return Launch(argv, None, env_set=CLAUDE_ENV)
-    if lane.kind == "grok":
-        # The app ignores --tools (user-guide 14). Review-only file/action
-        # limits are instructions; Bash and MCP run without prompts.
-        argv = [
-            "grok", "-m", lane.model, "--reasoning-effort", lane.effort, "--cwd", str(work),
-            "--no-subagents", "--no-plan",
-            *GROK_SANDBOX_ARGS, "--always-approve", "--debug-file", str(log),
-            *([] if web else ["--disable-web-search"]), message,
-        ]
-        return Launch(argv, None, env_set=GROK_ENV)
     raise ValueError(f"unknown kind {lane.kind}")
 
 
@@ -529,10 +701,10 @@ HELP_COMMANDS = {
                "--no-session-persistence", "--model", "--effort", "--output-format", "--verbose",
                "--permission-prompts", "--include-partial-messages", "--debug-file",
                "--strict-mcp-config", "--disallowedTools"]),
-    "grok": (["grok", "--help"], ["--prompt-file", "--model", "--reasoning-effort", "--cwd",
-             "--tools", "--no-subagents", "--no-plan", "--sandbox",
-             "--always-approve", "--output-format", "streaming-json", "--disable-web-search",
-             "--debug-file"]),
+    # grok itself only serves the startup probe (version --json); lanes run the agent.
+    "grok": (["grok", "--help"], ["--sandbox", "--cwd"]),
+    "grok agent": (["grok", "agent", "--help"], ["--model", "--reasoning-effort",
+             "--always-approve", "--agent-profile", "--no-leader", "--debug-file"]),
     # agy itself only serves the capacity meter (`agy -p /usage`); lanes run acpx.
     "agy": (["agy", "--help"], ["--output-format", "--print-timeout"]),
     "acpx": (["acpx", "--help"], ["--agent", "--cwd", "--model", "--approve-all", "--no-terminal",
@@ -557,7 +729,6 @@ class Reader:
     text: str = ""
     error: str | None = None
     _buf: list[str] = field(default_factory=list)
-    _last: str = ""  # grok: the last complete assistant message
     completed: bool = False
     diagnostics: list[dict] = field(default_factory=list)
     _mcp_calls: dict[str, dict] = field(default_factory=dict)
@@ -582,9 +753,7 @@ class Reader:
         return (self._acp if self.kind in STREAM_ONLY else getattr(self, f"_{self.kind}"))(obj)
 
     def finish(self, final_file: Path) -> None:
-        if self.kind == "grok":
-            self.text = "".join(self._buf) or self._last
-        elif self.kind in STREAM_ONLY:
+        if self.kind in STREAM_ONLY:
             self.text = "".join(self._buf)
             head = self.text.lstrip()
             # The server reports an MCP server that will not start as the whole
@@ -629,51 +798,33 @@ class Reader:
             return "\n".join(out) or None
         return None
 
-    # -- grok: ACP updates. A `usage` event closes one model message; the answer
-    # is the last message after the last tool call, so narration from an
-    # earlier message is never glued onto the answer's heading.
-    def _grok(self, o: dict) -> str | None:
-        t = o.get("type")
-        if t == "text":
-            self._buf.append(o.get("data", ""))
-            return None
-        if t == "usage":
-            if self._buf:
-                self._last = "".join(self._buf)
-                self._buf.clear()
-            return None
-        if t == "tool_call":
-            self._buf.clear()
-            self._last = ""
-            return f"> {o.get('toolName')} {_clip(json.dumps(o.get('rawInput')), 100)}"
-        if t == "error":
-            self.error = o.get("message")
-            return f"! {self.error}"
-        if t == "end":
-            reason = o.get("stopReason")
-            if reason == "end_turn":
-                self.completed = True
-            else:
-                self.error = f"Grok ended without completing the review: {reason or 'missing stopReason'}"
-            return f"· end {reason}"
-        return None
-
     # -- ACP lanes: acpx `--format json` is the raw ACP JSON-RPC stream in both
-    # directions. Only the response to acpx's own session/prompt request ends
-    # the turn; the answer is the text after the last tool call. An error
-    # response (acpx's own carry id null) is kept as the failure reason and
-    # decides only if no completion follows, since agent-to-client requests
-    # share the id space.
+    # directions. Request ids are correlated both ways: only the response to
+    # acpx's own session/prompt request ends the turn, and an RPC error
+    # answering it is terminal. An error carried by acpx itself (id null) is
+    # kept as the failure reason and decides only if no completion follows.
+    # The answer is the text after the last tool call.
     def _acp(self, o: dict) -> str | None:
-        if o.get("method") == "session/prompt" and "id" in o:
-            self._prompt_id = o["id"]
-            return None
-        if self.kind == "codex":
-            if "method" in o and "id" in o:
+        # Requests in both directions share one id space, and an agent request
+        # may reuse a client id (a real capture had session/request_permission
+        # reuse the initialize id). Correlate before judging: every request
+        # other than the client's own session/prompt is tracked, and a
+        # response to a tracked request is consumed here — never read as the
+        # prompt's terminal reply.
+        if "method" in o and "id" in o:
+            if o.get("method") == "session/prompt":
+                self._prompt_id = o["id"]
+            else:
                 self._client_requests.add(o["id"])
-            elif "id" in o and o["id"] in self._client_requests:
-                self._client_requests.remove(o["id"])
-                return None
+            return None
+        if o.get("id") in self._client_requests:
+            self._client_requests.discard(o["id"])
+            return None
+        if (self.kind == "grok" and o.get("method") == "_x.ai/mcp/server_status"
+                and (o.get("params") or {}).get("status") not in (None, "ready", "initialized")):
+            p = o["params"]
+            self.diagnostics.append(dict(kind="mcp_startup", server=p.get("name"),
+                                         status=p.get("reason") or p.get("status")))
         update = (o.get("params") or {}).get("update") or {}
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
@@ -693,13 +844,14 @@ class Reader:
             return f"· end {reason}"
         error = o.get("error")
         if isinstance(error, dict) and o.get("id") in (None, self._prompt_id):
-            detail = error.get("data") if self.kind == "codex" else None
+            detail = error.get("data")
             self._failure = _clip(str((detail.get("message") if isinstance(detail, dict) else detail)
                                      or error.get("message") or error), 300)
-            if self.kind == "codex" and self._prompt_id is not None and o.get("id") == self._prompt_id:
-                self.error = self._failure
-            if (self.kind == "opencode" and self._prompt_id is not None
-                    and o.get("id") == self._prompt_id and (error.get("data") or {}).get("service") == "session"):
+            # An error answering the client's own session/prompt is terminal:
+            # no result can legally follow it. An id-null error is acpx's own
+            # carry (agent disconnected, --model refused) and is kept as the
+            # failure reason only if no completion follows.
+            if self._prompt_id is not None and o.get("id") == self._prompt_id:
                 self.error = self._failure
             return f"! {self._failure}"
         return None

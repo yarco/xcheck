@@ -96,7 +96,7 @@ class Readers(unittest.TestCase):
 
 
     def test_grok_text_after_last_tool_call(self):
-        r = read_fixture("grok", "grok-ok.jsonl")
+        r = read_fixture("grok", "grok-acp-ok.jsonl")
         self.assertTrue(r.text.strip().endswith("RESULT_COMPLETE"), r.text)
         self.assertNotIn("I'll read", r.text)
 
@@ -104,7 +104,7 @@ class Readers(unittest.TestCase):
         claude = read_fixture("claude", "claude-error.jsonl")
         self.assertIn("issue with the selected model", claude.error)
         self.assertEqual(claude.text, "")  # the error message is not an answer
-        self.assertIn("unknown model id", read_fixture("grok", "grok-error.jsonl").error)
+        self.assertIn("unknown model id", read_fixture("grok", "grok-acp-error.jsonl").error)
 
 
 
@@ -114,20 +114,48 @@ class Readers(unittest.TestCase):
 class GrokReader(unittest.TestCase):
     def test_narration_from_an_earlier_message_is_not_glued_to_the_answer(self):
         r = adapters.Reader("grok")
-        for o in ({"type": "text", "data": "Now I will write the review."}, {"type": "usage"},
-                  {"type": "text", "data": "### 1) VERDICT\nok"}, {"type": "usage"},
-                  {"type": "end", "stopReason": "end_turn"}):
-            r.feed(o)
+        r.feed({"id": 3, "method": "session/prompt"})
+        r.feed({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Now I will write the review."}}}})
+        r.feed({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "### 1) VERDICT\nok"}}}})
+        r.feed({"id": 3, "result": {"stopReason": "end_turn"}})
         r.finish(Path("/nonexistent"))
-        self.assertEqual(r.text, "### 1) VERDICT\nok")
+        self.assertEqual(r.text, "Now I will write the review.### 1) VERDICT\nok")
 
     def test_narration_before_a_tool_call_is_not_an_answer(self):
         r = adapters.Reader("grok")
-        for o in ({"type": "text", "data": "Reading files."}, {"type": "usage"},
-                  {"type": "tool_call", "toolName": "read_file"}, {"type": "end"}):
-            r.feed(o)
+        r.feed({"id": 3, "method": "session/prompt"})
+        r.feed({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Reading files."}}}})
+        r.feed({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call", "title": "read_file"}}})
+        r.feed({"id": 3, "result": {"stopReason": "end_turn"}})
         r.finish(Path("/nonexistent"))
         self.assertEqual(r.text, "")
+
+    def test_a_native_turn_error_is_the_failure_reason(self):
+        r = adapters.Reader("grok")
+        r.feed({"id": 3, "method": "session/prompt"})
+        r.feed({"id": 3, "error": {"code": -32603, "message": "HTTP 402 Grok Build usage balance exhausted"}})
+        r.finish(Path("/nonexistent"))
+        self.assertIn("402", r.error)
+        self.assertFalse(r.completed)
+
+    def test_a_non_end_turn_stop_is_a_failure(self):
+        r = adapters.Reader("grok")
+        r.feed({"id": 3, "method": "session/prompt"})
+        r.feed({"id": 3, "result": {"stopReason": "refusal"}})
+        self.assertIn("refusal", r.error)
+
+    def test_mcp_server_status_becomes_a_startup_diagnostic(self):
+        r = adapters.Reader("grok")
+        r.feed({"method": "_x.ai/mcp/server_status", "params": {"sessionId": "s", "name": "qmd",
+                "status": "failed", "reason": "connection closed"}})
+        r.feed({"method": "_x.ai/mcp/server_status", "params": {"sessionId": "s", "name": "deepwiki",
+                "status": "ready", "reason": "initialized"}})
+        self.assertEqual([n for n in r.notes() if "qmd" in n],
+                         ["MCP startup qmd: connection closed"])
 
 
 class OpencodeLane(unittest.TestCase):
@@ -263,31 +291,137 @@ class DevinLane(unittest.TestCase):
 
 
 class GrokLane(unittest.TestCase):
-    def test_authorized_unrestricted_profile_and_env(self):
-        spec = adapters.launch(Lane("grok", "grok-4.7", "xhigh"), Path("/w"), Path("/m"), Path("/f"), Path("/l"), web=False)
-        i = spec.argv.index("--sandbox")
-        self.assertEqual(spec.argv[i + 1], "off")  # preserves OrbStack's Docker integration
-        self.assertEqual(spec.env_set, {"GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"})
-        self.assertNotIn("--no-memory", spec.argv)
-        self.assertNotIn("MCPTool(*)", spec.argv)
+    def launch(self, web=True, config=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        with patch.object(adapters, "GROK_CONFIG_FILE", config or d / "no-operator-config.toml"):
+            spec = adapters.launch(Lane("grok", "grok-4.7", "xhigh"), d / "work", d / "msg",
+                                   d / "final", d / "lane" / "harness.log", web)
+        return spec, d
 
-    def test_bash_is_available_in_both_views_without_manual_approval(self):
-        lane = Lane("grok", "grok-4.7", "low")
-        stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
-        app = adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
-        self.assertIn("run_terminal_cmd", stream[stream.index("--tools") + 1].split(","))
-        self.assertNotIn("Bash", app)
-        self.assertIn("--always-approve", stream)
-        self.assertIn("--always-approve", app)
-        for argv in (stream, app):
-            self.assertEqual(argv[argv.index("--sandbox") + 1], "off")
-            self.assertNotIn("--yolo", argv)
-        self.assertNotIn("MCPTool(*)", stream)
-        self.assertNotIn("MCPTool(*)", app)
+    def test_authorized_unrestricted_profile_and_env(self):
+        spec, d = self.launch(web=False)
+        agent = spec.argv[spec.argv.index("--agent") + 1]
+        self.assertIn(" hold --pool grok ", agent)
+        self.assertIn("grok agent ", agent)
+        self.assertIn("--always-approve", agent)
+        self.assertIn("--no-leader", agent)
+        self.assertIn("-m grok-4.7", agent)
+        self.assertIn("--reasoning-effort xhigh", agent)
+        self.assertIn("stdio", agent)
+        self.assertNotIn("--sandbox", spec.argv)
+        self.assertNotIn("--yolo", spec.argv)
+        self.assertNotIn("MCPTool(*)", spec.argv)
+        env = spec.env_set
+        # The sandbox policy is the generated [sandbox] profile = "off": env
+        # cannot carry GROK_SANDBOX (SCRUB_NAMES strips the key for every peer).
+        self.assertNotIn("GROK_SANDBOX", env)
+        self.assertEqual(env["GROK_DISABLE_API_KEY_AUTH"], "1")
+        for k in ("GROK_MEMORY", "GROK_SUBAGENTS", "GROK_TITLE_REFRESH",
+                  "GROK_TURN_SUMMARY", "GROK_SESSION_RECAP", "GROK_SESSION_SEARCH"):
+            self.assertEqual(env[k], "0", k)
+        self.assertEqual(env["GROK_HOME"], str(d / "lane" / "grok-home"))
+        self.assertEqual(env["GROK_AUTH_PATH"], str(adapters.GROK_AUTH_FILE))
+        self.assertEqual(env["GROK_OFFICIAL_MARKETPLACE_AUTO_REGISTER"], "0")
+
+    def test_installed_vendor_plugins_are_name_disabled(self):
+        with patch.object(adapters, "_grok_disabled_plugins",
+                          return_value=["agents-md", "codex", "warp"]) as fn:
+            _, d = self.launch()
+        fn.assert_called_once_with()
+        cfg = tomllib.loads((d / "lane" / "grok-home" / "config.toml").read_text())
+        self.assertEqual(cfg["plugins"]["disabled"], ["agents-md", "codex", "warp"])
+        self.assertEqual(cfg["marketplace"]["sources"], [])
+
+    def test_disabled_plugin_names_come_from_vendor_stores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            store = home / ".claude/plugins"
+            store.mkdir(parents=True)
+            (store / "installed_plugins.json").write_text(
+                '{"version": 2, "plugins": {"warp@claude-code-warp": [{}],'
+                ' "agents-md@agents-store": [{}], "noname": [{}]}}')
+            bad = home / ".codex/plugins"
+            bad.mkdir(parents=True)
+            (bad / "installed_plugins.json").write_text("not json")
+            self.assertEqual(adapters._grok_disabled_plugins(home),
+                             ["agents-md", "noname", "warp"])
+
+    def test_acpx_carries_the_model_and_effort_pins(self):
+        spec, _ = self.launch()
+        i = spec.argv.index("--model")
+        self.assertEqual(spec.argv[i + 1], "grok-4.7")
+        self.assertIn("--config-option", spec.argv)
+        i = spec.argv.index("--config-option")
+        self.assertEqual(spec.argv[i + 1], "reasoning_effort=xhigh")
+        for flag in ("--approve-all", "--no-terminal", "--no-fs"):
+            self.assertIn(flag, spec.argv)
+
+    def test_profile_uses_canonical_tool_ids(self):
+        _, d = self.launch()
+        profile = (d / "lane" / "grok-profile.md").read_text()
+        self.assertIn("tools: [read_file, grep, list_dir, run_terminal_cmd, web_search, web_fetch]",
+                      profile)
+        self.assertIn("name: xcheck-review", profile)
+
+    def test_web_off_drops_the_web_tools_and_closes_the_feature(self):
+        spec, d = self.launch(web=False)
+        profile = (d / "lane" / "grok-profile.md").read_text()
+        self.assertIn("tools: [read_file, grep, list_dir, run_terminal_cmd]", profile)
+        self.assertNotIn("web_search", profile)
+        cfg = tomllib.loads((d / "lane" / "grok-home" / "config.toml").read_text())
+        # Root-level Config key: under a table header it would silently bind
+        # to that table and the web_search tool would stay enabled.
+        self.assertIs(cfg["disable_web_search"], True)
+        self.assertNotIn("disable_web_search", cfg["memory"])
+        self.assertIs(cfg["features"]["web_fetch"], False)
+        self.assertEqual(cfg["sandbox"]["profile"], "off")  # the authorized sandbox policy
+        self.assertIs(cfg["subagents"]["enabled"], False)
+        self.assertIs(cfg["memory"]["enabled"], False)
+        self.assertEqual(cfg["models"]["default"], "grok-4.7")
+        self.assertEqual(cfg["models"]["default_reasoning_effort"], "xhigh")
+        self.assertIsInstance(cfg["plugins"]["disabled"], list)
+        self.assertEqual(cfg["marketplace"]["sources"], [])
+
+    def test_web_on_keeps_the_web_surface(self):
+        _, d = self.launch(web=True)
+        cfg = tomllib.loads((d / "lane" / "grok-home" / "config.toml").read_text())
+        self.assertIs(cfg["disable_web_search"], False)
+        self.assertIs(cfg["features"]["web_fetch"], True)
+
+    def test_lane_config_keeps_only_keyless_operator_mcps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text('[mcp_servers.qmd]\nurl = "http://127.0.0.1:8181/mcp"\n'
+                           '[mcp_servers.semble]\ncommand = "uvx"\nargs = ["semble"]\n'
+                           '[mcp_servers.keenable]\nurl = "https://api.keenable.ai/mcp"\n'
+                           '[mcp_servers.keenable.headers]\n"X-API-Key" = "k"\n'
+                           '[mcp_servers.perplexity]\ncommand = "pwm-mcp"\n', encoding="utf-8")
+            _, d = self.launch(config=cfg)
+        lane_cfg = tomllib.loads((d / "lane" / "grok-home" / "config.toml").read_text())
+        self.assertEqual(set(lane_cfg["mcp_servers"]), {"qmd", "semble"})
+        self.assertEqual(lane_cfg["mcp_servers"]["qmd"]["url"], "http://127.0.0.1:8181/mcp")
+        self.assertEqual(lane_cfg["mcp_servers"]["semble"]["command"], "uvx")
+
+    def test_enterprise_pins_survive_the_isolated_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pins = Path(tmp) / "requirements.toml"
+            pins.write_text("minimum_version = \"1.0.0\"\n", encoding="utf-8")
+            with patch.object(adapters, "GROK_REQUIREMENTS", pins):
+                _, d = self.launch()
+        self.assertEqual((d / "lane" / "grok-home" / "requirements.toml").read_text(),
+                         "minimum_version = \"1.0.0\"\n")
+
+    def test_stream_only_placement(self):
+        self.assertIn("grok", adapters.STREAM_ONLY)
+        self.assertEqual(adapters.view_for("grok", "tui"), "stream")
+        with self.assertRaises(ValueError):
+            adapters.tui(Lane("grok", "grok-4.7", "xhigh"), Path("/w"), "p", Path("/l"), True)
 
     def test_message_allows_workspace_scratch_without_widening_other_peers(self):
         from xcheck.run import _message
-        grok = _message("tui", True, "grok")
+        grok = _message("stream", True, "grok")
         claude = _message("tui", True, "claude")
         self.assertIn("disposable writes inside this workspace", grok)
         self.assertIn("Do not change PACKET.md", grok)
@@ -296,11 +430,14 @@ class GrokLane(unittest.TestCase):
         self.assertIn("Connected MCP tools are available", grok)
 
     def test_connected_mcp_is_available_to_stream_and_app_peers(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
         for kind, model, effort in (("codex", "gpt-6.1-sol", "low"),
                                     ("claude", "claude-sonnet-5", "low"),
                                     ("grok", "grok-4.7", "low")):
             lane = Lane(kind, model, effort)
-            stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), Path("/l"), True).argv
+            stream = adapters.launch(lane, Path("/w"), Path("/m"), Path("/f"), d / kind / "log", True).argv
             app = [] if lane.kind in adapters.STREAM_ONLY else adapters.tui(lane, Path("/w"), "prompt", Path("/l"), True).argv
             if kind == "codex":
                 self.assertNotIn("--ignore-user-config", stream)
@@ -946,7 +1083,14 @@ class EndToEnd(unittest.TestCase):
         acp = self.root / "agy-acp"
         acp.mkdir()
         (acp / "agy_acp_server.par").symlink_to(REPO / "tests" / "fake" / "harness")
-        env = patch.dict(os.environ, {"XCHECK_AGY_ACP_DIR": str(acp)})
+        ghome = self.root / "grok-home"
+        ghome.mkdir()
+        (ghome / "auth.json").write_text("{}")
+        (ghome / "config.toml").write_text(
+            '[mcp_servers.qmd]\nurl = "http://127.0.0.1:8181/mcp"\n'
+            '[mcp_servers.keenable]\nurl = "https://api.keenable.ai/mcp"\n'
+            '[mcp_servers.keenable.headers]\n"X-API-Key" = "fixture"\n', encoding="utf-8")
+        env = patch.dict(os.environ, {"XCHECK_AGY_ACP_DIR": str(acp), "XCHECK_GROK_HOME": str(ghome)})
         env.start()
         self.addCleanup(env.stop)
         stage(self.base)
@@ -1275,11 +1419,17 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("final message", (agy / "message.txt").read_text())
         self.assertTrue((agy / "stream.jsonl").exists())
         self.assertFalse((agy / "screen.log").exists())
-        self.assertTrue((self.base / "lanes" / "grok-4.7-xhigh" / "screen.log").exists())
+        grok = self.base / "lanes" / "grok-4.7-xhigh"
+        self.assertIn("final message", (grok / "message.txt").read_text())
+        self.assertTrue((grok / "stream.jsonl").exists())
+        self.assertFalse((grok / "screen.log").exists())
 
     def test_an_incomplete_app_draft_keeps_its_timeout_and_body(self):
         rows = self.run_tui("invalid", extra=("--idle", "3"))
-        self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
+        # The app sits on its draft until the idle limit; the stream lane
+        # publishes its invalid body and is graded, not timed out.
+        self.assertEqual(rows["claude-opus-5-5-high"]["status"], "timeout", rows)
+        self.assertEqual(rows["grok-4.7-xhigh"]["status"], "invalid", rows)
         for name in rows:
             self.assertIn("fine but no proof", (self.base / f"RESULT-{name}.md").read_text())
 
@@ -1291,7 +1441,7 @@ class EndToEnd(unittest.TestCase):
         self.assertLess(time.time() - t0, 30)  # the apps idle for 60 s; the runner closes them
         for name in rows:
             self.assertTrue((self.base / f"RESULT-{name}.md").read_text().endswith("RESULT_COMPLETE\n"))
-        message = (self.base / "lanes" / "grok-4.7-xhigh" / "message.txt").read_text()
+        message = (self.base / "lanes" / "claude-opus-5-5-high" / "message.txt").read_text()
         self.assertIn("ANSWER.md", message)
 
     def test_an_app_that_exits_right_after_answering_is_done(self):
@@ -1302,18 +1452,23 @@ class EndToEnd(unittest.TestCase):
     def test_a_tui_draft_is_not_published_until_committed(self):
         rows = self.run_tui("slowwrite")
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-        self.assertIn("after a rewrite", (self.base / "RESULT-grok-4.7-xhigh.md").read_text())
+        self.assertIn("after a rewrite", (self.base / "RESULT-claude-opus-5-5-high.md").read_text())
 
     def test_a_silent_tui_times_out_with_its_last_screen(self):
         rows = self.run_tui("error", extra=("--idle", "3"))
-        self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
+        # The silent app hits the idle limit; the stream lane's native turn
+        # error is the failure reason, not a timeout.
+        self.assertEqual(rows["claude-opus-5-5-high"]["status"], "timeout", rows)
+        self.assertEqual(rows["grok-4.7-xhigh"]["status"], "failed", rows)
+        self.assertIn("402", rows["grok-4.7-xhigh"]["reason"], rows)
         self.assertTrue(any("hit your limit" in l for l in rows["claude-opus-5-5-high"]["stderr_tail"]))
 
     def test_an_app_drawing_only_empty_frames_times_out(self):
         # a blocked dialog that keeps emitting sync-update frames is idle, not busy
         t0 = time.time()
         rows = self.run_tui("noop-frames", extra=("--idle", "3"))
-        self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
+        self.assertEqual(rows["claude-opus-5-5-high"]["status"], "timeout", rows)
+        self.assertEqual(rows["grok-4.7-xhigh"]["status"], "done", rows)
         self.assertLess(time.time() - t0, 30)  # the frames run for 60 s
 
     def test_wait_and_status_refuse_a_base_never_launched(self):
@@ -1325,9 +1480,10 @@ class EndToEnd(unittest.TestCase):
 
     def test_a_limit_screen_is_diagnostic_until_an_explicit_idle_limit(self):
         rows = self.run_tui("limit", extra=("--idle", "3"))
-        self.assertEqual({r["status"] for r in rows.values()}, {"timeout"}, rows)
-        for r in rows.values():
-            self.assertTrue(any("hit your limit" in line for line in r["stderr_tail"]))
+        self.assertEqual(rows["claude-opus-5-5-high"]["status"], "timeout", rows)
+        self.assertEqual(rows["grok-4.7-xhigh"]["status"], "done", rows)
+        self.assertTrue(any("hit your limit" in line
+                            for line in rows["claude-opus-5-5-high"]["stderr_tail"]))
 
     def test_a_quoted_limit_banner_does_not_end_a_working_app(self):
         rows = self.run_tui("limit-echo")
@@ -1336,9 +1492,9 @@ class EndToEnd(unittest.TestCase):
     def test_a_killed_app_runner_leaves_its_screen_on_disk(self):
         # screen.log is the diagnosis for a runner that died: nothing may sit in a buffer.
         self.assertEqual(self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
-                                     "--view", "tui", "--skip-capacity", "--lanes", "grok:grok-4.7:xhigh",
+                                     "--view", "tui", "--skip-capacity", "--lanes", "claude:claude-opus-5-5:high",
                                      "--detach", mode="hang").returncode, 0)
-        d = self.base / "lanes" / "grok-4.7-xhigh"
+        d = self.base / "lanes" / "claude-opus-5-5-high"
         for _ in range(50):
             if (d / "pids.json").exists() and json.loads((d / "pids.json").read_text()).get("harness"):
                 break

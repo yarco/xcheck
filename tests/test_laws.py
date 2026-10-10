@@ -135,10 +135,21 @@ class AnswerContractLaws(unittest.TestCase):
 
 def feed_grok(events) -> str:
     r = adapters.Reader("grok")
+    r.feed({"id": 3, "method": "session/prompt"})
     for e in events:
         r.feed(e)
     r.finish(pathlib.Path("/nonexistent"))
     return r.text
+
+
+def grok_chunk(text: str) -> dict:
+    return {"method": "session/update", "params": {"update": {
+        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}}
+
+
+GROK_TOOL_CALL = {"method": "session/update", "params": {"update": {
+    "sessionUpdate": "tool_call", "title": "read_file"}}}
+GROK_END = {"id": 3, "result": {"stopReason": "end_turn"}}
 
 
 @st.composite
@@ -152,26 +163,24 @@ class GrokReaderLaws(unittest.TestCase):
     @given(answer(), st.data())
     @SETTINGS
     def test_chunking_does_not_change_the_answer(self, a, data):
-        """Property: however the final message is split into text events, the
+        """Property: however the final message is split into chunks, the
         answer is that message. Oracle: the unsplit string."""
         text = render(a[0])
-        events = [{"type": "text", "data": c} for c in data.draw(chunks(text))]
-        self.assertEqual(feed_grok(events + [{"type": "usage"}, {"type": "end"}]), text)
+        events = [grok_chunk(c) for c in data.draw(chunks(text))]
+        self.assertEqual(feed_grok(events + [GROK_END]), text)
 
-    @given(answer(), st.lists(st.tuples(SENTENCE, st.booleans()), max_size=4), st.data())
+    @given(answer(), st.lists(SENTENCE, max_size=4), st.data())
     @SETTINGS
     def test_earlier_messages_never_leak_into_the_answer(self, a, earlier, data):
-        """Property: narration in earlier messages (each closed by usage, some
-        followed by a tool call) is never part of the answer. Oracle: the
-        construction. Catches: gluing narration onto the answer's heading."""
+        """Property: narration before a tool call (ACP's only message
+        boundary) is never part of the answer. Oracle: the construction.
+        Catches: gluing narration onto the answer's heading."""
         text = render(a[0])
         events = []
-        for narration, tool in earlier:
-            events += [{"type": "text", "data": narration}, {"type": "usage"}]
-            if tool:
-                events.append({"type": "tool_call", "toolName": "read_file", "rawInput": {}})
-        events += [{"type": "text", "data": c} for c in data.draw(chunks(text))]
-        events += [{"type": "usage"}, {"type": "end"}]
+        for narration in earlier:
+            events += [grok_chunk(narration), GROK_TOOL_CALL]
+        events += [grok_chunk(c) for c in data.draw(chunks(text))]
+        events += [GROK_END]
         self.assertEqual(feed_grok(events), text)
 
     @given(st.lists(SENTENCE, min_size=1, max_size=4))
@@ -181,8 +190,8 @@ class GrokReaderLaws(unittest.TestCase):
         answer; narration before it must not be promoted to one."""
         events = []
         for n in narration:
-            events += [{"type": "text", "data": n}, {"type": "usage"}]
-        events += [{"type": "tool_call", "toolName": "read_file", "rawInput": {}}, {"type": "end"}]
+            events += [grok_chunk(n), GROK_TOOL_CALL]
+        events += [GROK_END]
         self.assertEqual(feed_grok(events), "")
 
 
