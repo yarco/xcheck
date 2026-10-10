@@ -84,22 +84,39 @@ Each lane gets `GROK_HOME=<lane>/grok-home` with a generated `config.toml`:
   orchestrator instructions.
 - **Vendor plugins** are a separate path the env kills do not gate: Grok
   scans `~/.claude/plugins` (and the cursor/codex stores), honors each
-  vendor's own enabled-state file, and *loads executable hooks* — a live
-  lane showed `plugin/warp post_tool_use` hooks firing. There is no global
-  off-switch (`plugins.disabled = ["*"]` does not match; verified). The
-  generated config enumerates every installed plugin name from each
+  vendor's own enabled-state file, and *loads executable hooks* — the
+  pre-fix headless smoke's debug log shows `plugin/warp post_tool_use`
+  firing 88 times plus codex/warp session/stop/prompt hooks. There is no
+  global off-switch (`plugins.disabled = ["*"]` does not match; verified).
+  The generated config enumerates every installed plugin name from each
   store's `installed_plugins.json` into `plugins.disabled`, which stops
   loading (discovery still counts them). `plugins.enabled` stays unset so
   project plugins default off; `[marketplace] sources = []` plus
   `GROK_OFFICIAL_MARKETPLACE_AUTO_REGISTER=0` closes Grok's own marketplace
   path. Residual: a plugin installed after lane build is not enumerated —
   the list is rebuilt on every launch.
+
+  Evidence that it works, no model turn needed — a zero-turn
+  `initialize`+`session/new` handshake against the final generated
+  config+env logs **zero** `hooks loaded from file`, zero `hook.run`
+  events, and only `mcp.serve{qmd,semble,deepwiki}`; the Herdr smoke's
+  full-run log shows the same zero for the entire turn.
 - `GROK_AUTH_PATH` points at the operator's real `~/.grok/auth.json`: one
   subscription SessionToken source, no copy (a copy forks token-refresh
   rotation) and no API-key fallback (`GROK_DISABLE_API_KEY_AUTH=1`;
   `*_API_KEY` env is scrubbed anyway). Lane sessions, caches and plugins stay
   inside the lane home — verified: sessions land under `GROK_HOME`, only
   qmd/semble/deepwiki initialize, zero auth errors.
+- `[paths] extra_rule_dirs` is carried **verbatim** from the operator config:
+  the canonical shared rules (`~/.agents/rules`) reach the lane by
+  reference, never as copies. `extra_skill_dirs` is not carried — it is a
+  skill-injection record, not a rules surface. Note that `~/.claude/rules`
+  (the generated delivery copies) appear in `grok inspect`'s Project
+  Instructions but are compat-gated at injection; `extra_rule_dirs` is the
+  supported canonical path and operator sessions show its content landing
+  as `<user_rule>` blocks. `grok inspect` does not display the
+  `extra_rule_dirs` surface at all — even under the operator's own config —
+  so its verification is config parity plus that session evidence.
 - A nonempty `~/.grok/requirements.toml` is copied into the lane home so
   enterprise pins survive isolation.
 
@@ -151,6 +168,18 @@ applied) — plus flag drift checks for `grok agent --help` and `acpx`.
 
 ## Maintenance
 
+- **Version admission gate**: `GROK_VERIFIED_VERSION` in `adapters.py` pins
+  the native version this adapter was verified against (currently
+  `1.0.50`). `run_lane` probes `grok --sandbox off --cwd <work> version
+  --json` (zero inference, same call doctor makes) before spawning and
+  **skips** the lane with `native-unverified: grok <actual> is not the
+  adapter-verified <pin>…` on any mismatch — the comparison is an exact
+  string compare on the parsed JSON value, not a substring match. This
+  exists because a renamed tool id makes the profile allowlist fail open
+  to the full toolset, and nothing else would notice. **After any Grok
+  upgrade**: run the zero-turn `tools allowlist applied` probe on the new
+  version, re-verify the ACP event shape and config keys, then bump
+  `GROK_VERIFIED_VERSION` deliberately.
 - If Grok renames tool ids, `_grok_profile`'s allowlist fails open — the
   profile test pins the exact list; re-probe `tools allowlist applied` in
   `grok-agent.log` after any Grok upgrade.
@@ -160,4 +189,3 @@ applied) — plus flag drift checks for `grok agent --help` and `acpx`.
 - If the operator config gains a new keyless local MCP, add its name to
   `GROK_MCP_ALLOWED` deliberately; anything credential-bearing or billed
   stays out.
-EOF

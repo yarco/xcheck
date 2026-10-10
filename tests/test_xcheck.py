@@ -403,6 +403,19 @@ class GrokLane(unittest.TestCase):
         self.assertEqual(set(lane_cfg["mcp_servers"]), {"qmd", "semble"})
         self.assertEqual(lane_cfg["mcp_servers"]["qmd"]["url"], "http://127.0.0.1:8181/mcp")
         self.assertEqual(lane_cfg["mcp_servers"]["semble"]["command"], "uvx")
+        self.assertNotIn("paths", lane_cfg)  # no operator extra_rule_dirs → no section
+
+    def test_operator_extra_rule_dirs_survive_by_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text('[paths]\nextra_rule_dirs = ["~/.agents/rules", "/srv/team-rules"]\n'
+                           'extra_skill_dirs = ["~/skills-private"]\n', encoding="utf-8")
+            _, d = self.launch(config=cfg)
+        lane_cfg = tomllib.loads((d / "lane" / "grok-home" / "config.toml").read_text())
+        # Verbatim path references — the rules stay in the canonical store.
+        self.assertEqual(lane_cfg["paths"]["extra_rule_dirs"],
+                         ["~/.agents/rules", "/srv/team-rules"])
+        self.assertNotIn("extra_skill_dirs", lane_cfg["paths"])
 
     def test_enterprise_pins_survive_the_isolated_home(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -936,7 +949,7 @@ class Installation(unittest.TestCase):
 
         def fake_run(cmd, **_):
             if cmd[-2:] == ["version", "--json"]:
-                return subprocess.CompletedProcess(cmd, 0, '{"currentVersion":"fixture-version"}', "")
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"currentVersion": adapters.GROK_VERIFIED_VERSION}), "")
             return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), models), "")
 
         with patch.object(install, "source_root", return_value=REPO), \
@@ -1184,6 +1197,17 @@ class EndToEnd(unittest.TestCase):
                 self.assertIn(reason, result.stderr)
                 self.assertFalse((base / ".launched").exists())
                 self.assertFalse((base / "lanes").exists())
+
+    def test_an_unverified_native_version_skips_the_grok_lane(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
+                        "--skip-capacity", "--lanes", "grok:grok-4.7:xhigh",
+                        env_extra={"FAKE_GROK_VERSION": "1.0.99"})
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
+        self.assertEqual(row["status"], "skipped", row)
+        self.assertIn("native-unverified", row["reason"])
+        self.assertIn("1.0.99", row["reason"])
+        self.assertIn("1.0.50", row["reason"])
 
     def test_a_zai_lane_without_its_key_is_skipped_by_name_before_spending(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",

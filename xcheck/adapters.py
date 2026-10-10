@@ -289,6 +289,12 @@ GROK_REQUIREMENTS = GROK_DIR / "requirements.toml"
 GROK_MCP_ALLOWED = ("qmd", "semble", "deepwiki")
 GROK_REVIEW_TOOLS = ("read_file", "grep", "list_dir", "run_terminal_cmd")
 GROK_WEB_TOOLS = ("web_search", "web_fetch")
+# The native version this adapter's tool ids, config keys and ACP shape were
+# verified against (see integrations/grok-acp/README.md). An unknown tool id
+# makes the profile allowlist fail OPEN to the full toolset, so lanes refuse
+# to start on any other version until it is revalidated — a string compare
+# on the parsed `version --json` value, never a substring match.
+GROK_VERIFIED_VERSION = "1.0.50 (c58f321264ba)"
 GROK_ENV = {
     # A subscription session, never a paid API-key fallback (XAI_API_KEY is
     # scrubbed anyway; this refuses to use it if one ever leaked in).
@@ -329,15 +335,19 @@ def _toml_value(v) -> str:
     raise TypeError(f"no TOML rendering for {type(v).__name__}")
 
 
+def _grok_operator_config() -> dict:
+    try:
+        return tomllib.loads(GROK_CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def _grok_mcp() -> dict[str, dict]:
     """Keyless MCP entries copied verbatim from the operator's config.
 
     An allowlisted name is dropped if the entry gained any credential channel;
     a lane must never inherit a key it was not designed to hold."""
-    try:
-        cfg = tomllib.loads(GROK_CONFIG_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        cfg = {}
+    cfg = _grok_operator_config()
     servers = {}
     for name in GROK_MCP_ALLOWED:
         s = (cfg.get("mcp_servers") or {}).get(name)
@@ -347,6 +357,14 @@ def _grok_mcp() -> dict[str, dict]:
             continue
         servers[name] = s
     return servers
+
+
+def _grok_rule_dirs() -> list[str]:
+    """The operator's `[paths] extra_rule_dirs` — the canonical shared rules
+    store (`~/.agents/rules`), referenced verbatim so lanes resolve the same
+    files. Non-string entries are dropped."""
+    paths = (_grok_operator_config().get("paths") or {})
+    return [d for d in (paths.get("extra_rule_dirs") or []) if isinstance(d, str)]
 
 
 def _grok_disabled_plugins(home: Path | None = None) -> list[str]:
@@ -394,6 +412,13 @@ def _grok_home(home: Path, lane: Lane, web: bool) -> Path:
         "[harness]", "disable_workspace_teleport = true", "",
         "[subagents]", "enabled = false", "",
         "[memory]", "enabled = false", "",
+        # The operator's extra_rule_dirs are the canonical shared rules
+        # (~/.agents/rules), loaded by reference — never copied. This is not
+        # a vendor compat import: `compat.*.rules` stays off while the
+        # explicit [paths] list is preserved verbatim. extra_skill_dirs is
+        # deliberately not carried (skill-injection record for /import-claude).
+        *(["[paths]", f"extra_rule_dirs = {_toml_value(rules)}", ""]
+          if (rules := _grok_rule_dirs()) else []),
         # Vendor plugin hooks execute real commands in-agent; disable every
         # installed plugin by name (no wildcard exists). `enabled` stays
         # unset: project plugins already default off.

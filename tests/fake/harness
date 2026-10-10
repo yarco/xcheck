@@ -39,7 +39,9 @@ if kind == "grok" and mode == "socket-symlink" and "--sandbox" in argv and argv[
     sys.exit(1)
 if kind == "grok" and argv[-2:] == ["version", "--json"]:
     assert argv[argv.index("--sandbox") + 1] == "off"
-    print(json.dumps({"currentVersion": "fixture-version", "channel": "stable"}))
+    print(json.dumps({"currentVersion": os.environ.get("FAKE_GROK_VERSION",
+                                                        "1.0.50 (c58f321264ba)"),
+                      "channel": "stable"}))
     sys.exit(0)
 if kind == "grok" and "--help" in argv:
     print("--model --reasoning-effort --always-approve --agent-profile --no-leader --debug-file stdio"

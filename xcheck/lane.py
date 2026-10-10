@@ -80,8 +80,8 @@ def lane_env(spec: adapters.Launch, work: Path) -> dict[str, str]:
     return env
 
 
-def grok_startup_check(work: Path) -> str | None:
-    """Probe the configured native startup without a session or inference.
+def _grok_version_probe(work: Path) -> tuple[str | None, str | None]:
+    """Zero-inference native probe. Returns (parsed version, problem).
 
     Grok applies the sandbox before its `version` subcommand, unlike --version
     and --help. Never expose stdout from other commands as a diagnostic.
@@ -92,18 +92,37 @@ def grok_startup_check(work: Path) -> str | None:
         out = subprocess.run(spec.argv, cwd=work, env=lane_env(spec, work),
                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"startup-unavailable: Grok startup probe: {exc}; repair startup and recheck xcheck doctor"
+        return None, f"startup-unavailable: Grok startup probe: {exc}; repair startup and recheck xcheck doctor"
     detail = "; ".join(out.stderr.strip().splitlines()[-4:])[:1200]
     if out.returncode or "sandbox could not be applied" in out.stderr:
-        return (f"startup-unavailable: Grok startup probe exited {out.returncode}: "
-                f"{detail or 'no stderr'}; repair native startup and recheck xcheck doctor")
+        return None, (f"startup-unavailable: Grok startup probe exited {out.returncode}: "
+                      f"{detail or 'no stderr'}; repair native startup and recheck xcheck doctor")
     try:
         payload = json.loads(out.stdout)
         if isinstance(payload, dict) and isinstance(payload.get("currentVersion"), str) and payload["currentVersion"]:
-            return None
+            return payload["currentVersion"], None
     except ValueError:
         pass
-    return "startup-unavailable: Grok startup probe returned no native version JSON; check grok version --help and xcheck doctor"
+    return None, "startup-unavailable: Grok startup probe returned no native version JSON; check grok version --help and xcheck doctor"
+
+
+def grok_startup_check(work: Path) -> str | None:
+    return _grok_version_probe(work)[1]
+
+
+def grok_admission_check(work: Path) -> str | None:
+    """Zero-inference admission guard: only the adapter-verified native
+    version may launch a Grok lane. Any other version is skipped, loudly —
+    the tool-id allowlist fails open on rename, so an upgraded native could
+    otherwise run the review with the full toolset."""
+    version, problem = _grok_version_probe(work)
+    if problem:
+        return problem
+    if version != adapters.GROK_VERIFIED_VERSION:
+        return (f"native-unverified: grok {version} is not the adapter-verified "
+                f"{adapters.GROK_VERIFIED_VERSION}; revalidate the resolved toolset and "
+                f"ACP shape on this version, then bump GROK_VERIFIED_VERSION")
+    return None
 
 
 class _Stop(BaseException):  # a signal, never mistaken for an ordinary failure
@@ -234,6 +253,12 @@ def _run_lane(base: Path, name: str) -> int:
         except adapters.Unavailable as e:
             return _finish(run, name, started, "skipped", str(e), None, reader, err_path)
         env = lane_env(spec, work)
+        if spec.kind == "grok":
+            # Zero-inference admission gate: an unverified native version may
+            # have renamed tool ids, and the profile allowlist fails open.
+            problem = grok_admission_check(work)
+            if problem:
+                return _finish(run, name, started, "skipped", problem, None, reader, err_path)
         status, reason, code = None, "", None
         with ExitStack() as stack:
             stdin = stack.enter_context(open(spec.stdin, "rb")) if spec.stdin else subprocess.DEVNULL
