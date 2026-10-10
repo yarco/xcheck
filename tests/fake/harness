@@ -337,6 +337,8 @@ class ClaudeStream:
     def __init__(self):
         config = json.loads(argv[argv.index("--mcp-config") + 1])
         self.servers = [{"name": n, "status": "connected"} for n in config.get("mcpServers", {})]
+        if "--strict-mcp-config" not in argv:  # the CLI would also load a global paid connector
+            self.servers.append({"name": "cloudflare-browser-rendering", "status": "connected"})
         if mode == "mcp-startup-warning":
             self.servers.append({"name": "optional-fake", "status": "needs-auth"})
 
@@ -355,7 +357,8 @@ class ClaudeStream:
 
     def tool(self):
         self.use("toolu_read", "Read")
-        if mode == "mcp-policy-audit":  # a forbidden connector call that succeeds
+        offered = any(s["name"] == "cloudflare-browser-rendering" for s in self.servers)
+        if mode == "mcp-policy-audit" or (mode == "mcp-policy-probe" and offered):  # a forbidden call that succeeds
             self.use("toolu_cf", "mcp__cloudflare-browser-rendering__get_url_links")
         if mode == "mcp-startup-warning":  # an unapproved call the CLI refuses
             self.use("toolu_of", "mcp__optional-fake__fetch", ok=False)
@@ -375,7 +378,12 @@ class ClaudeStream:
 
 
 def native_turn(stream, server, work):
-    """One headless run in the CLI's own event shapes, with review_turn's modes."""
+    """One headless run in the CLI's own event shapes. Modes: ok, invalid,
+    declined, echo402, custody, silent-exit, hang, slow, progress-hang,
+    reconnect, buffered-work, mixed-duration, error and its retry variants,
+    text-only, terminal-hang; Claude adds mcp-policy-audit, mcp-policy-probe
+    and mcp-startup-warning. Other review_turn modes are ACP-only and fall
+    through to an ordinary answer here."""
     token = [l for l in (work / "evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
     good = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
     if os.environ.get("FAKE_ENV_DUMP"):

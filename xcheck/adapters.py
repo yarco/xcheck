@@ -7,7 +7,8 @@ its environment and its native policy. Every flag here was checked against CLI h
 `xcheck doctor` re-checks flags against installed help.
 
 Lanes print their answer as their final message; the one Reader below
-extracts it from the ACP stream and decides native completion. Grok,
+extracts it from the lane's stream (native for Codex and Claude, ACP for the
+rest) and decides native completion. Grok,
 OpenCode and Devin may write scratch files in their workspace while reviewing.
 """
 
@@ -16,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -117,8 +117,8 @@ class Launch:
 
 
 def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
-    """The acpx command for one lane. `work` is its workspace, `log` its
-    forensic log."""
+    """The command for one lane. `work` is its workspace, `log` its forensic
+    log."""
     if lane.kind == "codex":
         return _codex_launch(lane, work, message, log, web)
     if lane.kind == "claude":
@@ -520,8 +520,8 @@ def _devin_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -
 # ("claude.ai Gmail" -> mcp__claude_ai_Gmail). bypassPermissions is refused
 # in restricted mode.
 CLAUDE_JSON = Path.home() / ".claude.json"
-CLAUDE_LOCAL_MCP = {"semble", "fff", "qmd", "pond"}
-CLAUDE_FREE_MCP = {
+REVIEW_LOCAL_MCP = {"semble", "fff", "qmd", "pond"}
+REVIEW_FREE_MCP = {
     "keenable-free": "https://api.keenable.ai/mcp",
     "you-free": "https://api.you.com/mcp?profile=free&tools=you-search",
 }
@@ -555,8 +555,8 @@ def _claude_review_servers(web: bool) -> dict:
     servers = data.get("mcpServers")
     return {name: server for name, server in (servers.items() if isinstance(servers, dict) else ())
             if isinstance(server, dict) and (
-                (name in CLAUDE_LOCAL_MCP and _local_mcp_ok(server))
-                or (web and name in CLAUDE_FREE_MCP and server == {"type": "http", "url": CLAUDE_FREE_MCP[name]}))}
+                (name in REVIEW_LOCAL_MCP and _local_mcp_ok(server))
+                or (web and name in REVIEW_FREE_MCP and server == {"type": "http", "url": REVIEW_FREE_MCP[name]}))}
 
 
 # Native flags the lane depends on; admission and doctor require each in
@@ -793,15 +793,18 @@ def _error_text(error: dict) -> str:
 
 @dataclass
 class Reader:
-    """One lane's ACP stream (acpx `--format json`): the raw JSON-RPC traffic in
-    both directions, printed without its direction.
+    """One lane's stream. Codex and Claude read their native streams (the
+    `_codex` / `_claude` methods); every other kind reads acpx `--format json`,
+    the raw ACP JSON-RPC traffic in both directions, printed without its
+    direction.
 
     JSON-RPC ids belong to the side that sent the request, so an agent request
     can reuse the id of acpx's own session/prompt. Correlation therefore never
     assumes one id space:
     - only a session/prompt response carries `stopReason` (ACP schema), so that
       shape alone settles the turn, whichever id it reuses;
-    - every other request id, from either side, is counted until answered;
+    - every other request id, from either side, is counted until answered, and
+      a sender reuses an id only once its earlier request at it is answered;
     - an error carrying the prompt's id while another request with that id is
       open is ambiguous: it is held until the other response at that id
       resolves which side sent it, or until acpx — the client, which does know
@@ -883,6 +886,12 @@ class Reader:
                     self._prompt_id = o["id"]
                 else:
                     key = _id_key(o["id"])
+                    if self._held is not None and self._open.get(key) and o["id"] == self._prompt_id:
+                        # A sender reuses an id only once its earlier request at
+                        # that id is answered, and the prompt is still open, so
+                        # the held error answered that earlier request.
+                        self._open[key] -= 1
+                        self._held = None
                     self._open[key] = self._open.get(key, 0) + 1
                 return None
             return self._notification(o)
@@ -970,10 +979,10 @@ class Reader:
                     self.diagnostics.append(dict(kind="mcp_startup", server=server.get("name"), status=server["status"]))
             return None
         if t == "result":
-            self.completed = True
             if o.get("is_error"):
                 self.error = _clip(str(o.get("result") or json.dumps(o.get("errors")) or "is_error"), 300)
                 return f"! {self.error}"
+            self.completed = True
             self.text = o.get("result") if isinstance(o.get("result"), str) else ""
             return "· end turn"
         if t == "user":
@@ -1000,7 +1009,7 @@ class Reader:
         if not isinstance(name, str) or (isinstance(call, str) and call in self._mcp_calls):
             return
         parts = name.split("__")
-        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in CLAUDE_LOCAL_MCP | CLAUDE_FREE_MCP.keys():
+        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in REVIEW_LOCAL_MCP | REVIEW_FREE_MCP.keys():
             return
         diagnostic = dict(kind="mcp_policy", tool=name, outcome="attempted", billing="unknown")
         self.diagnostics.append(diagnostic)

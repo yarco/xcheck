@@ -105,3 +105,11 @@ failed-turn row retires through the typed extension, add its reading to
 `adapters.Reader` and a captured fixture first. Until then, an upgrade means
 re-applying the patch to the new tag; never run stock codex-acp, which reports
 these failures as `end_turn`.
+
+Before revisiting: `main`'s native Codex lane disables plugins, hooks, apps,
+computer and browser use, and every MCP server outside the approved keyless
+set, proving the effective set with `codex mcp list --json` before spending
+(see `adapters._codex_launch` on `main`). This ACP lane does not: codex-acp
+loads the operator's full Codex configuration. Port that rule (the feature
+disables and per-server `enabled=false` overrides, passed through the
+adapter's Codex configuration) and its tests before this lane returns.

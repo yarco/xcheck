@@ -26,8 +26,7 @@ class RuntimeHandoff(unittest.TestCase):
                 install.install()
             self.addCleanup(self.make_writable, share)
         env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}",
-               "FAKE_MODE": mode, "FAKE_DELAY": str(delay), "XCHECK_ROOT": str(self.root),
-               "CODEX_CONFIG": str(self.root / "codex-config.toml")}
+               "FAKE_MODE": mode, "FAKE_DELAY": str(delay), "XCHECK_ROOT": str(self.root)}
         env.pop("HERDR_ENV", None)
         return subprocess.run([str(self.entry), *args], env=env, capture_output=True,
                               text=True, timeout=timeout)

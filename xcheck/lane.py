@@ -301,19 +301,21 @@ def _run_lane(base: Path, name: str) -> int:
                         *lines, pending = pending.split(b"\n")
                         for raw in lines:
                             _consume(reader, raw, progress)
-                    if reader.error:
-                        status, reason = "failed", reader.error
-                        break
-                    if reader.completed:
-                        break
-                    if not sel.get_map() and proc.poll() is not None:
-                        break
+                    # An explicit limit is checked before a completion or failure
+                    # read in the same pass: work finished after the cap is not done.
                     t = time.monotonic()
                     if idle and t - last > idle:
                         status, reason = "timeout", f"no output for {idle}s"
                     elif run.cap is not None and t - spend_from > run.cap:
                         status, reason = "timeout", f"exceeded the {run.cap}s cap"
                     if status:
+                        break
+                    if reader.error:
+                        status, reason = "failed", reader.error
+                        break
+                    if reader.completed:
+                        break
+                    if not sel.get_map() and proc.poll() is not None:
                         break
                 if pending:
                     _consume(reader, pending, progress)

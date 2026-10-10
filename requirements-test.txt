@@ -1,6 +1,6 @@
 # Test-only dependencies. bin/ and xcheck/ are stdlib-only. Supplied by the
 # runner command, never installed globally or into a venv:
-#     uv run --with-requirements requirements-test.txt pytest
+#     uv run --python '>=3.12' --with-requirements requirements-test.txt pytest
 # Hypothesis (tests/test_laws.py) is imported unguarded, so a checkout without
 # it fails by name. pytest-xdist runs the unittest suite across all cores; every
 # test already owns its XCHECK_ROOT, pools and fakes, so no test is shared.

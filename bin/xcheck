@@ -19,8 +19,18 @@ See Multi-Agent Cross-Check Protocol.md for the protocol.
 """
 
 import argparse
+import os
+import shutil
 import sys
 from pathlib import Path
+
+# The source copy starts through `env python3`, which may resolve to an older
+# system Python; the installed copy names its own 3.12+ interpreter.
+if sys.version_info < (3, 12):
+    newer = next(filter(None, map(shutil.which, ("python3.14", "python3.13", "python3.12"))), None)
+    if newer is None:
+        sys.exit(f"xcheck needs Python 3.12+ (this is {sys.version.split()[0]}); run it with a newer python3")
+    os.execv(newer, [newer, *sys.argv])
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
