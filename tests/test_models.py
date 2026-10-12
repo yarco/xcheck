@@ -87,12 +87,16 @@ class Discovery(unittest.TestCase):
                      "pricing": {"prompt": "0", "completion": "0", "request": "0"}}
         self.local = {"openrouter/new/model:free": {"capabilities": {"toolcall": True,
                       "input": {"text": True}, "output": {"text": True}}}}
-        self.html = """<table><tr><th>Model</th><th>Model ID</th><th>Endpoint</th><th>AI SDK Package</th></tr>
-          <tr><td>New Free</td><td>new-free</td><td>https://opencode.ai/zen/v1/chat/completions</td><td>sdk</td></tr>
-          <tr><td>Decision Free</td><td>decision-free</td><td>https://opencode.ai/zen/v1/systemone</td><td>-</td></tr></table>
-          <table><tr><th>Model</th><th>Input</th><th>Output</th><th>Cached Read</th><th>Cached Write</th></tr>
-          <tr><td>New Free</td><td>Free</td><td>Free</td><td>Free</td><td>-</td></tr>
-          <tr><td>Decision Free</td><td>Free</td><td>Free</td><td>-</td><td>-</td></tr></table>"""
+        self.docs = """| Model | Model ID | Endpoint | AI SDK Package |
+| --- | --- | --- | --- |
+| New Free | new-free | `https://opencode.ai/inference/v1/chat/completions` | `sdk` |
+| Decision Free | decision-free | `https://opencode.ai/inference/v1/systemone` | - |
+
+| Model | Input | Output | Cached Read | Cached Write |
+| --- | --- | --- | --- | --- |
+| New Free | Free | Free | Free | - |
+| Decision Free | Free | Free | - | - |
+"""
         self.zen = {"data": [{"id": "new-free"}, {"id": "decision-free"}]}
 
     def discover(self, item=None, metadata=None):
@@ -125,30 +129,29 @@ class Discovery(unittest.TestCase):
                 self.assertEqual(self.discover({**self.item, **change})["models"], [])
 
     def test_zen_joins_live_ids_and_documented_prices_not_model_suffix(self):
-        rows = models.zen_candidates(self.zen, self.html)
+        rows = models.zen_candidates(self.zen, self.docs)
         self.assertEqual([r["model"] for r in rows], ["new-free"])
         self.assertEqual(rows[0]["release_date"], "")  # API timestamp is generated per request
-        self.assertEqual(models.zen_candidates({"data": []}, self.html), [])
-        for change in [self.html.replace("<td>Free</td><td>Free</td>", "<td>$1</td><td>Free</td>"),
-                       self.html.replace("<td>Free</td><td>-</td>", "<td>$1</td><td>-</td>"),
-                       self.html.replace("<td>Free</td>", "<td>Unknown</td>")]:
+        self.assertEqual(models.zen_candidates({"data": []}, self.docs), [])
+        for change in [self.docs.replace("| New Free | Free |", "| New Free | $1 |"),
+                       self.docs.replace("| Free | Free | Free | - |", "| Free | Free | Free | $1 |"),
+                       self.docs.replace("| New Free | Free |", "| New Free | Unknown |")]:
             self.assertEqual(models.zen_candidates(self.zen, change), [])
         # A provider may stop charging for a model without a 'free' ID suffix.
         self.assertEqual(models.zen_candidates({"data": [{"id": "stealth"}]},
-                         self.html.replace("new-free", "stealth"))[0]["model"], "stealth")
+                         self.docs.replace("new-free", "stealth"))[0]["model"], "stealth")
 
     def test_zen_parser_changes_fail_closed(self):
-        for html in ["", self.html.replace("<th>Input</th>", "<th>Price</th>"),
-                     self.html.replace("<td>Free</td><td>-</td>", "<td>Free</td>"),
-                     self.html + self.html]:
-            with self.subTest(html=html[:50]), self.assertRaises(ValueError):
-                models.zen_candidates(self.zen, html)
+        for docs in ["", self.docs.replace("| Input |", "| Price |"),
+                     self.docs.replace("| Free | Free | Free | - |", "| Free | Free | Free |"),
+                     self.docs + "\n" + self.docs]:
+            with self.subTest(docs=docs[:50]), self.assertRaises(ValueError):
+                models.zen_candidates(self.zen, docs)
 
     def test_zen_ambiguous_display_name_cannot_approve_a_paid_id(self):
-        html = self.html.replace('</table>', '<tr><td>New Free</td><td>paid</td>'
-                     '<td>https://opencode.ai/zen/v1/chat/completions</td><td>sdk</td></tr></table>', 1)
+        docs = self.docs.replace("| - |\n\n", "| - |\n| New Free | paid | `https://opencode.ai/inference/v1/chat/completions` | sdk |\n\n", 1)
         with self.assertRaisesRegex(ValueError, "ambiguous Zen endpoint"):
-            models.zen_candidates({"data": [{"id": "new-free"}, {"id": "paid"}]}, html)
+            models.zen_candidates({"data": [{"id": "new-free"}, {"id": "paid"}]}, docs)
 
     def test_nonrepresentable_colon_suffix_is_reported(self):
         report = self.discover({**self.item, "id": "vendor/model:exacto"})
@@ -163,7 +166,7 @@ class Discovery(unittest.TestCase):
     def test_new_undated_zen_offer_survives_default_display_limit(self):
         many = {"data": [{**self.item, "id": f"model-{n}"} for n in range(21)]}
         with patch.object(models, "client_metadata", return_value={}), \
-             patch.object(models, "fetch", side_effect=[self.zen, self.html, many]):
+             patch.object(models, "fetch", side_effect=[self.zen, self.docs, many]):
             report = models.discover({"opencode", "openrouter"})
         cli = runpy.run_path(str(pathlib.Path(__file__).resolve().parent.parent / "bin/xcheck"))["main"]
         output = io.StringIO()
@@ -177,14 +180,14 @@ class Discovery(unittest.TestCase):
         local = {"opencode/new-free": {"cost": {"input": 500, "output": 500}, "release_date": "2026-09-25",
                      "capabilities": {"toolcall": True, "input": {"text": True}, "output": {"text": True}}}}
         with patch.object(models, "client_metadata", return_value=local), \
-             patch.object(models, "fetch", side_effect=[self.zen, self.html]):
+             patch.object(models, "fetch", side_effect=[self.zen, self.docs]):
             result = models.discover({"opencode"})
         self.assertEqual(result["models"][0]["state"], "ready")
         self.assertEqual(result["models"][0]["pricing_source"], models.ZEN_DOCS)
 
     def test_zen_no_client_metadata_is_visible_but_not_ready(self):
         with patch.object(models, "client_metadata", return_value={}), \
-             patch.object(models, "fetch", side_effect=[self.zen, self.html]):
+             patch.object(models, "fetch", side_effect=[self.zen, self.docs]):
             result = models.discover({"opencode"})
         self.assertEqual(result["models"][0]["state"], "needs-client-setup")
         self.assertIsNone(result["models"][0]["tool_call"])

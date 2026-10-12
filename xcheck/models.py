@@ -7,18 +7,20 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import subprocess
 import urllib.request
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .adapters import parse_lane
 
-ZEN = "https://opencode.ai/zen/v1/models"
-ZEN_DOCS = "https://opencode.ai/docs/zen/"
+# Zen's documented model list, and the first-party source of its console docs page
+# (opencode.ai/console/docs/models renders this markdown in the browser).
+ZEN = "https://opencode.ai/inference/v1/models"
+ZEN_DOCS = "https://raw.githubusercontent.com/anomalyco/opencode/dev/services/www/src/docs/content/console/models.mdx"
 OPENROUTER = "https://openrouter.ai/api/v1/models"
 SOURCES = {
     "opencode": {"format": "zen", "models_url": ZEN, "docs_url": ZEN_DOCS,
@@ -49,42 +51,27 @@ def zero_cost(cost: dict, required: tuple[str, str]) -> bool:
     return True
 
 
-class Tables(HTMLParser):
-    """Read complete table cells from the production docs, without an LLM."""
-    def __init__(self):
-        super().__init__()
-        self.tables, self.table, self.row, self.cell = [], None, None, None
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "table":
-            self.table = []
-        if self.table is not None and tag == "tr":
-            self.row = []
-        if self.row is not None and tag in ("td", "th"):
-            self.cell = ""
-
-    def handle_data(self, data):
-        if self.cell is not None:
-            self.cell += data
-
-    def handle_endtag(self, tag):
-        if tag in ("td", "th") and self.cell is not None:
-            self.row.append(self.cell.strip())
-            self.cell = None
-        if tag == "tr" and self.row is not None:
-            self.table.append(self.row)
-            self.row = None
-        if tag == "table" and self.table is not None:
-            self.tables.append(self.table)
-            self.table = None
+def markdown_tables(text: str) -> list[list[list[str]]]:
+    """Pipe tables from the provider's own docs source, read without an LLM."""
+    tables, table = [], None
+    for line in text.splitlines() + [""]:
+        row = line.strip()
+        if row.startswith("|") and row.endswith("|") and len(row) > 1:
+            cells = [cell.strip().strip("`").strip() for cell in row[1:-1].split("|")]
+            table = [] if table is None else table
+            if not all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+                table.append(cells)
+        elif table is not None:
+            tables.append(table)
+            table = None
+    return tables
 
 
-def zen_candidates(payload: dict, html: str) -> list[dict]:
+def zen_candidates(payload: dict, docs: str) -> list[dict]:
     """Join documented free prices and chat endpoints to live IDs. No ID pins."""
-    parser = Tables()
-    parser.feed(html)
-    endpoints = [t for t in parser.tables if t and t[0] == ["Model", "Model ID", "Endpoint", "AI SDK Package"]]
-    pricing = [t for t in parser.tables if t and t[0][:3] == ["Model", "Input", "Output"]]
+    tables = markdown_tables(docs)
+    endpoints = [t for t in tables if t and t[0] == ["Model", "Model ID", "Endpoint", "AI SDK Package"]]
+    pricing = [t for t in tables if t and t[0][:3] == ["Model", "Input", "Output"]]
     if len(endpoints) != 1 or len(pricing) != 1:
         raise ValueError("Zen documentation tables changed; no prices confirmed")
     live = {m["id"] for m in payload["data"]}

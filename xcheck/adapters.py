@@ -77,12 +77,13 @@ DEFAULT_ROSTER = (
 OPT_IN = (
     Lane("devin", "swe-2-max"),
     # Free OpenCode Zen pins, each qualified by a real review run. Data terms
-    # are the provider's (opencode.ai/docs/zen); mind what a packet holds.
+    # are the provider's (opencode.ai/console/docs/models, Privacy); mind what a packet holds.
     Lane("opencode", "opencode/space-bunny-free"),  # zero retention, no training
     Lane("opencode", "opencode/step-5-preview-free"),  # zero retention, no training
-    Lane("opencode", "opencode/nemotron-3-ultra-free"),  # NVIDIA trial: logged; no confidential data
     Lane("opencode", "opencode/mimo-v2.6-flash-free"),  # may be used to improve the model
     Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),  # Contributor: may log or train
+    # Free OpenRouter pin, qualified by a real review run; served by NVIDIA itself.
+    Lane("opencode", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"),  # NVIDIA trial: logged; no personal or confidential data
 )
 
 
