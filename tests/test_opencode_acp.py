@@ -70,7 +70,8 @@ class Lanes(unittest.TestCase):
                     "variants": variants}}) as metadata:
                 spec = adapters.launch(peer, work, message, self.base / "lanes" / peer.name / "harness.log", True)
                 metadata.assert_called_once()
-                self.assertFalse(metadata.call_args.kwargs["refresh"])
+                self.assertEqual(metadata.call_args.kwargs["cwd"], work)
+                self.assertNotIn("--cwd", spec.argv[spec.argv.index("--agent") + 1])
                 self.assertEqual("effort=default" in spec.argv, bool(variants))
                 self.assertNotIn("effort=low", spec.argv)
         import subprocess
@@ -86,7 +87,7 @@ class Lanes(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "skipped", row)
-        self.assertIn("opencode/not-listed-free is not in `opencode models --verbose`", row["reason"])
+        self.assertIn("opencode/not-listed-free is not in `opencode api model.list --standalone`", row["reason"])
         self.assertFalse((self.base / "lanes" / row["lane"] / "stream.jsonl").exists())
 
     def test_spender_keeps_provider_pool_and_effort(self):

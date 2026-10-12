@@ -1,18 +1,16 @@
-opencode acp
+DESCRIPTION
+  Start an Agent Client Protocol server
 
-start ACP (Agent Client Protocol) server
+USAGE
+  opencode acp [flags]
 
-Options:
-  -h, --help         show help                                                             [boolean]
-  -v, --version      show version number                                                   [boolean]
-      --print-logs   print logs to stderr                                                  [boolean]
-      --log-level    log level                  [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure         run without external plugins                                          [boolean]
-      --port         port to listen on                                         [number] [default: 0]
-      --hostname     hostname to listen on                           [string] [default: "127.0.0.1"]
-      --mdns         enable mDNS service discovery (defaults hostname to 0.0.0.0)
-                                                                          [boolean] [default: false]
-      --mdns-domain  custom domain name for mDNS service (default: opencode.local)
-                                                                [string] [default: "opencode.local"]
-      --cors         additional domains to allow for CORS                      [array] [default: []]
-      --cwd          working directory                            [string] [default: "/private/tmp"]
+FLAGS
+  --login    Run auth login instead of starting the server
+
+GLOBAL FLAGS
+  --help, -h                                                          Show help information
+  --version, -v                                                       Show version information
+  --wizard                                                            Start wizard mode for a command
+  --completions <bash|zsh|fish|sh>                                    Print shell completion script (choices: bash, zsh, fish, sh)
+  --log-level <all|trace|debug|info|warn|warning|error|fatal|none>    Sets the minimum log level (choices: all, trace, debug, info, warn, warning, error, fatal, none)
+  --print-logs                                                        Print logs to stderr (server logs require --standalone)

@@ -223,7 +223,7 @@ def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path) -> Launch
     from .files import ROOT
     agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
              "--run", str(log.parent.parent.parent), "--log", str(log), "--",
-             shutil.which("opencode") or "opencode", "acp", "--cwd", str(work)]
+             shutil.which("opencode") or "opencode", "acp"]
     argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
             "--cwd", str(work), *_opencode_model(lane), "--approve-all", "--auth-policy", "skip",
             "--no-terminal", "--no-fs", "--prompt-retries", "0", "--format", "json", "exec",
@@ -238,11 +238,11 @@ def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path) -> Launch
         from .models import client_metadata
         model = _opencode_model(lane)[1]
         try:
-            metadata = client_metadata(refresh=False, env=lane_env(spec, work), cwd=work)
+            metadata = client_metadata(env=lane_env(spec, work), cwd=work)
         except (OSError, subprocess.SubprocessError, ValueError) as e:
-            raise Unavailable(f"startup-unavailable: `opencode models --verbose` failed ({_clip(str(e), 200)})") from e
+            raise Unavailable(f"startup-unavailable: `opencode api model.list --standalone` failed ({_clip(str(e), 200)})") from e
         if model not in metadata:
-            raise Unavailable(f"startup-unavailable: {model} is not in `opencode models --verbose`; "
+            raise Unavailable(f"startup-unavailable: {model} is not in `opencode api model.list --standalone`; "
                               "connect its provider or pick a listed model")
         if metadata[model].get("variants"):
             effort = "default"
@@ -315,7 +315,7 @@ GROK_WEB_TOOLS = ("web_search", "web_fetch")
 # makes the profile allowlist fail OPEN to the full toolset, so lanes refuse
 # to start on any other version until it is revalidated — a string compare
 # on the parsed `version --json` value, never a substring match.
-GROK_VERIFIED_VERSION = "1.0.50 (c58f321264ba)"
+GROK_VERIFIED_VERSION = "1.0.52 (0920c8169e27)"
 GROK_ENV = {
     # A subscription session, never a paid API-key fallback (XAI_API_KEY is
     # scrubbed anyway; this refuses to use it if one ever leaked in).
@@ -800,8 +800,9 @@ HELP_COMMANDS = {
     "acpx": (["acpx", "--help"], ["--agent", "--cwd", "--model", "--approve-all", "--no-terminal",
              "--no-fs", "--prompt-retries", "--format", "--deny-all", "--auth-policy"]),
     "acpx exec": (["acpx", "exec", "--help"], ["--file", "--config-option"]),
-    "opencode acp": (["opencode", "acp", "--help"], ["--cwd"]),
-    "opencode models": (["opencode", "models", "--help"], ["--verbose"]),
+    "opencode acp": (["opencode", "acp", "--help"], []),
+    "opencode api": (["opencode", "api", "--help"], ["--standalone"]),
+    "opencode models": (["opencode", "models", "--help"], ["--standalone"]),
     "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
                "--respect-workspace-trust"]),
     "devin acp": (["devin", "acp", "--help"], ["--model"]),

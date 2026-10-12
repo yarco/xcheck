@@ -460,6 +460,10 @@ def doctor() -> int:
             print(f"FAIL {kind}: {' '.join(cmd)}: {e}")
             bad += 1
             continue
+        if out.returncode != 0:
+            print(f"FAIL {kind}: help command exited {out.returncode}")
+            bad += 1
+            continue
         missing = [f for f in flags if f not in text]
         print(f"{'FAIL' if missing else 'ok  '} {kind}: " + (f"missing {missing}" if missing else f"{len(flags)} flags present"))
         bad += bool(missing)
@@ -474,8 +478,7 @@ def doctor() -> int:
     print(f"FAIL claude: {problem}" if problem else
           "ok   claude: native limit flags and a first-party subscription login present")
     bad += bool(problem)
-    # opencode pins list under their provider (`opencode models <provider>`),
-    # not one shared listing.
+    # OpenCode 2 lists all providers in one native listing.
     listings: dict[tuple, str] = {}
 
     def listing(cmd: list[str]) -> str:
@@ -504,8 +507,7 @@ def doctor() -> int:
             continue
         cmd = MODEL_LISTS.get(lane.kind)
         if lane.kind == "opencode":
-            provider = lane.model.split("/", 1)[0] if "/" in lane.model else "opencode"
-            cmd = ["opencode", "models", provider]
+            cmd = ["opencode", "models", "--standalone"]
         if cmd is None:
             continue
         text = listing(cmd)

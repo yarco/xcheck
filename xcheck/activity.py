@@ -84,19 +84,20 @@ def opencode_native(run, name, session):
     path = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
     try:
         with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1)) as db:
-            owner = db.execute('SELECT directory, time_created FROM session WHERE id=?', (session,)).fetchone()
+            owner = db.execute('SELECT directory, time_created FROM session_v2 WHERE id=?', (session,)).fetchone()
             if not owner or Path(owner[0]).resolve() != workspace(name).resolve() or owner[1] < run.epoch * 1000:
                 return dict(unavailable='native session ownership could not be verified')
-            rows = db.execute('SELECT data, time_updated FROM part WHERE session_id=? ORDER BY time_updated DESC LIMIT 20', (session,)).fetchall()
+            rows = db.execute("SELECT data, time_updated FROM session_message WHERE session_id=? AND type='assistant' ORDER BY time_updated DESC LIMIT 20", (session,)).fetchall()
         result = {}
         for raw, updated in rows:
-            part = json.loads(raw)
-            kind = part.get('type')
-            if kind == 'tool' and 'last_tool' not in result:
-                state = part.get('state') or {}
-                result['last_tool'] = dict(kind=part.get('tool'), status=state.get('status'), updated_at=now(updated / 1000), time=state.get('time'))
-            elif kind == 'reasoning' and 'last_reasoning' not in result:
-                result['last_reasoning'] = dict(characters=len(part.get('text', '')), updated_at=now(updated / 1000), time=part.get('time'))
+            message = json.loads(raw)
+            for part in reversed(message.get('content', [])):
+                kind = part.get('type')
+                if kind == 'tool' and 'last_tool' not in result:
+                    state = part.get('state') or {}
+                    result['last_tool'] = dict(kind=part.get('name'), status=state.get('status'), updated_at=now(updated / 1000), time=part.get('time'))
+                elif kind == 'reasoning' and 'last_reasoning' not in result:
+                    result['last_reasoning'] = dict(characters=len(part.get('text', '')), updated_at=now(updated / 1000), time=part.get('time'))
         return result
     except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError, KeyError):
         return dict(unavailable='native progress store unavailable or its schema changed')

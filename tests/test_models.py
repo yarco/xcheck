@@ -7,13 +7,14 @@ import pathlib
 import sys
 import runpy
 import time
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from xcheck import adapters, capacity, models
+from xcheck import adapters, capacity, files, models
 
 
 class ClaudeExpiry(unittest.TestCase):
@@ -81,12 +82,17 @@ class Discovery(unittest.TestCase):
                          adapters.parse_lane("opencode:opencode/new-free").pool)
 
     def setUp(self):
+        root = tempfile.TemporaryDirectory(prefix="xcheck-models-test-")
+        self.addCleanup(root.cleanup)
+        isolate = patch.object(files, "ROOT", pathlib.Path(root.name))
+        isolate.start()
+        self.addCleanup(isolate.stop)
         self.item = {"id": "new/model:free", "name": "A new model", "created": 1790294400,
                      "supported_parameters": ["tools"],
                      "architecture": {"input_modalities": ["text"], "output_modalities": ["text"], "tokenizer": "Other"},
                      "pricing": {"prompt": "0", "completion": "0", "request": "0"}}
-        self.local = {"openrouter/new/model:free": {"capabilities": {"toolcall": True,
-                      "input": {"text": True}, "output": {"text": True}}}}
+        self.local = {"openrouter/new/model:free": {"capabilities": {"tools": True,
+                      "input": ["text"], "output": ["text"]}}}
         self.docs = """| Model | Model ID | Endpoint | AI SDK Package |
 | --- | --- | --- | --- |
 | New Free | new-free | `https://opencode.ai/inference/v1/chat/completions` | `sdk` |
@@ -160,7 +166,7 @@ class Discovery(unittest.TestCase):
 
     def test_provider_tools_without_client_tools_need_setup(self):
         local = copy.deepcopy(self.local)
-        local["openrouter/new/model:free"]["capabilities"]["toolcall"] = False
+        local["openrouter/new/model:free"]["capabilities"]["tools"] = False
         self.assertEqual(self.discover(metadata=local)["models"][0]["state"], "needs-client-setup")
 
     def test_new_undated_zen_offer_survives_default_display_limit(self):
@@ -177,8 +183,8 @@ class Discovery(unittest.TestCase):
         self.assertIn("20 shown of 22", output.getvalue())
 
     def test_zen_registry_stale_price_does_not_override_provider(self):
-        local = {"opencode/new-free": {"cost": {"input": 500, "output": 500}, "release_date": "2026-09-25",
-                     "capabilities": {"toolcall": True, "input": {"text": True}, "output": {"text": True}}}}
+        local = {"opencode/new-free": {"cost": {"input": 500, "output": 500}, "time": {"released": 1790294400000},
+                     "capabilities": {"tools": True, "input": ["text"], "output": ["text"]}}}
         with patch.object(models, "client_metadata", return_value=local), \
              patch.object(models, "fetch", side_effect=[self.zen, self.docs]):
             result = models.discover({"opencode"})
@@ -245,17 +251,29 @@ class Discovery(unittest.TestCase):
                 with open(pathlib.Path(tmp) / ".opencode-models.lock", "a") as other:
                     with self.assertRaises(BlockingIOError):  # held for the whole listing
                         fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return models.subprocess.CompletedProcess(args, 0, "", "")
+                return models.subprocess.CompletedProcess(args, 0, '{"data":[]}', "")
             with patch.object(models.subprocess, "run", side_effect=listing):
-                self.assertEqual(models.client_metadata(refresh=False), {})
+                self.assertEqual(models.client_metadata(), {})
 
-    def test_verbose_client_listing_and_format_failure(self):
-        output = 'opencode/new-free\n' + json.dumps({"capabilities": {"toolcall": True}}) + '\nopenrouter/new/model:free\n{}\n'
+    def test_native_model_api_and_format_failure(self):
+        output = json.dumps({"data": [{"providerID": "opencode", "id": "new-free", "capabilities": {"tools": True}},
+                                      {"providerID": "openrouter", "id": "new/model:free"}]})
         with patch.object(models.subprocess, "run", return_value=Mock(stdout=output)) as cli:
             self.assertIn("openrouter/new/model:free", models.client_metadata())
-        self.assertIn("--refresh", cli.call_args.args[0])
-        with patch.object(models.subprocess, "run", return_value=Mock(stdout="changed")), self.assertRaises(ValueError):
-            models.client_metadata()
+        self.assertEqual(cli.call_args.args[0], ["opencode", "api", "model.list", "--standalone"])
+        for output in ("changed", '{"data":{}}', '{"error":"unavailable"}', '{"data":[{}]}'):
+            with self.subTest(output=output), patch.object(models.subprocess, "run", return_value=Mock(stdout=output)), self.assertRaises(ValueError):
+                models.client_metadata()
+
+    def test_captured_v2_model_contract_is_discoverable(self):
+        captured = (pathlib.Path(__file__).parent / "fixtures/opencode-v2-model-list.json").read_text()
+        docs = self.docs.replace("new-free", "space-bunny-free")
+        with patch.object(models.subprocess, "run", return_value=Mock(stdout=captured)), \
+             patch.object(models, "fetch", side_effect=[{"data": [{"id": "space-bunny-free"}]}, docs]):
+            report = models.discover({"opencode"})
+        self.assertEqual(report["models"][0]["state"], "ready")
+        self.assertEqual(report["models"][0]["release_date"], "2026-09-23")
+        self.assertEqual(report["models"][0]["selector"], "opencode:opencode/space-bunny-free")
 
     def test_cli_source_gap_and_pending_offer_are_visible(self):
         report = {"checked_at": "now", "models": [{"provider": "vendor", "release_date": "", "selector": "opencode:vendor/model",

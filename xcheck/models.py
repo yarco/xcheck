@@ -138,27 +138,22 @@ def fetch(url: str, *, as_json: bool = True):
     return json.loads(body) if as_json else body
 
 
-def client_metadata(*, refresh: bool = True, env: dict | None = None, cwd: Path | None = None) -> dict:
-    # Lanes of one run list at the same moment; a listing that overlaps
-    # OpenCode refreshing its models cache once came back truncated. One
-    # listing at a time per xcheck root.
+def client_metadata(*, env: dict | None = None, cwd: Path | None = None) -> dict:
+    # Serialize local snapshots, and use a private server so no shared service
+    # escapes a lane's process group or workspace sandbox.
     from .files import ROOT
     ROOT.mkdir(parents=True, exist_ok=True)
     with open(ROOT / ".opencode-models.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        listing = subprocess.run(["opencode", "models", "--verbose", *(["--refresh"] if refresh else [])],
+        listing = subprocess.run(["opencode", "api", "model.list", "--standalone"],
                                  env=env, cwd=cwd, capture_output=True, text=True, timeout=60, check=True)
-    decoder = json.JSONDecoder()
-    remaining = listing.stdout.strip()
-    result = {}
-    while remaining:
-        selector, separator, remaining = remaining.partition("\n")
-        if not separator:
-            raise ValueError("OpenCode model listing format changed")
-        item, end = decoder.raw_decode(remaining.lstrip())
-        remaining = remaining.lstrip()[end:].lstrip()
-        result[selector.strip()] = item
-    return result
+    try:
+        data = json.loads(listing.stdout)["data"]
+        if not isinstance(data, list):
+            raise ValueError("expected a model array")
+        return {f"{item['providerID']}/{item['id']}": item for item in data}
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("OpenCode model API format changed") from error
 
 
 def sources(path: Path | None = None) -> dict:
@@ -215,19 +210,19 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
                 caps = local.get("capabilities", {})
                 if source["format"] == "zen":
                     row["pricing_source"] = source["docs_url"]
-                    row["tool_call"] = caps.get("toolcall")
+                    row["tool_call"] = caps.get("tools")
                     if row["tool_call"] is False:
                         continue
-                    if row["tool_call"] is True and not (caps.get("input", {}).get("text") and caps.get("output", {}).get("text")):
+                    if row["tool_call"] is True and not ("text" in caps.get("input", []) and "text" in caps.get("output", [])):
                         continue
                     try:
-                        row["release_date"] = date.fromisoformat(local.get("release_date", "")).isoformat()
+                        row["release_date"] = datetime.fromtimestamp(local["time"]["released"] / 1000, timezone.utc).date().isoformat()
                         row["date_source"] = "OpenCode client metadata (Models.dev); advisory"
-                    except (ValueError, TypeError):
+                    except (KeyError, ValueError, TypeError, OverflowError, OSError):
                         pass
-                client_tools = (caps.get("toolcall") is True and caps.get("input", {}).get("text") is True
-                                and caps.get("output", {}).get("text") is True)
-                ready = bool(local) and local.get("status") != "deprecated" and row["tool_call"] is True and client_tools
+                client_tools = (caps.get("tools") is True and "text" in caps.get("input", [])
+                                and "text" in caps.get("output", []))
+                ready = bool(local) and local.get("status") != "deprecated" and local.get("enabled", True) and row["tool_call"] is True and client_tools
                 confirmed.append({**row, "provider": provider, "selector": selector,
                                "source": source["models_url"], "provider_docs": source["docs_url"],
                                "auth_env": source.get("auth_env", []), "client_available": bool(local),

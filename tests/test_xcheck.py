@@ -1182,6 +1182,18 @@ class Installation(unittest.TestCase):
                         if not path.is_symlink():
                             path.chmod(0o755)
 
+    def test_doctor_rejects_failed_help_even_when_no_adapter_flags_are_needed(self):
+        from xcheck import install, run
+        with patch.object(install, "source_root", return_value=REPO), \
+             patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
+             patch.object(adapters, "HELP_COMMANDS", {"opencode acp": (["opencode", "acp", "--help"], [])}), \
+             patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "unavailable")), \
+             patch.object(adapters, "unavailable", return_value=None), \
+             patch.object(run, "agy_acp_models", return_value=[]), \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(run.doctor(), 1)
+        self.assertIn("FAIL opencode acp: help command exited 1", output.getvalue())
+
     def test_doctor_detects_stale_installed_copy_from_captured_help(self):
         from xcheck import install, run
         helps = {tuple(cmd): (FIX / "cli-help" / f'{kind.replace(" ", "-")}.txt').read_text()
@@ -1458,7 +1470,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(row["status"], "skipped", row)
         self.assertIn("native-unverified", row["reason"])
         self.assertIn("1.0.99", row["reason"])
-        self.assertIn("1.0.50", row["reason"])
+        self.assertIn(adapters.GROK_VERIFIED_VERSION, row["reason"])
 
     def test_a_zai_lane_without_its_key_is_skipped_by_name_before_spending(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",

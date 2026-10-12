@@ -4,7 +4,13 @@ xcheck's Grok lane runs Grok's own documented ACP stdio server under acpx's
 generic custom-agent transport. There is no built-in Grok adapter in acpx and
 no private ACP client, wrapper, or protocol workaround anywhere in the path.
 
-Verified with **grok 1.0.50 (c58f321264ba)** and **acpx 0.19.4**.
+Verified with **grok 1.0.52 (0920c8169e27)** and **acpx 0.19.4**.
+
+The 1.0.52 zero-turn startup probes retained six native tools in packet mode
+(four allowed tools plus the two MCP dispatch tools), and eight in live mode.
+No operator hooks loaded or ran. Live headless and Herdr smoke runs exercised
+shell, native web fetch and read-only qmd MCP and reached native completion.
+The CLI binary is the upstream release; only xcheck’s admission pin changed.
 
 ## Launch shape
 
@@ -174,7 +180,7 @@ applied) — plus flag drift checks for `grok agent --help` and `acpx`.
 
 - **Version admission gate**: `GROK_VERIFIED_VERSION` in `adapters.py` pins
   the native version this adapter was verified against (currently
-  `1.0.50`). `run_lane` probes `grok --sandbox off --cwd <work> version
+  `1.0.52 (0920c8169e27)`). `run_lane` probes `grok --sandbox off --cwd <work> version
   --json` (zero inference, same call doctor makes) before spawning and
   **skips** the lane with `native-unverified: grok <actual> is not the
   adapter-verified <pin>…` on any mismatch — the comparison is an exact

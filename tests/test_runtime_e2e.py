@@ -288,16 +288,20 @@ class RuntimeHandoff(unittest.TestCase):
         run = files.Run(self.base, {name: lane}, support.CONTRACT, False, 0, None,
                         "headless", "other", "now", {}, {}, epoch=100)
         with closing(sqlite3.connect(db_path)) as db, db:
-            db.execute('CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER)')
-            db.execute('CREATE TABLE part (session_id TEXT, data TEXT, time_updated INTEGER)')
-            db.execute('INSERT INTO session VALUES (?, ?, ?)', ("ses_test", str(self.root / ".lanes" / name), 101000))
-            db.execute('INSERT INTO part VALUES (?, ?, ?)', ("ses_test", json.dumps(dict(type="tool", tool="bash", state=dict(status="running", input="SECRET command", output="SECRET result"))), 103000))
-            db.execute('INSERT INTO part VALUES (?, ?, ?)', ("ses_test", json.dumps(dict(type="reasoning", text="SECRET reasoning")), 102000))
+            db.execute('CREATE TABLE session_v2 (id TEXT, directory TEXT, time_created INTEGER)')
+            db.execute('CREATE TABLE session_message (session_id TEXT, data TEXT, time_updated INTEGER, type TEXT)')
+            db.execute('INSERT INTO session_v2 VALUES (?, ?, ?)', ("ses_test", str(self.root / ".lanes" / name), 101000))
+            content = [dict(type="reasoning", text="SECRET reasoning"),
+                       dict(type="tool", name="shell", state=dict(status="running", input="SECRET command", content=[dict(type="text", text="SECRET result")]), time=dict(created=103000))]
+            db.execute('INSERT INTO session_message VALUES (?, ?, ?, ?)', ("ses_test", json.dumps(dict(content=content)), 103000, "assistant"))
+
         with patch.dict(os.environ, XDG_DATA_HOME=str(fake_store)), patch.object(activity, "workspace", return_value=self.root / ".lanes" / name):
             observed = activity.opencode_native(run, name, "ses_test")
             self.assertEqual(observed["last_tool"]["status"], "running")
+            self.assertEqual(observed["last_tool"]["kind"], "shell")
+            self.assertEqual(observed["last_tool"]["time"], {"created": 103000})
             self.assertEqual(observed["last_reasoning"]["characters"], len("SECRET reasoning"))
             self.assertNotIn("SECRET", json.dumps(observed))
             with closing(sqlite3.connect(db_path)) as db, db:
-                db.execute('UPDATE session SET directory=?', (str(self.root / "another-lane"),))
+                db.execute('UPDATE session_v2 SET directory=?', (str(self.root / "another-lane"),))
             self.assertIn("unavailable", activity.opencode_native(run, name, "ses_test"))

@@ -50,7 +50,7 @@ if kind == "grok" and mode == "socket-symlink" and "--sandbox" in argv and argv[
 if kind == "grok" and argv[-2:] == ["version", "--json"]:
     assert argv[argv.index("--sandbox") + 1] == "off"
     print(json.dumps({"currentVersion": os.environ.get("FAKE_GROK_VERSION",
-                                                        "1.0.50 (c58f321264ba)"),
+                                                        "1.0.52 (0920c8169e27)"),
                       "channel": "stable"}))
     sys.exit(0)
 if kind == "grok" and "--help" in argv:
@@ -71,11 +71,12 @@ if kind == "security":
 UPSTREAM_LIMIT = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
 OPENCODE_MODELS = ["opencode/muse-spark-1.3-contributor-free", "opencode/space-bunny-free",
                    "zai-coding-plan/glm-5.3", "openrouter/qwen/qwen3.8-27b:free"]
+if kind == "opencode" and argv[:2] == ["api", "model.list"] and "--help" not in argv:
+    print(json.dumps({"data": [{"providerID": model.split("/", 1)[0], "id": model.split("/", 1)[1],
+         "variants": [{"id": "high"}] if not model.startswith("openrouter/") else []} for model in OPENCODE_MODELS]}))
+    sys.exit(0)
 if kind == "opencode" and argv[:1] == ["models"] and "--help" not in argv:
-    for model in OPENCODE_MODELS:
-        print(model)
-        if "--verbose" in argv:
-            print(json.dumps({"variants": {"high": {}} if not model.startswith("openrouter/") else {}}))
+    print("\n".join(OPENCODE_MODELS))
     sys.exit(0)
 
 # The operator's claude: help (native flag contract), the zero-spend auth probe,
