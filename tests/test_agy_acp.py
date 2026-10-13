@@ -317,6 +317,14 @@ class Lanes(unittest.TestCase):
                 patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}"}):
             self.assertEqual(run.agy_acp_models(), ["gemini-3.8-flash-high", "gemini-pro-agent"])
 
+    def test_advertised_model_list_drops_the_sentence_period(self):
+        from xcheck import run
+        text = ('Cannot apply --model "x": the ACP agent did not advertise that model. '
+                'Available models: gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-3.8-flash-low.')
+        with patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
+            self.assertEqual(run.agy_acp_models(),
+                             ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"])
+
 
 if __name__ == "__main__":
     unittest.main()

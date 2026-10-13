@@ -9,6 +9,7 @@ import fcntl
 import json
 import re
 import subprocess
+import time
 import urllib.request
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -141,12 +142,32 @@ def fetch(url: str, *, as_json: bool = True):
 def client_metadata(*, env: dict | None = None, cwd: Path | None = None) -> dict:
     # Serialize local snapshots, and use a private server so no shared service
     # escapes a lane's process group or workspace sandbox.
+    # A cold `serve --stdio` can answer GET /api/model with 503 while plugins
+    # and MCP are still loading, and the CLI then exits 1. The next boot
+    # succeeds; that happened to the Space Bunny lane on 2026-10-12 while the
+    # following lane's listing worked. Retry the startup. A model that is
+    # absent is a zero exit whose list does not contain it, not this error.
     from .files import ROOT
     ROOT.mkdir(parents=True, exist_ok=True)
+    command = ["opencode", "api", "model.list", "--standalone"]
     with open(ROOT / ".opencode-models.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        listing = subprocess.run(["opencode", "api", "model.list", "--standalone"],
-                                 env=env, cwd=cwd, capture_output=True, text=True, timeout=60, check=True)
+        listing = None
+        for attempt in range(3):
+            try:
+                listing = subprocess.run(command, env=env, cwd=cwd, capture_output=True,
+                                         text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                if attempt == 2:
+                    raise
+            else:
+                if listing.returncode == 0:
+                    break
+                if attempt == 2:
+                    detail = " ".join((listing.stderr or "").split())[:300] or "no stderr"
+                    raise ValueError(
+                        f"`opencode api model.list --standalone` failed (exit {listing.returncode}: {detail})")
+            time.sleep(1)
     try:
         data = json.loads(listing.stdout)["data"]
         if not isinstance(data, list):

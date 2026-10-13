@@ -4,6 +4,7 @@ import copy
 import json
 import io
 import pathlib
+import subprocess
 import sys
 import runpy
 import time
@@ -258,17 +259,38 @@ class Discovery(unittest.TestCase):
     def test_native_model_api_and_format_failure(self):
         output = json.dumps({"data": [{"providerID": "opencode", "id": "new-free", "capabilities": {"tools": True}},
                                       {"providerID": "openrouter", "id": "new/model:free"}]})
-        with patch.object(models.subprocess, "run", return_value=Mock(stdout=output)) as cli:
+        ok = subprocess.CompletedProcess(["opencode"], 0, output, "")
+        with patch.object(models.subprocess, "run", return_value=ok) as cli:
             self.assertIn("openrouter/new/model:free", models.client_metadata())
         self.assertEqual(cli.call_args.args[0], ["opencode", "api", "model.list", "--standalone"])
         for output in ("changed", '{"data":{}}', '{"error":"unavailable"}', '{"data":[{}]}'):
-            with self.subTest(output=output), patch.object(models.subprocess, "run", return_value=Mock(stdout=output)), self.assertRaises(ValueError):
+            bad = subprocess.CompletedProcess(["opencode"], 0, output, "")
+            with self.subTest(output=output), patch.object(models.subprocess, "run", return_value=bad), self.assertRaises(ValueError):
+                models.client_metadata()
+
+    def test_cold_model_list_is_retried_then_a_persistent_failure_keeps_stderr(self):
+        import subprocess as sp
+        good = json.dumps({"data": [{"providerID": "opencode", "id": "space-bunny-free"}]})
+        calls = [
+            sp.CompletedProcess(["opencode"], 1, "", "GET /api/model 503"),
+            sp.CompletedProcess(["opencode"], 0, good, ""),
+        ]
+        with patch.object(models.subprocess, "run", side_effect=calls) as cli, patch.object(models.time, "sleep") as pause:
+            self.assertIn("opencode/space-bunny-free", models.client_metadata())
+        self.assertEqual(cli.call_count, 2)
+        pause.assert_called_once_with(1)
+        failed = sp.CompletedProcess(["opencode"], 1, "", "still 503")
+        with patch.object(models.subprocess, "run", return_value=failed), patch.object(models.time, "sleep"):
+            with self.assertRaisesRegex(ValueError, "exit 1: still 503"):
                 models.client_metadata()
 
     def test_captured_v2_model_contract_is_discoverable(self):
         captured = (pathlib.Path(__file__).parent / "fixtures/opencode-v2-model-list.json").read_text()
         docs = self.docs.replace("new-free", "space-bunny-free")
-        with patch.object(models.subprocess, "run", return_value=Mock(stdout=captured)), \
+        # A bare Mock has no integer exit status. `returncode == 0` is then false,
+        # so the cold-start retry treats a successful capture as a failed listing.
+        ok = subprocess.CompletedProcess(["opencode"], 0, captured, "")
+        with patch.object(models.subprocess, "run", return_value=ok), \
              patch.object(models, "fetch", side_effect=[{"data": [{"id": "space-bunny-free"}]}, docs]):
             report = models.discover({"opencode"})
         self.assertEqual(report["models"][0]["state"], "ready")

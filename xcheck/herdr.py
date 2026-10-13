@@ -52,25 +52,60 @@ def _herdr(*args: str, ctx: dict, timeout: float = 15) -> dict:
 
 def caller() -> dict | None:
     """Use the canonical verifier; never infer ownership from env or titles."""
+    ctx, _reason = resolve_caller()
+    return ctx
+
+
+def resolve_caller() -> tuple[dict | None, str]:
+    """Return a verified placement context, or a refusal that names one cause.
+
+    The helper's `verified` binding is the only caller identity. For a Grok
+    orchestrator that binding is `GROK_SESSION_ID` matched to Herdr's grok
+    agent record: the operator stated that session is a verified Herdr pane.
+    A refusal reports the helper state, the missing binding field, the
+    measured layout area, or the layout call's error — one of those, not a
+    list of causes that were not observed.
+    """
     try:
         out = subprocess.run([str(CONTEXT_HELPER)], stdin=subprocess.DEVNULL,
                              capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return None, "caller-context helper timed out"
+    except OSError as e:
+        return None, f"caller-context helper could not be run ({e})"
+    try:
         verdict = json.loads(out.stdout)
-        binding = verdict.get("binding") or {}
-        if out.returncode or verdict.get("state") != "verified":
-            return None
-        if not all(isinstance(binding.get(k), str) and binding[k]
-                   for k in ("pane_id", "socket_path", "session", "terminal_id")):
-            return None
-        ctx = {"pane": binding["pane_id"], "socket": binding["socket_path"],
-               "session": binding["session"]}
+    except json.JSONDecodeError:
+        return None, "caller-context helper returned no verdict"
+    if not isinstance(verdict, dict):
+        return None, "caller-context helper returned no verdict"
+    state = verdict.get("state")
+    binding = verdict.get("binding") if isinstance(verdict.get("binding"), dict) else {}
+    if out.returncode or state != "verified":
+        detail = f"caller-context state {state or 'missing'}"
+        reason = verdict.get("reason")
+        if isinstance(reason, str) and reason:
+            detail += f" ({reason})"
+        return None, detail
+    missing = [k for k in ("pane_id", "socket_path", "session", "terminal_id")
+               if not (isinstance(binding.get(k), str) and binding[k])]
+    if missing:
+        return None, "verified binding missing " + ", ".join(missing)
+    ctx = {"pane": binding["pane_id"], "socket": binding["socket_path"],
+           "session": binding["session"]}
+    try:
         area = _herdr("pane", "layout", "--pane", ctx["pane"], ctx=ctx)["layout"]["area"]
-        if area["width"] < MIN_WIDTH or area["height"] < MIN_HEIGHT:
-            return None
-    except (OSError, subprocess.TimeoutExpired, HerdrError, KeyError, TypeError,
-            AttributeError, json.JSONDecodeError):
-        return None
-    return ctx
+        width, height = area["width"], area["height"]
+    except HerdrError as e:
+        return None, f"Herdr server unreadable ({e})"
+    except (KeyError, TypeError, AttributeError):
+        return None, "pane layout returned no area"
+    if not isinstance(width, int) or isinstance(width, bool) or not isinstance(height, int) or isinstance(height, bool):
+        return None, "pane layout returned no area"
+    if width < MIN_WIDTH or height < MIN_HEIGHT:
+        return None, (f"pane {ctx['pane']} layout is {width} by {height}; "
+                      f"placement needs at least {MIN_WIDTH} by {MIN_HEIGHT}")
+    return ctx, ""
 
 
 def place(ctx: dict, lanes: list[str], cwd: str, command_for, created) -> None:

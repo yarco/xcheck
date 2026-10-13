@@ -129,9 +129,9 @@ class ReportStartup(unittest.TestCase):
 
     def test_doctor_fails_an_agy_pin_the_acp_server_does_not_advertise(self):
         code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''),
-                                 acp_models=['gemini-3.8-flash-high'])
+                                 acp_models=['gemini-3.8-flash-low'])
         self.assertEqual(code, 1, text)
-        self.assertIn('agy model gemini-pro-agent NOT advertised by the ACP server', text)
+        self.assertIn('agy model gemini-3.8-flash-high NOT advertised by the ACP server', text)
 
     def test_doctor_fails_live_startup_even_when_all_flags_and_pins_exist(self):
         code, text = self.doctor(subprocess.CompletedProcess([], 1, '',

@@ -867,9 +867,11 @@ class HerdrOwnership(unittest.TestCase):
                "terminal_id": "fixture-terminal"}
     CONTEXT = {"pane": "caller", "socket": "/fixture/server.sock", "session": "verified"}
 
-    def probe(self, state="verified", code=0, binding=None):
-        return subprocess.CompletedProcess([], code, json.dumps({"state": state,
-            "binding": self.BINDING if binding is None else binding}), "")
+    def probe(self, state="verified", code=0, binding=None, reason=None):
+        body = {"state": state, "binding": self.BINDING if binding is None else binding}
+        if reason is not None:
+            body["reason"] = reason
+        return subprocess.CompletedProcess([], code, json.dumps(body), "")
 
     def test_caller_needs_a_verified_binding_and_readable_layout_of_sufficient_size(self):
         with patch.object(self.herdr.subprocess, "run", return_value=self.probe()):
@@ -892,6 +894,54 @@ class HerdrOwnership(unittest.TestCase):
                     patch.object(self.herdr, "_herdr") as api:
                 self.assertIsNone(self.herdr.caller())
                 api.assert_not_called()
+
+    def test_refusal_names_the_observed_blocker(self):
+        small = {"layout": {"area": {"width": 120, "height": 59}}}
+        with patch.object(self.herdr.subprocess, "run", return_value=self.probe()), \
+                patch.object(self.herdr, "_herdr", return_value=small):
+            ctx, reason = self.herdr.resolve_caller()
+        self.assertIsNone(ctx)
+        self.assertIn("120 by 59", reason)
+        self.assertIn("176 by 14", reason)
+        self.assertNotIn("server unreadable", reason)
+        self.assertNotIn("unconfirmed", reason)
+
+        with patch.object(self.herdr.subprocess, "run",
+                          return_value=self.probe("unconfirmed", 2, reason="insufficient_evidence")), \
+                patch.object(self.herdr, "_herdr") as api:
+            ctx, reason = self.herdr.resolve_caller()
+        self.assertIsNone(ctx)
+        self.assertIn("unconfirmed", reason)
+        self.assertIn("insufficient_evidence", reason)
+        self.assertNotIn("tab too small", reason)
+        self.assertNotIn("server unreadable", reason)
+        api.assert_not_called()
+
+        with patch.object(self.herdr.subprocess, "run", return_value=self.probe()), \
+                patch.object(self.herdr, "_herdr", side_effect=self.herdr.HerdrError("herdr pane layout: timed out")):
+            ctx, reason = self.herdr.resolve_caller()
+        self.assertIsNone(ctx)
+        self.assertIn("server unreadable", reason)
+        self.assertIn("timed out", reason)
+        self.assertNotIn("by 59", reason)
+
+    def test_explicit_herdr_refusal_names_the_helper_and_leaves_the_packet(self):
+        from xcheck import run as runmod
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        base = root / "packet"
+        stage(base)
+        reason = "caller-context state unconfirmed (insufficient_evidence)"
+        with patch.object(runmod, "ROOT", root), \
+                patch.object(runmod.herdr, "resolve_caller", return_value=(None, reason)):
+            with self.assertRaises(runmod.RunError) as cm:
+                runmod.start(base, [Lane("codex", "gpt-6.1-sol", "high")], "herdr", "grok",
+                             False, None, None, set(), True)
+        text = str(cm.exception)
+        self.assertIn("insufficient_evidence", text)
+        self.assertNotIn("tab too small", text)
+        self.assertNotIn("server unreadable", text)
+        self.assertFalse((base / ".launched").exists())
 
     def test_verified_binding_overrides_stale_inherited_context(self):
         with patch.dict(os.environ, {"HERDR_PANE_ID": "wrong", "HERDR_SOCKET_PATH": "/wrong/socket"}), \
@@ -1086,8 +1136,8 @@ class Capacity(unittest.TestCase):
         from xcheck import capacity as c
         roster = adapters.DEFAULT_ROSTER
         flash = Lane("agy", "gemini-3.8-flash-high")
-        self.assertEqual(c.sharing(flash, roster), 2)
-        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 15)
+        self.assertEqual(c.sharing(flash, roster), 1)
+        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 10)
 
     def test_tightest_window_must_exceed_the_reserve(self):
         from xcheck.capacity import judge
@@ -1122,7 +1172,7 @@ class Capacity(unittest.TestCase):
 
     def test_missing_agy_windows_fail_closed_for_each_acp_pin(self):
         from xcheck import capacity as c
-        for model in ("gemini-3.8-flash-high", "gemini-pro-agent"):
+        for model in (lane.model for lane in adapters.DEFAULT_ROSTER if lane.kind == "agy"):
             for window in ("5h", "weekly"):
                 data = self.fixture("agy-usage.json")["command"]["data"]
                 for group in data["groups"]:

@@ -65,7 +65,8 @@ DEFAULT_ROSTER = (
     Lane("codex", "gpt-6.1-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
-    Lane("agy", "gemini-pro-agent"),  # the ACP server's id for Gemini 3.1 Pro (High)
+    # Flash only. On 2026-10-13 the ACP server advertised gemini-3.8-flash-{high,medium,low}
+    # and not gemini-pro-agent. Add a Pro row when doctor shows one.
     Lane("agy", "gemini-3.8-flash-high"),
 )
 

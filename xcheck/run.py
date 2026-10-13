@@ -72,13 +72,16 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     if orch in {l.kind for l in lanes}:
         raise RunError(f"a {orch} orchestrator must not launch a {orch} peer")
 
-    ctx = herdr.caller() if mode in ("auto", "herdr") else None
+    ctx, refusal = herdr.resolve_caller() if mode in ("auto", "herdr") else (None, "")
     if mode == "herdr" and ctx is None:
-        raise RunError("Herdr placement unavailable (caller-context helper did not verify a complete binding, tab too small, or server unreadable)")
+        raise RunError(f"Herdr placement unavailable: {refusal}")
     if orch == "grok" and ctx is None:
         # Grok's sandbox covers its whole process tree; headless lanes would
         # inherit it. Herdr panes are spawned by the Herdr server, outside it.
-        raise RunError("a Grok orchestrator must use Herdr mode (headless lanes would run in its sandbox)")
+        # Auto mode has already asked for a pane. When that placement fails,
+        # name the observed blocker instead of leaving only the sandbox line.
+        detail = f"; Herdr placement unavailable: {refusal}" if refusal else ""
+        raise RunError("a Grok orchestrator must use Herdr mode (headless lanes would run in its sandbox)" + detail)
     mode = "herdr" if ctx else "headless"
     try:
         (base / ".launched").mkdir()
@@ -434,7 +437,10 @@ def agy_acp_models() -> list[str] | None:
         except (OSError, subprocess.TimeoutExpired):
             return None
     found = re.search(r"Available models: ([^\"\n]+)", out.stdout + out.stderr)
-    return [m.strip() for m in found.group(1).split(",")] if found else None
+    if not found:
+        return None
+    # The sentence ends with a period. It is not part of the last model id.
+    return [m.strip() for m in found.group(1).rstrip(".").split(",") if m.strip()]
 
 
 def doctor() -> int:
