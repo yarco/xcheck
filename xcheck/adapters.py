@@ -81,6 +81,7 @@ OPT_IN = (
     # Free OpenCode Zen pins, each qualified by a real review run. Data terms
     # are the provider's (opencode.ai/console/docs/models, Privacy); mind what a packet holds.
     Lane("opencode", "opencode/space-bunny-free"),  # zero retention, no training
+    Lane("opencode", "opencode/cat-jam-free"),  # zero retention, no training; free period collects feedback
     Lane("opencode", "opencode/step-5-preview-free"),  # zero retention, no training
     Lane("opencode", "opencode/mimo-v2.6-flash-free"),  # may be used to improve the model
     Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),  # Contributor: may log or train
