@@ -1136,8 +1136,8 @@ class Capacity(unittest.TestCase):
         from xcheck import capacity as c
         roster = adapters.DEFAULT_ROSTER
         flash = Lane("agy", "gemini-3.8-flash-high")
-        self.assertEqual(c.sharing(flash, roster), 1)
-        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 10)
+        self.assertEqual(c.sharing(flash, roster), 2)
+        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 15)
 
     def test_tightest_window_must_exceed_the_reserve(self):
         from xcheck.capacity import judge
@@ -1172,7 +1172,7 @@ class Capacity(unittest.TestCase):
 
     def test_missing_agy_windows_fail_closed_for_each_acp_pin(self):
         from xcheck import capacity as c
-        for model in (lane.model for lane in adapters.DEFAULT_ROSTER if lane.kind == "agy"):
+        for model in (lane.model for lane in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN) if lane.kind == "agy"):
             for window in ("5h", "weekly"):
                 data = self.fixture("agy-usage.json")["command"]["data"]
                 for group in data["groups"]:
@@ -1251,8 +1251,13 @@ class Installation(unittest.TestCase):
         models = "\n".join(l.model for l in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))
 
         def fake_run(cmd, **_):
+            if tuple(cmd) in helps:
+                return subprocess.CompletedProcess(cmd, 0, helps[tuple(cmd)], "")
             if cmd[-2:] == ["version", "--json"]:
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"currentVersion": adapters.GROK_VERIFIED_VERSION}), "")
+            if cmd[:2] == ["opencode", "api"]:
+                data = [{"providerID": m.split("/", 1)[0], "id": m.split("/", 1)[1]} for m in models.splitlines() if "/" in m]
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": data}), "")
             return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), models), "")
 
         with patch.object(install, "source_root", return_value=REPO), \
@@ -1529,7 +1534,7 @@ class EndToEnd(unittest.TestCase):
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "skipped", row)
         self.assertIn("ZAI_API_KEY is empty", row["reason"])
-        self.assertFalse((self.root / ".lanes" / "opencode-zai-coding-plan-glm-5.3").exists())
+        self.assertFalse((self.root / ".lanes" / "opencode-zai-coding-plan" / "opencode-zai-coding-plan-glm-5.3").exists())
 
     def test_a_base_outside_the_root_is_refused_before_anything_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1653,7 +1658,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         for kind in adapters.KINDS:
             lane = next(l for l in lanes.split(",") if l.startswith(kind + ":"))
-            work = self.root / ".lanes" / adapters.parse_lane(lane).name
+            work = self.root / ".lanes" / adapters.parse_lane(lane).pool / adapters.parse_lane(lane).name
             # The Agy server may write only inside its lane: it dumps into its workspace.
             seen = json.loads((work / "env.agy.json" if kind == "agy" else dump.with_suffix(f".{kind}.json")).read_text())
             self.assertFalse(set(leak) & set(seen), f"{kind} saw {set(leak) & set(seen)}")
@@ -1677,6 +1682,31 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(self.xcheck("wait", "--base", str(base)).returncode, 0)
         return json.loads((base / "lanes" / lane / "exit.json").read_text())
 
+    def test_colliding_names_on_different_pools_do_not_replace_a_live_packet(self):
+        from xcheck import files
+        first = adapters.parse_lane("opencode:fixture/a-b")
+        second = adapters.parse_lane("opencode:fixture-a-b")
+        self.assertEqual(first.name, second.name)
+        self.assertNotEqual(first.pool, second.pool)
+        other = self.second_base()
+        (self.base / "evidence" / "ownership.txt").write_text("first packet")
+        (other / "evidence" / "ownership.txt").write_text("second packet")
+        self.detach(self.base, "opencode:fixture/a-b", "slow")
+        stream = self.base / "lanes" / first.name / "stream.jsonl"
+        until = time.monotonic() + 5
+        while time.monotonic() < until:
+            if stream.exists() and '"method": "session/prompt"' in stream.read_text():
+                break
+            time.sleep(0.05)
+        self.assertIn('"method": "session/prompt"', stream.read_text())
+        self.detach(other, "opencode:fixture-a-b", "ok")
+        self.assertEqual(self.lane_exit(other, second.name)["status"], "done")
+        with patch.object(files, "ROOT", self.root):
+            self.assertNotEqual(files.workspace(first), files.workspace(second))
+            self.assertEqual((files.workspace(first) / "evidence/ownership.txt").read_text(), "first packet")
+            self.assertEqual((files.workspace(second) / "evidence/ownership.txt").read_text(), "second packet")
+        self.assertEqual(self.lane_exit(self.base, first.name)["status"], "done")
+
     def test_runs_on_the_same_pool_queue(self):
         other = self.second_base()
         self.detach(self.base, "codex:gpt-6.1-sol:high", "slow")
@@ -1690,9 +1720,9 @@ class EndToEnd(unittest.TestCase):
     def test_disjoint_pools_and_same_run_lanes_run_together(self):
         other = self.second_base()
         t0 = time.time()
-        self.detach(self.base, "agy:gemini-3.8-flash-high,agy:gemini-pro-agent", "slow")
+        self.detach(self.base, "agy:gemini-3.8-flash-high,agy:gemini-3.8-flash-medium", "slow")
         self.detach(other, "grok:grok-4.7:xhigh", "slow")
-        for base, lane in ((self.base, "agy-gemini-3.8-flash-high"), (self.base, "agy-gemini-pro-agent"),
+        for base, lane in ((self.base, "agy-gemini-3.8-flash-high"), (self.base, "agy-gemini-3.8-flash-medium"),
                            (other, "grok-4.7-xhigh")):
             self.assertEqual(self.lane_exit(base, lane)["status"], "done")
             self.assertNotIn("waiting for pool", (base / "lanes" / lane / "view.log").read_text())
@@ -1735,7 +1765,7 @@ class EndToEnd(unittest.TestCase):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
                         "--lanes", "opencode:opencode/space-bunny-free", "--mode", "headless",
                         "--skip-capacity", mode="bg-child")
-        work = self.root / ".lanes" / "opencode-space-bunny-free"
+        work = self.root / ".lanes" / "opencode-zen-space-bunny-free" / "opencode-space-bunny-free"
         child = int((work / "background-child.pid").read_text())
         self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
@@ -1789,7 +1819,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_leftovers_of_an_earlier_run_never_reach_the_next(self):
         # a stale complete answer, and scratch a peer left read-only (Go module caches do)
-        work = self.root / ".lanes" / "grok-4.7-xhigh"
+        work = self.root / ".lanes" / "grok" / "grok-4.7-xhigh"
         (work / "cache" / "mod").mkdir(parents=True)
         (work / "cache" / "mod" / "f.go").write_text("x")
         (work / "ANSWER.md").write_text(f"### 1) VERDICT\nstale\n6) PROOF: {TOKEN}\nRESULT_COMPLETE\n")
@@ -1811,13 +1841,13 @@ class EndToEnd(unittest.TestCase):
         os.utime(self.base / "evidence" / "manifest-tail.txt")  # staged last
         rows = self.run_lanes()
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-        work = self.root / ".lanes" / "codex-gpt-6.1-sol-high" / "evidence"
+        work = self.root / ".lanes" / "codex" / "codex-gpt-6.1-sol-high" / "evidence"
         for n in names:
             self.assertEqual((work / n).read_text(), n)
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()
-        work = self.root / ".lanes" / "codex-gpt-6.1-sol-high"
+        work = self.root / ".lanes" / "codex" / "codex-gpt-6.1-sol-high"
         self.assertEqual(sorted(p.name for p in work.iterdir()), ["PACKET.md", "PROMPT.md", "evidence"])
 
 

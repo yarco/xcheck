@@ -149,7 +149,7 @@ class FinalLifecycleRepairs(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'done', row)
-        work = self.root / '.lanes' / row['lane']
+        work = self.root / '.lanes' / 'opencode-zen-space-bunny-free' / row['lane']
         for p, content in original.items():
             self.assertEqual((work / p).read_bytes(), content)
         self.assert_settled(row)
@@ -356,7 +356,7 @@ class CapBeforeCompletion(unittest.TestCase):
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM)}
         try:
             with patch.object(lane, 'ROOT', self.root), \
-                    patch.object(lane, 'workspace', return_value=self.root / '.lanes' / peer.name), \
+                    patch.object(lane, 'workspace', return_value=self.root / '.lanes' / peer.pool / peer.name), \
                     patch.object(lane, 'time', SimpleNamespace(monotonic=clock, time=time.time, sleep=time.sleep)), \
                     patch.dict(os.environ, {'PATH': f'{self.bin}:{os.environ["PATH"]}', 'FAKE_MODE': 'ok'}):
                 lane.run_lane(self.base, peer.name)

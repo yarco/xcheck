@@ -65,8 +65,9 @@ DEFAULT_ROSTER = (
     Lane("codex", "gpt-6.1-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
-    # Flash only. On 2026-10-13 the ACP server advertised gemini-3.8-flash-{high,medium,low}
-    # and not gemini-pro-agent. Add a Pro row when doctor shows one.
+    # Both Gemini lanes are required defaults. An unadvertised selector
+    # is reported as skipped before inference, never silently substituted.
+    Lane("agy", "gemini-3.1-pro-preview"),
     Lane("agy", "gemini-3.8-flash-high"),
 )
 
@@ -106,6 +107,8 @@ def parse_lane(spec: str) -> Lane:
     for part in (model, effort):
         if part and not re.fullmatch(ident if part is model else r"[A-Za-z0-9][A-Za-z0-9._-]*", part):
             raise ValueError(f"model and effort must be plain identifiers: {part!r}")
+    if any(segment in ("", ".", "..") for segment in model.split("/")):
+        raise ValueError("model must not contain empty or traversal path segments")
     if kind in ("agy", "devin") and effort:
         raise ValueError(f"{kind} selectors carry their own effort; drop ':{effort}'")
     if kind not in ("agy", "opencode", "devin") and not effort:
@@ -802,8 +805,7 @@ HELP_COMMANDS = {
              "--no-fs", "--prompt-retries", "--format", "--deny-all", "--auth-policy"]),
     "acpx exec": (["acpx", "exec", "--help"], ["--file", "--config-option"]),
     "opencode acp": (["opencode", "acp", "--help"], []),
-    "opencode api": (["opencode", "api", "--help"], ["--standalone"]),
-    "opencode models": (["opencode", "models", "--help"], ["--standalone"]),
+    "opencode api": (["opencode", "api", "--help"], ["--standalone", "--param"]),
     "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
                "--respect-workspace-trust"]),
     "devin acp": (["devin", "acp", "--help"], ["--model"]),

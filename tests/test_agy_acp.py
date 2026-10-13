@@ -187,7 +187,7 @@ class Lanes(unittest.TestCase):
     def test_the_spender_holds_the_pool_and_writes_only_inside(self):
         row = self.agy("custody", env={"ACPX_AUTH_TOKEN": "t"})
         self.assertEqual(row["status"], "done", row)
-        probe = json.loads((self.root / ".lanes" / LANE / "probe.json").read_text())
+        probe = json.loads((self.root / ".lanes" / "agy-gemini" / LANE / "probe.json").read_text())
         self.assertTrue(probe["holds_busy"], "the server must hold the pool, not only acpx")
         self.assertFalse(probe["wrote_outside"], "Seatbelt must refuse writes outside the lane")
         self.assertFalse((self.root / "outside-probe.txt").exists())
@@ -243,8 +243,8 @@ class Lanes(unittest.TestCase):
                 if complete:
                     events.append(rpc(id=3, result={"stopReason": "end_turn"}))
                 (directory / "stream.jsonl").write_text("\n".join(map(json.dumps, events)))
-                with patch.object(run, "workspace", return_value=self.root / ".lanes" / peer.name), \
-                        patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {self.root / '.lanes' / peer.name} --model {peer.model}"), \
+                with patch.object(run, "workspace", return_value=self.root / ".lanes" / peer.pool / peer.name), \
+                        patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {self.root / '.lanes' / peer.pool / peer.name} --model {peer.model}"), \
                         patch.object(run, "end_group", return_value=True) as stopped:
                     run._settle_dead_runner(current, peer.name)
                 stopped.assert_called_once_with(123)
@@ -315,7 +315,38 @@ class Lanes(unittest.TestCase):
         from xcheck import run
         with patch.object(adapters, "AGY_ACP_SERVER", self.root / "agy-acp" / "agy_acp_server.par"), \
                 patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}"}):
-            self.assertEqual(run.agy_acp_models(), ["gemini-3.8-flash-high", "gemini-pro-agent"])
+            self.assertEqual(run.agy_acp_models(), ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"])
+
+    def test_unknown_inventory_skips_without_claiming_model_disappearance(self):
+        row = self.agy("models-unavailable")
+        self.assertEqual(row["status"], "skipped", row)
+        self.assertIn("inventory-unknown", row["reason"])
+        self.assertNotIn("model-unavailable", row["reason"])
+        self.assertFalse((self.base / "lanes" / LANE / "staged").exists())
+
+    def test_required_pro_remains_default_but_skips_without_inference(self):
+        peer = adapters.Lane("agy", "gemini-3.1-pro-preview")
+        self.assertIn(peer, adapters.DEFAULT_ROSTER)
+        self.assertIn(adapters.Lane("agy", "gemini-3.8-flash-high"), adapters.DEFAULT_ROSTER)
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
+                        "--lanes", "agy:gemini-3.1-pro-preview", "--mode", "headless", "--skip-capacity")
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        d = self.base / "lanes" / peer.name
+        row = json.loads((d / "exit.json").read_text())
+        self.assertEqual(row["status"], "skipped", row)
+        self.assertIn("model-unavailable", row["reason"])
+        self.assertFalse((d / "staged").exists())
+        self.assertFalse((d / "stdout.jsonl").exists())
+        held = pools.acquire(self.root, peer.pool, "next-run", time.monotonic() + 1)
+        self.assertIsNotNone(held)
+        held.release()
+
+    def test_advertised_model_sentence_ignores_trailing_prose_and_space(self):
+        from xcheck import run
+        for tail in [". Use --model to choose.", ".   "]:
+            text = "Available models: gemini-3.8-flash-high, gemini-3.8-flash-low" + tail
+            with self.subTest(tail=tail), patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
+                self.assertEqual(run.agy_acp_models(), ["gemini-3.8-flash-high", "gemini-3.8-flash-low"])
 
     def test_advertised_model_list_drops_the_sentence_period(self):
         from xcheck import run

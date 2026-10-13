@@ -81,6 +81,19 @@ class Lanes(unittest.TestCase):
                 with self.assertRaisesRegex(adapters.Unavailable, "startup-unavailable"):
                     adapters.launch(peer, work, message, self.base / "lanes" / peer.name / "harness.log", True)
 
+    def test_requested_mode_and_default_effort_are_advertised_in_native_v2(self):
+        from xcheck import models
+        captured = json.loads((support.FIX / "opencode-v2-acp-config.json").read_text())
+        offered = {option["id"]: {choice["value"] for choice in option["options"]}
+                   for option in captured["configOptions"]}
+        peer = adapters.Lane("opencode", "opencode/space-bunny-free")
+        with patch.object(models, "client_metadata", return_value={peer.model: {"variants": [{"id": "high"}]}}):
+            spec = adapters.launch(peer, self.root, self.base / "message.txt", self.base / "harness.log", False)
+        requested = dict(spec.argv[i + 1].split("=", 1) for i, arg in enumerate(spec.argv) if arg == "--config-option")
+        self.assertEqual(requested, {"mode": "build", "effort": "default"})
+        for key, value in requested.items():
+            self.assertIn(value, offered[key])
+
     def test_unlisted_model_without_effort_is_skipped_before_spend(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--lanes",
                              "opencode:opencode/not-listed-free", "--mode", "headless", "--skip-capacity")
@@ -102,7 +115,7 @@ class Lanes(unittest.TestCase):
         row = json.loads((directory / "exit.json").read_text())
         self.assertEqual(row["status"], "done", row)
         self.assertTrue((directory / "stream.jsonl").exists())
-        probe = json.loads((self.root / ".lanes" / name / "probe.json").read_text())
+        probe = json.loads((self.root / ".lanes" / "opencode-openrouter" / name / "probe.json").read_text())
         self.assertTrue(probe["holds_busy"], "the native server must hold admission, not just acpx")
         self.assertEqual(probe["config"], {"model": "openrouter/qwen/qwen3.8-27b:free",
                                           "mode": "build", "effort": "high"})
@@ -131,7 +144,7 @@ class Lanes(unittest.TestCase):
                 if completed:
                     events.append(rpc(id=3, result={"stopReason": "end_turn"}))
                 (directory / "stream.jsonl").write_text("\n".join(map(json.dumps, events)))
-                work = self.root / ".lanes" / PEER.name
+                work = self.root / ".lanes" / PEER.pool / PEER.name
                 with patch.object(run, "workspace", return_value=work), \
                         patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {work}"), \
                         patch.object(run, "end_group", return_value=True) as stopped:

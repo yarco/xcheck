@@ -6,6 +6,8 @@ no private ACP client, wrapper, or protocol workaround anywhere in the path.
 
 Verified with **grok 1.0.52 (0920c8169e27)** and **acpx 0.19.4**.
 
+This is a version-specific verification record. Runtime pins and argv live in `xcheck/adapters.py`; this launch sketch does not replace them. Recheck native startup, tools and event shapes after upgrades. Current admission comes from the installed `xcheck doctor` and lane preflight, not this recorded result. The [protocol](../../Multi-Agent%20Cross-Check%20Protocol.md) owns shared preconditions, interaction paths and invariants.
+
 The 1.0.52 zero-turn startup probes retained six native tools in packet mode
 (four allowed tools plus the two MCP dispatch tools), and eight in live mode.
 No operator hooks loaded or ran. Live headless and Herdr smoke runs exercised

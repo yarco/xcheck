@@ -111,15 +111,17 @@ class ReportStartup(unittest.TestCase):
             if cmd[-2:] == ['version', '--json']:
                 return probe
             pins = [peer.model for peer in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)]
-            if cmd[:2] == ['opencode', 'models']:
+            if cmd[:2] == ['opencode', 'api']:
                 pins = [model + '-preview' if suffix else model for model in pins]
+                data = [{"providerID": m.split("/", 1)[0], "id": m.split("/", 1)[1]} for m in pins if "/" in m]
+                return subprocess.CompletedProcess(cmd, 1 if listing_failure else 0, json.dumps({"data": data}), "")
             return subprocess.CompletedProcess(cmd, 1 if listing_failure else 0, '\n'.join(pins), '')
         with patch.object(install, 'source_root', return_value=support.REPO), \
                 patch.object(install, 'installed_digest', return_value=install.digest(support.REPO)), \
                 patch.object(run.subprocess, 'run', side_effect=fake_run), \
                 patch.object(adapters, 'unavailable', return_value=None), \
                 patch.object(run, 'agy_acp_models', return_value=acp_models if acp_models is not None else
-                             [peer.model for peer in adapters.DEFAULT_ROSTER if peer.kind == 'agy']), \
+                             [peer.model for peer in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN) if peer.kind == 'agy']), \
                 redirect_stdout(io.StringIO()) as out:
             code = run.doctor()
         return code, out.getvalue()
@@ -157,7 +159,7 @@ class ReportStartup(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), **kwargs)
                 self.assertEqual(code, 1, text)
-                self.assertIn('NOT in opencode models', text)
+                self.assertIn('unchecked: model listing exited 1' if kwargs.get('listing_failure') else 'NOT in opencode api model.list', text)
 
 
 class ReportMeters(unittest.TestCase):

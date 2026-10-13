@@ -9,19 +9,20 @@ import fcntl
 import json
 import re
 import subprocess
+import tempfile
 import time
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .adapters import parse_lane
 
-# Zen's documented model list, and the first-party source of its console docs page
-# (opencode.ai/console/docs/models renders this markdown in the browser).
+# Zen's live model list and deployed documentation. No source-branch prices.
 ZEN = "https://opencode.ai/inference/v1/models"
-ZEN_DOCS = "https://raw.githubusercontent.com/anomalyco/opencode/dev/services/www/src/docs/content/console/models.mdx"
+ZEN_DOCS = "https://opencode.ai/v2/docs/console/models/"
 OPENROUTER = "https://openrouter.ai/api/v1/models"
 SOURCES = {
     "opencode": {"format": "zen", "models_url": ZEN, "docs_url": ZEN_DOCS,
@@ -52,27 +53,62 @@ def zero_cost(cost: dict, required: tuple[str, str]) -> bool:
     return True
 
 
-def markdown_tables(text: str) -> list[list[list[str]]]:
-    """Pipe tables from the provider's own docs source, read without an LLM."""
-    tables, table = [], None
-    for line in text.splitlines() + [""]:
-        row = line.strip()
-        if row.startswith("|") and row.endswith("|") and len(row) > 1:
-            cells = [cell.strip().strip("`").strip() for cell in row[1:-1].split("|")]
-            table = [] if table is None else table
-            if not all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
-                table.append(cells)
-        elif table is not None:
-            tables.append(table)
-            table = None
-    return tables
+class PriceTables(HTMLParser):
+    """Read the deployed provider's table cells; no scripts or browser needed."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables, self.table, self.row, self.cell = [], None, None, None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            if self.table is not None:
+                raise ValueError("nested Zen table")
+            self.table = []
+        elif self.table is not None and tag == "tr":
+            if self.row is not None:
+                raise ValueError("incomplete Zen table row")
+            self.row = []
+        elif self.row is not None and tag in ("td", "th"):
+            if self.cell is not None or any(k in ("colspan", "rowspan") and v != "1" for k, v in attrs):
+                raise ValueError("ambiguous Zen table cell")
+            self.cell = []
+        elif self.cell is not None and tag == "br":
+            self.cell.append(" ")
+
+    def handle_data(self, data):
+        if self.cell is not None:
+            self.cell.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self.cell is not None:
+            self.row.append(" ".join("".join(self.cell).split()))
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            if self.cell is not None:
+                raise ValueError("incomplete Zen table cell")
+            self.table.append(self.row)
+            self.row = None
+        elif tag == "table" and self.table is not None:
+            if self.row is not None:
+                raise ValueError("incomplete Zen table row")
+            self.tables.append(self.table)
+            self.table = None
+
+
+def html_tables(text: str) -> list[list[list[str]]]:
+    parser = PriceTables()
+    parser.feed(text)
+    parser.close()
+    if parser.table is not None:
+        raise ValueError("incomplete Zen table")
+    return parser.tables
 
 
 def zen_candidates(payload: dict, docs: str) -> list[dict]:
     """Join documented free prices and chat endpoints to live IDs. No ID pins."""
-    tables = markdown_tables(docs)
+    tables = html_tables(docs)
     endpoints = [t for t in tables if t and t[0] == ["Model", "Model ID", "Endpoint", "AI SDK Package"]]
-    pricing = [t for t in tables if t and t[0][:3] == ["Model", "Input", "Output"]]
+    pricing = [t for t in tables if t and t[0][:5] == ["Model", "Input", "Output", "Cached Read", "Cached Write"]]
     if len(endpoints) != 1 or len(pricing) != 1:
         raise ValueError("Zen documentation tables changed; no prices confirmed")
     live = {m["id"] for m in payload["data"]}
@@ -104,6 +140,12 @@ def zen_candidates(payload: dict, docs: str) -> list[dict]:
     return result
 
 
+def text_review(inputs, outputs, tools) -> bool:
+    return (tools is True and isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)
+            and "text" in inputs and isinstance(outputs, list) and all(isinstance(x, str) for x in outputs)
+            and set(outputs) == {"text"})
+
+
 def priced_candidates(payload: dict, source_url: str) -> list[dict]:
     result = []
     for item in payload["data"]:
@@ -111,10 +153,9 @@ def priced_candidates(payload: dict, source_url: str) -> list[dict]:
         inputs = architecture.get("input_modalities", item.get("input_modalities", []))
         outputs = architecture.get("output_modalities", item.get("output_modalities", []))
         features = item.get("supported_parameters", item.get("supported_features", []))
-        # A review lane is a text coding model: multimodal (image/audio/video)
-        # models are excluded, and so is any offer with an announced end date,
-        # which is a promotion rather than a standing free tier.
-        if ("tools" not in features or set(inputs) != {"text"} or set(outputs) != {"text"}
+        # Review packets use text and tools. Extra input modalities are harmless;
+        # non-text outputs and offers with an announced end date are excluded.
+        if (not text_review(inputs, outputs, isinstance(features, list) and "tools" in features)
                 or architecture.get("tokenizer") == "Router" or item.get("router") is True
                 or item.get("deprecated") or item.get("expiration_date")
                 or not zero_cost(item.get("pricing"), ("prompt", "completion"))):
@@ -149,24 +190,21 @@ def client_metadata(*, env: dict | None = None, cwd: Path | None = None) -> dict
     # absent is a zero exit whose list does not contain it, not this error.
     from .files import ROOT
     ROOT.mkdir(parents=True, exist_ok=True)
-    command = ["opencode", "api", "model.list", "--standalone"]
+    command = ["opencode", "api", "model.list", "--standalone",
+               "--param", f"directory={Path(cwd or Path.cwd()).resolve()}"]
     with open(ROOT / ".opencode-models.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        listing = None
         for attempt in range(3):
-            try:
-                listing = subprocess.run(command, env=env, cwd=cwd, capture_output=True,
-                                         text=True, timeout=60)
-            except (OSError, subprocess.TimeoutExpired):
-                if attempt == 2:
-                    raise
-            else:
-                if listing.returncode == 0:
-                    break
-                if attempt == 2:
-                    detail = " ".join((listing.stderr or "").split())[:300] or "no stderr"
-                    raise ValueError(
-                        f"`opencode api model.list --standalone` failed (exit {listing.returncode}: {detail})")
+            # Retry a returned startup failure, not a missing executable,
+            # denied execution, or a full 60-second subprocess timeout.
+            listing = subprocess.run(command, env=env, cwd=cwd, capture_output=True,
+                                     text=True, timeout=60)
+            if listing.returncode == 0:
+                break
+            if attempt == 2:
+                detail = " ".join((listing.stderr or "").split())[:300] or "no stderr"
+                raise ValueError(
+                    f"`opencode api model.list --standalone` failed (exit {listing.returncode}: {detail})")
             time.sleep(1)
     try:
         data = json.loads(listing.stdout)["data"]
@@ -175,6 +213,17 @@ def client_metadata(*, env: dict | None = None, cwd: Path | None = None) -> dict
         return {f"{item['providerID']}/{item['id']}": item for item in data}
     except (KeyError, TypeError, json.JSONDecodeError) as error:
         raise ValueError("OpenCode model API format changed") from error
+
+
+def review_metadata(provider: str) -> dict:
+    """The catalog in a neutral directory under the selected lane's environment."""
+    from .adapters import Launch, _opencode_env
+    from .lane import lane_env
+    lane = parse_lane(f"opencode:{provider}/model")
+    with tempfile.TemporaryDirectory(prefix="xcheck-opencode-models-") as tmp:
+        work = Path(tmp).resolve()
+        spec = Launch([], None, env_set=_opencode_env(lane), kind="opencode")
+        return client_metadata(env=lane_env(spec, work), cwd=work)
 
 
 def sources(path: Path | None = None) -> dict:
@@ -204,11 +253,6 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
     if providers and (unknown := providers - definitions.keys()):
         raise ValueError(f"no primary discovery source for: {', '.join(sorted(unknown))}; add a --sources file")
     warnings, result = [], []
-    try:
-        metadata = client_metadata()
-    except Exception as error:
-        metadata = {}
-        warnings.append(f"OpenCode metadata unavailable; offers need client setup: {type(error).__name__}")
     for provider, source in definitions.items():
         if providers and provider not in providers:
             continue
@@ -216,6 +260,13 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
             payload = fetch(source["models_url"])
             rows = (zen_candidates(payload, fetch(source["docs_url"], as_json=False))
                     if source["format"] == "zen" else priced_candidates(payload, source["models_url"]))
+            if not rows:
+                continue
+            try:
+                metadata = review_metadata(provider)
+            except (OSError, subprocess.SubprocessError, ValueError) as error:
+                metadata = {}
+                warnings.append(f"{provider} OpenCode metadata unavailable; client support unconfirmed: {type(error).__name__}")
             confirmed = []
             for row in rows:
                 selector = f"opencode:{provider}/{row['model']}"
@@ -234,20 +285,22 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
                     row["tool_call"] = caps.get("tools")
                     if row["tool_call"] is False:
                         continue
-                    if row["tool_call"] is True and not ("text" in caps.get("input", []) and "text" in caps.get("output", [])):
+                    if row["tool_call"] is True and not text_review(caps.get("input"), caps.get("output"), True):
                         continue
                     try:
                         row["release_date"] = datetime.fromtimestamp(local["time"]["released"] / 1000, timezone.utc).date().isoformat()
                         row["date_source"] = "OpenCode client metadata (Models.dev); advisory"
                     except (KeyError, ValueError, TypeError, OverflowError, OSError):
                         pass
-                client_tools = (caps.get("tools") is True and "text" in caps.get("input", [])
-                                and "text" in caps.get("output", []))
+                client_tools = text_review(caps.get("input"), caps.get("output"), caps.get("tools"))
                 ready = bool(local) and local.get("status") != "deprecated" and local.get("enabled", True) and row["tool_call"] is True and client_tools
                 confirmed.append({**row, "provider": provider, "selector": selector,
                                "source": source["models_url"], "provider_docs": source["docs_url"],
                                "auth_env": source.get("auth_env", []), "client_available": bool(local),
-                               "state": "ready" if ready else "needs-client-setup",
+                               "state": ("client-disabled" if local.get("enabled") is False else
+                                         "client-deprecated" if local.get("status") == "deprecated" else
+                                         "client-unsupported" if local and not client_tools else
+                                         "ready" if ready else "needs-client-setup"),
                                "access": "verify account quota and provider data policy"})
             result.extend(confirmed)
         except Exception as error:

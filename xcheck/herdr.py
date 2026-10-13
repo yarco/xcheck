@@ -47,7 +47,13 @@ def _herdr(*args: str, ctx: dict, timeout: float = 15) -> dict:
         raise HerdrError(f"herdr {' '.join(args[:2])}: {e}") from e
     if p.returncode != 0:
         raise HerdrError(f"herdr {' '.join(args[:2])}: {p.stderr.strip() or p.returncode}")
-    return json.loads(p.stdout or "{}").get("result", {})
+    try:
+        response = json.loads(p.stdout or "{}")
+        if not isinstance(response, dict) or not isinstance(response.get("result", {}), dict):
+            raise ValueError("expected a JSON object result")
+        return response.get("result", {})
+    except ValueError as e:
+        raise HerdrError(f"herdr {' '.join(args[:2])}: malformed JSON response") from e
 
 
 def caller() -> dict | None:
@@ -143,9 +149,12 @@ def _split(target: str, direction: str, ratio: float, cwd: str, ctx: dict) -> st
     r = _herdr("pane", "split", "--pane", target, "--direction", direction,
                "--ratio", str(ratio), "--cwd", cwd, "--no-focus", ctx=ctx)
     try:
-        return r["pane"]["pane_id"]
-    except KeyError as e:
-        raise HerdrError(f"pane split returned no pane id: {r}") from e
+        pane = r["pane"]["pane_id"]
+    except (KeyError, TypeError) as e:
+        raise HerdrError("pane split returned no pane id") from e
+    if not isinstance(pane, str) or not pane:
+        raise HerdrError("pane split returned no pane id")
+    return pane
 
 
 def shell_command(argv: list[str]) -> str:

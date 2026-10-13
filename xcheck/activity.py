@@ -1,6 +1,7 @@
 """Progress metadata without exposing a running peer's answer or tool output."""
 
 import json
+import math
 import os
 import sqlite3
 from contextlib import closing
@@ -72,7 +73,11 @@ def compact(row):
     if stream.get('last_event'):
         parts.append(f"last={stream['last_event']}")
     native = row.get('native', {})
-    if native.get('last_tool'):
+    if native.get('unavailable'):
+        parts.append('native=unavailable')
+    if native.get('skipped_messages_or_parts'):
+        parts.append('native=partial')
+    if native.get('last_tool') and native['last_tool'].get('kind'):
         tool = native['last_tool']
         parts.append(f"native_tool={tool.get('kind')}:{tool.get('status')}")
     if native.get('last_reasoning'):
@@ -80,24 +85,51 @@ def compact(row):
     return ' '.join(parts)
 
 
+def _native_times(value):
+    if not isinstance(value, dict):
+        return None
+    return {key: value[key] for key in ('created', 'ran', 'completed')
+            if isinstance(value.get(key), (int, float)) and not isinstance(value[key], bool)
+            and math.isfinite(value[key])}
+
+
 def opencode_native(run, name, session):
     path = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
     try:
         with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1)) as db:
             owner = db.execute('SELECT directory, time_created FROM session_v2 WHERE id=?', (session,)).fetchone()
-            if not owner or Path(owner[0]).resolve() != workspace(name).resolve() or owner[1] < run.epoch * 1000:
+            if not owner or Path(owner[0]).resolve() != workspace(run.lane(name)).resolve() or owner[1] < run.epoch * 1000:
                 return dict(unavailable='native session ownership could not be verified')
-            rows = db.execute("SELECT data, time_updated FROM session_message WHERE session_id=? AND type='assistant' ORDER BY time_updated DESC LIMIT 20", (session,)).fetchall()
-        result = {}
+            rows = db.execute("SELECT data, time_updated FROM session_message WHERE session_id=? AND type='assistant' ORDER BY time_updated DESC, seq DESC LIMIT 20", (session,)).fetchall()
+        result, skipped = {}, 0
         for raw, updated in rows:
-            message = json.loads(raw)
-            for part in reversed(message.get('content', [])):
-                kind = part.get('type')
-                if kind == 'tool' and 'last_tool' not in result:
-                    state = part.get('state') or {}
-                    result['last_tool'] = dict(kind=part.get('name'), status=state.get('status'), updated_at=now(updated / 1000), time=part.get('time'))
-                elif kind == 'reasoning' and 'last_reasoning' not in result:
-                    result['last_reasoning'] = dict(characters=len(part.get('text', '')), updated_at=now(updated / 1000), time=part.get('time'))
+            try:
+                message = json.loads(raw)
+                if not isinstance(message, dict) or not isinstance(message.get('content'), list):
+                    raise ValueError("unknown native message shape")
+                for part in reversed(message['content']):
+                    if not isinstance(part, dict):
+                        skipped += 1
+                        continue
+                    kind = part.get('type')
+                    if kind == 'tool' and 'last_tool' not in result:
+                        state, tool = part.get('state'), part.get('name')
+                        if (not isinstance(state, dict) or not isinstance(tool, str) or not tool
+                                or state.get('status') not in ('streaming', 'running', 'completed', 'error')):
+                            skipped += 1
+                            continue
+                        result['last_tool'] = dict(kind=tool, status=state.get('status'), updated_at=now(updated / 1000), time=_native_times(part.get('time')))
+                    elif kind == 'reasoning' and 'last_reasoning' not in result:
+                        text = part.get('text')
+                        if not isinstance(text, str):
+                            skipped += 1
+                            continue
+                        result['last_reasoning'] = dict(characters=len(text), updated_at=now(updated / 1000), time=_native_times(part.get('time')))
+            except (OSError, ValueError, TypeError, OverflowError):
+                skipped += 1
+        if skipped:
+            result['skipped_messages_or_parts'] = skipped
+
         return result
     except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError, KeyError):
         return dict(unavailable='native progress store unavailable or its schema changed')

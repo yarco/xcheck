@@ -39,6 +39,18 @@ xcheck run --base /tmp/agent-offload/<slug> --orch <your-harness>
 
 Stage `BASE/PACKET.md`, `BASE/PROMPT.md`, and `BASE/evidence/` before launching. See the protocol note for the packet contract, the answer grammar, and the merge rules.
 
+Use the [preconditions and source authority](Multi-Agent%20Cross-Check%20Protocol.md#preconditions-and-source-authority) before launch. The installed `xcheck` is the sole supported launcher; leave mode unset for automatic Herdr/headless placement. Native streams are the answer channel; panes display them. Own subagents and direct peer CLI scripts are not cross-check launchers.
+
+| Interaction | Command and purpose |
+|---|---|
+| Readiness | `doctor`, `models`, `capacity`: inspect current runtime, exact model support, provider offers and quota; no review inference |
+| Launch | `run --base B --orch H`: snapshot a fresh packet and start selected peers; `--detach` returns without waiting for settlement |
+| Observe/reattach | `activity --base B` for metadata; `status --base B` for lane states; `wait --base B` for completion without relaunch |
+| Stop | `cancel --base B [--lane NAME] --reason TEXT`: explicit scoped cancellation; interrupting a waiter only detaches |
+| Adjudicate | Read settled results and write `BASE/CONSENSUS.md` under the protocol's [merge rules](Multi-Agent%20Cross-Check%20Protocol.md#merge) |
+
+There is no default review timeout; the one-hour warning is diagnostic. Required defaults survive temporary unavailability and retain their selected effort. Dated verification records and captured fixtures do not establish current availability or pricing. See the protocol's [invariants](Multi-Agent%20Cross-Check%20Protocol.md#invariants) and [routine qualification rules](Multi-Agent%20Cross-Check%20Protocol.md#routine-review-planning-and-qualification).
+
 ## Tests
 
 ```bash

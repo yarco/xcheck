@@ -189,7 +189,7 @@ class Lanes(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         row = json.loads((self.base / "lanes" / PEER.name / "exit.json").read_text())
         self.assertEqual(row["status"], "done", row)
-        probe = json.loads((self.root / ".lanes" / PEER.name / "probe.json").read_text())
+        probe = json.loads((self.root / ".lanes" / PEER.pool / PEER.name / "probe.json").read_text())
         self.assertTrue(probe["holds_busy"], "the Codex process itself must hold admission")
         self.assertIn("Read ./PACKET.md", probe["stdin"])
         argv = probe["argv"]

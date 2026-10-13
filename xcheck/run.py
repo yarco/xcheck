@@ -23,6 +23,7 @@ from .files import ROOT, Run, atomic_write, end_group, hold_life, is_alive, now,
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 STILL_RUNNING = 3
 POLL = 0.2  # seconds between local file/lock checks; no model is involved
+REVIEW_ALERT_AFTER = 3600  # owner-requested diagnostic warning, never a termination limit
 
 DELIVER = "Print your complete answer as your final message; the harness saves it."
 
@@ -34,6 +35,11 @@ MESSAGE = (
     "from the files in this directory; {tool_scope} Connected MCP tools are "
     "available for this review. Use them when relevant; do not send messages, "
     "change external records, or perform other external actions. {deliver}{web} "
+    "For a code review, use the supplied host validation evidence. Do not repeatedly "
+    "rerun the full test suite or repair an execution environment. Run a targeted "
+    "check only when needed to decide a concrete finding; if your sandbox or missing "
+    "dependencies block it, report that limitation and continue the review. Do not "
+    "change the staged code. Finish after the requested findings are supported. "
     "Nobody will answer questions "
     "mid-review. If you read them and still think something is wrong, say so plainly "
     "and stop.\n"
@@ -167,6 +173,8 @@ def _message(web: bool, kind: str) -> str:
 def detach(argv: list[str], base: Path) -> int:
     """Start `run` as a detached supervisor; return once it has launched."""
     base = base.resolve()
+    if (base / ".launched").exists():
+        raise RunError(f"{base} was already launched; use `xcheck wait` or a fresh BASE")
     log = base / "supervisor.log"
     # A reused BASE already has run.json; only one this child writes proves a launch.
     reused = (base / "run.json").exists()
@@ -187,7 +195,7 @@ def detach(argv: list[str], base: Path) -> int:
                   "If this host has no completion callback, disclose pending collection; do not schedule master polling.")
             return 0
         time.sleep(POLL)
-    print(f"xcheck: supervisor pid {p.pid} started; see {log}")
+    print(f"xcheck: supervisor pid {p.pid} alive; launch unconfirmed (preflight pending); see {log}")
     return 0
 
 
@@ -242,7 +250,12 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
         signal.signal(sig, on_signal)
 
     pending = set(run.lanes)
+    epoch = getattr(run, "epoch", 0.0)
+    warn_at = epoch + REVIEW_ALERT_AFTER if epoch > 0 else None
+    warned = False
     while pending:
+        for child in children.values():
+            child.poll()  # reap completed direct children while other peers run
         if interrupted:
             break  # subscriber/supervisor interruption leaves owned reviewers running
         if until and time.time() >= until:
@@ -257,6 +270,15 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
                 pending.discard(name)
             # Unknown startup remains pending; elapsed time cannot prove a failed launch.
         if pending:
+            if not warned and warn_at is not None and time.time() >= warn_at:
+                warned = True
+                print("xcheck: review still pending after one hour; diagnostic warning, no automatic timeout.", flush=True)
+                from . import activity
+                for name in sorted(pending):
+                    try:
+                        print(activity.compact(activity.snapshot(run, name)), flush=True)
+                    except Exception as error:
+                        print(f"{name}: progress diagnostics unavailable ({type(error).__name__})", flush=True)
             time.sleep(POLL)
     status = render_status(run)
     if interrupted:
@@ -302,7 +324,7 @@ def _settle_dead_runner(run: Run, name: str) -> None:
         harness = None
     note = "lane runner died without writing exit.json"
     cmd = _pid_cmd(harness)  # identity: every adapter argv names the lane dir or workspace
-    if harness and any(re.search(re.escape(str(p)) + r"(?=[/\s'\"]|$)", cmd) for p in (d, workspace(name))):
+    if harness and any(re.search(re.escape(str(p)) + r"(?=[/\s'\"]|$)", cmd) for p in (d, workspace(run.lane(name)))):
         if end_group(harness):
             note += "; its harness was still running and was stopped"
     elif harness:
@@ -414,7 +436,7 @@ def render_status(run: Run) -> str:
 # ------------------------------------------------------------------ doctor
 
 
-# Each kind's own `models` listing; opencode is resolved per provider below.
+# Native human catalogs for kinds without a structured metadata API.
 MODEL_LISTS = {"grok": ["grok", "models"], "devin": ["devin", "models", "list"]}
 AGY_PROBE_MODEL = "xcheck-doctor-no-such-model"
 
@@ -439,8 +461,10 @@ def agy_acp_models() -> list[str] | None:
     found = re.search(r"Available models: ([^\"\n]+)", out.stdout + out.stderr)
     if not found:
         return None
-    # The sentence ends with a period. It is not part of the last model id.
-    return [m.strip() for m in found.group(1).rstrip(".").split(",") if m.strip()]
+    # A terminal period plus whitespace starts prose, never part of an id.
+    sentence = re.split(r"\.\s", found.group(1).strip(), maxsplit=1)[0].rstrip(".")
+    models = [m.strip() for m in sentence.split(",")]
+    return models if all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", m) for m in models) else None
 
 
 def doctor() -> int:
@@ -484,16 +508,21 @@ def doctor() -> int:
     print(f"FAIL claude: {problem}" if problem else
           "ok   claude: native limit flags and a first-party subscription login present")
     bad += bool(problem)
-    # OpenCode 2 lists all providers in one native listing.
-    listings: dict[tuple, str] = {}
+    # Read OpenCode through the same scoped API used at lane admission.
+    from .models import review_metadata
+    opencode_listings = {}
+    listings: dict[tuple, tuple[str, str | None]] = {}
 
-    def listing(cmd: list[str]) -> str:
+    def listing(cmd: list[str]) -> tuple[str, str | None]:
         if tuple(cmd) not in listings:
             try:
                 out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                listings[tuple(cmd)] = out.stdout + out.stderr if out.returncode == 0 else ""
-            except (OSError, subprocess.TimeoutExpired):
-                listings[tuple(cmd)] = ""
+                text = out.stdout + out.stderr
+                problem = (f"model listing exited {out.returncode}" if out.returncode else
+                           "model listing returned no output" if not text.strip() else None)
+                listings[tuple(cmd)] = (text, problem)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                listings[tuple(cmd)] = ("", f"model listing failed: {type(error).__name__}")
         return listings[tuple(cmd)]
 
     agy = adapters.Lane("agy", "gemini-3.8-flash-high")
@@ -513,11 +542,27 @@ def doctor() -> int:
             continue
         cmd = MODEL_LISTS.get(lane.kind)
         if lane.kind == "opencode":
-            cmd = ["opencode", "models", "--standalone"]
+            provider = lane.model.split("/", 1)[0]
+            if provider not in opencode_listings:
+                try:
+                    opencode_listings[provider] = (review_metadata(provider), None)
+                except (OSError, subprocess.SubprocessError, ValueError) as error:
+                    opencode_listings[provider] = ({}, f"model API failed: {type(error).__name__}")
+            catalog, problem = opencode_listings[provider]
+            ok = problem is None and lane.model in catalog
+            print(f"{'ok  ' if ok else 'FAIL'} opencode model {lane.model} "
+                  + (f"unchecked: {problem}" if problem else
+                     "listed by model API" if ok else "NOT in opencode api model.list --standalone"))
+            bad += not ok
+            continue
         if cmd is None:
             continue
-        text = listing(cmd)
-        ok = lane.model in text.splitlines() if lane.kind == "opencode" else lane.model in text
+        text, problem = listing(cmd)
+        if problem:
+            print(f"FAIL {lane.kind} model {lane.model} unchecked: {problem}")
+            bad += 1
+            continue
+        ok = re.search(r"(?m)^[ \t]*(?:[-*][ \t]+)?" + re.escape(lane.model) + r"(?=[ \t]|$)", text) is not None
         print(f"{'ok  ' if ok else 'FAIL'} {lane.kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")
         bad += not ok
     return 1 if bad else 0

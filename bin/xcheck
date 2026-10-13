@@ -157,7 +157,7 @@ def main() -> int:
                 for warning in result["warnings"]:
                     print(f"Warning: {warning}")
                 for row in result["models"]:
-                    action = "--add" if row["state"] == "ready" else "needs-client-setup"
+                    action = "--add" if row["state"] == "ready" else row["state"]
                     print(f"{row['release_date'] or 'unknown':10} {action} {row['selector']}")
                 print(f"{len(result['models'])} shown of {total}; --provider ID filters; --json includes sources and account setup")
             return 1 if result["warnings"] else 0

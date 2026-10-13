@@ -208,7 +208,7 @@ def _run_lane(base: Path, name: str) -> int:
     run = Run.load(base)
     lane = run.lane(name)
     d = run.lane_dir(name)
-    work, message = workspace(name), d / "message.txt"
+    work, message = workspace(lane), d / "message.txt"
     stream_path, err_path = d / "stream.jsonl", d / "stderr.log"
     log = d / "harness.log"  # the harness's own debug log: where root causes are found
     idle = run.idle  # 0: no silence limit; quiet work is not inactivity
@@ -240,6 +240,22 @@ def _run_lane(base: Path, name: str) -> int:
         return _finish(run, name, started, "skipped",
                        f"pool {lane.pool} stayed busy for {run.cap}s", None, reader, err_path)
     try:
+        if lane.kind == "agy":
+            # Keep the zero-turn server probe under the Gemini pool. Check
+            # before staging or reading capacity; unsupported required defaults
+            # remain visible without spending a model turn.
+            from .run import agy_acp_models
+            atomic_write(d / "phase.json", json.dumps(dict(phase="checking_models")))
+            models = agy_acp_models()
+            if models is None:
+                return _finish(run, name, started, "skipped",
+                               "inventory-unknown: no ACP model list; availability is unconfirmed",
+                               None, reader, err_path)
+            if lane.model not in models:
+                return _finish(run, name, started, "skipped",
+                               f"model-unavailable: {lane.model} is not advertised by the ACP server; "
+                               "no inference or automatic substitution; refresh the selector after an inventory check",
+                               None, reader, err_path)
         started = time.time()  # when spending can start; exit.json records wall time
         _stage(run, work)  # only now: the pool lock makes this workspace ours
         (d / "staged").touch()
@@ -348,7 +364,7 @@ def _run_lane(base: Path, name: str) -> int:
                 reason = "; ".join(problems) or validate.COMPLETE
             else:
                 status = "failed"
-                reason = _first_stderr_line(err_path) or f"no answer (exit {code})"
+                reason = _first_stderr_line(err_path) or "native turn completed without a final answer after the last tool call"
         return _finish(run, name, started, status, reason, code, reader, err_path, pane)
     finally:
         held.release()

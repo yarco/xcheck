@@ -33,10 +33,10 @@ def defer_stop():
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
-def workspace(lane: str) -> Path:
+def workspace(lane: Lane) -> Path:
     """A lane's stable working directory, exclusive under its pool lock.
     The runner restages the immutable packet here each run."""
-    return Path(os.path.realpath(ROOT)) / ".lanes" / lane
+    return Path(os.path.realpath(ROOT)) / ".lanes" / lane.pool / lane.name
 
 
 def atomic_write(path: Path, text: str) -> None:

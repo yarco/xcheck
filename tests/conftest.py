@@ -21,6 +21,7 @@ atexit.register(shutil.rmtree, HOME, True)
 os.environ["HOME"] = str(HOME)
 for name in ("XCHECK_GROK_HOME", "XCHECK_AGY_ACP_DIR", "XCHECK_ROOT"):
     os.environ.pop(name, None)
+os.environ["XCHECK_ROOT"] = str(HOME / "runs")
 (HOME / ".grok").mkdir()
 (HOME / ".grok" / "auth.json").write_text("{}")
 agy = HOME / ".local" / "lib" / "antigravity-acp"
