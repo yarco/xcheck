@@ -324,12 +324,10 @@ class Lanes(unittest.TestCase):
         self.assertNotIn("model-unavailable", row["reason"])
         self.assertFalse((self.base / "lanes" / LANE / "staged").exists())
 
-    def test_required_pro_remains_default_but_skips_without_inference(self):
-        peer = adapters.Lane("agy", "gemini-3.1-pro-preview")
-        self.assertIn(peer, adapters.DEFAULT_ROSTER)
-        self.assertIn(adapters.Lane("agy", "gemini-3.8-flash"), adapters.DEFAULT_ROSTER)
+    def test_unadvertised_explicit_model_skips_without_inference(self):
+        peer = adapters.Lane("agy", "gemini-unadvertised")
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
-                        "--lanes", "agy:gemini-3.1-pro-preview", "--mode", "headless", "--skip-capacity")
+                        "--lanes", f"agy:{peer.model}", "--mode", "headless", "--skip-capacity")
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         d = self.base / "lanes" / peer.name
         row = json.loads((d / "exit.json").read_text())

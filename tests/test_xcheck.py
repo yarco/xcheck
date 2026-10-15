@@ -1136,8 +1136,8 @@ class Capacity(unittest.TestCase):
         from xcheck import capacity as c
         roster = adapters.DEFAULT_ROSTER
         flash = Lane("agy", "gemini-3.8-flash-high")
-        self.assertEqual(c.sharing(flash, roster), 2)
-        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 15)
+        self.assertEqual(c.sharing(flash, roster), 1)
+        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 10)
 
     def test_tightest_window_must_exceed_the_reserve(self):
         from xcheck.capacity import judge

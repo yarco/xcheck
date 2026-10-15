@@ -65,9 +65,6 @@ DEFAULT_ROSTER = (
     Lane("codex", "gpt-6.1-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
-    # Both Gemini lanes are required defaults. An unadvertised selector
-    # is reported as skipped before inference, never silently substituted.
-    Lane("agy", "gemini-3.1-pro-preview"),
     Lane("agy", "gemini-3.8-flash"),
 )
 
