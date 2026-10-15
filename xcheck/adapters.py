@@ -86,6 +86,8 @@ OPT_IN = (
     Lane("opencode", "opencode/mimo-v2.6-flash-free"),  # may be used to improve the model
     Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),  # Contributor: may log or train
     Lane("opencode", "opencode/nemotron-3.5-super-vl-free"),  # NVIDIA trial: logged; no personal or confidential data; qualified 2026-10-15
+    # Operator pin 2026-10-15 for a newly provisioned offer; its first run ended invalid.
+    Lane("opencode", "opencode/nemotron-3.5-lightning-free"),  # NVIDIA trial: logged; no personal or confidential data
     # Free OpenRouter pin, qualified by a real review run; served by NVIDIA itself.
     Lane("opencode", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"),  # NVIDIA trial: logged; no personal or confidential data
 )
@@ -93,11 +95,7 @@ OPT_IN = (
 # Offers awaiting usable qualification, not excluded models. A deferral
 # records an observed run outcome, never an inferred permanent model defect.
 # Recheck current access and investigate the failure boundary before retesting.
-DEFERRED = (
-    # 2026-10-15 nemotron35-qualify-1015: invalid (no VERDICT heading) and a wrong
-    # "None found" on a known defect; next check: a fresh ordinary review.
-    Lane("opencode", "opencode/nemotron-3.5-lightning-free"),  # NVIDIA trial: logged; no personal or confidential data
-)
+DEFERRED = ()
 
 
 def parse_lane(spec: str) -> Lane:
