@@ -85,20 +85,18 @@ OPT_IN = (
     Lane("opencode", "opencode/cat-jam-free"),  # not used for training; retained 30 days for safety
     Lane("opencode", "opencode/step-5-preview-free"),  # zero retention, no training
     Lane("opencode", "opencode/deepseek-v4.1-flash-free"),  # zero retention, no training; qualified 2026-10-15
+    Lane("opencode", "opencode/big-pickle"),  # free-period data may improve the model; qualified 2026-10-15
+    Lane("opencode", "opencode/longcat-2.5-preview-free"),  # zero retention, no training; qualified 2026-10-15
     Lane("opencode", "opencode/mimo-v2.6-flash-free"),  # may be used to improve the model
     Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),  # Contributor: may log or train
     # Free OpenRouter pin, qualified by a real review run; served by NVIDIA itself.
     Lane("opencode", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"),  # NVIDIA trial: logged; no personal or confidential data
 )
 
-# Ready offers that were qualified and not pinned. Discovery keeps labeling
-# them `deferred`, so a later listing does not present them as new. Absence
-# from this tuple is not a ban: an offer that returns after a failed endpoint
-# shows up as `--add` again.
-DEFERRED = (
-    Lane("opencode", "opencode/longcat-2.5-preview-free"),  # silent mid-review
-    Lane("opencode", "opencode/big-pickle"),  # tool call after the answer
-)
+# Offers awaiting usable qualification, not excluded models. A deferral
+# records an observed run outcome, never an inferred permanent model defect.
+# Recheck current access and investigate the failure boundary before retesting.
+DEFERRED = ()
 
 
 def parse_lane(spec: str) -> Lane:

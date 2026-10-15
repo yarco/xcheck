@@ -132,7 +132,7 @@ def data_rows(payload: dict) -> list[dict]:
 
 
 def zen_join(payload: dict, docs: str) -> list[dict]:
-    """The Zen provider read: documented chat endpoints joined to live IDs,
+    """The Zen provider read: documented endpoints joined to live IDs,
     each row flagged by whether the documented price is exactly zero. These
     are the pre-filter rows a pin verdict reads; a documented model that is
     not served does not appear here at all."""
@@ -164,10 +164,11 @@ def zen_join(payload: dict, docs: str) -> list[dict]:
             raise ValueError("ambiguous Zen endpoint row")
         names.add(name)
         identifiers.add(model)
-        if model not in live or not endpoint.endswith(("/chat/completions", "/responses", "/messages")):
+        if model not in live:
             continue
         state = price_state(prices.get(name), ("Input", "Output"))
-        result.append({"model": model, "name": name, "free": state == "zero", "price": state})
+        result.append({"model": model, "name": name, "endpoint": endpoint,
+                       "free": state == "zero", "price": state})
     return result
 
 
@@ -179,7 +180,8 @@ def zen_offer(row: dict) -> dict:
 
 def zen_candidates(payload: dict, docs: str) -> list[dict]:
     """Join documented free prices and chat endpoints to live IDs. No ID pins."""
-    return [zen_offer(row) for row in zen_join(payload, docs) if row["free"]]
+    return [zen_offer(row) for row in zen_join(payload, docs) if row["free"]
+            and row["endpoint"].endswith(("/chat/completions", "/responses", "/messages"))]
 
 
 def text_review(inputs, outputs, tools) -> bool:
@@ -306,7 +308,11 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
             payload = fetch(source["models_url"])
             if source["format"] == "zen":
                 joined = zen_join(payload, fetch(source["docs_url"], as_json=False))
-                rows = [zen_offer(row) for row in joined if row["free"]]
+                # Absence from the documentation join is not absence from the
+                # live inventory. Keep that evidence even when prices lag.
+                read["served_ids"] = [item["id"] for item in payload["data"]]
+                rows = [zen_offer(row) for row in joined if row["free"]
+                        and row["endpoint"].endswith(("/chat/completions", "/responses", "/messages"))]
             else:
                 joined = []
                 for item in data_rows(payload):
@@ -354,7 +360,12 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
                     row["tool_call"] = caps.get("tools")
                     if row["tool_call"] is False:
                         continue
-                    if row["tool_call"] is True and not text_review(caps.get("input"), caps.get("output"), True):
+                    inputs, outputs = caps.get("input"), caps.get("output")
+                    modalities_known = all(isinstance(parts, list) and parts
+                                           and all(isinstance(part, str) for part in parts)
+                                           for parts in (inputs, outputs))
+                    if (row["tool_call"] is True and modalities_known
+                            and not text_review(inputs, outputs, True)):
                         continue
                     try:
                         row["release_date"] = datetime.fromtimestamp(local["time"]["released"] / 1000, timezone.utc).date().isoformat()
@@ -387,8 +398,8 @@ def pin_status(report: dict, pins) -> dict:
     """free | gone | unknown for each opencode pin, from the provider reads.
 
     `unknown` while the provider was not queried or its read is `failed` or
-    `empty`. `gone` needs an `ok` read whose pre-filter rows omit the exact
-    served id or show it at a parsed non-zero price. `free` means the rows
+    `empty`. `gone` needs an `ok` read whose live inventory omits the exact
+    served id or whose row shows a parsed non-zero price. `free` means the rows
     hold that id at a parsed zero price; client capability gaps
     (`tools: false`, missing metadata, `needs-client-setup`) never turn
     `free` into `gone`. A served id whose price is missing or unparseable is
@@ -406,7 +417,7 @@ def pin_status(report: dict, pins) -> dict:
         if read.get("status") == "ok":
             row = next((r for r in read.get("rows") or [] if r.get("model") == ident), None)
             if row is None:
-                verdict = "gone"
+                verdict = "unknown" if ident in read.get("served_ids", []) else "gone"
             elif "price" in row:
                 verdict = {"zero": "free", "nonzero": "gone"}.get(row["price"], "unknown")
             else:
@@ -420,7 +431,7 @@ def classify_roster(report: dict, pins, deferred) -> dict:
 
     A ready row is `pinned`, `deferred`, or `--add`. `--add` is the only
     unclassified offer. `missing` is a `gone` pin: its provider read is `ok`
-    and the pre-filter rows omit its exact id or show it at a non-zero price.
+    and the live inventory omits its exact id or shows a non-zero price.
     A provider read that failed, returned no rows, or was never queried is
     `unknown` and prints no missing line; neither may delete a pin. The
     `verdicts` map is the `pin_status` result callers print per pin.

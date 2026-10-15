@@ -170,9 +170,7 @@ class Discovery(unittest.TestCase):
     def test_zen_and_priced_sources_share_the_text_review_contract(self):
         for inputs, outputs, accepted in [(["text", "image"], ["text"], True),
                                          (["image"], ["text"], False),
-                                         (["text"], ["text", "image"], False),
-                                         ("text", ["text"], False),
-                                         (["text"], "text", False)]:
+                                         (["text"], ["text", "image"], False)]:
             local = {"opencode/new-free": {"capabilities": {"tools": True, "input": inputs, "output": outputs}}}
             item = {**self.item, "architecture": {"input_modalities": inputs, "output_modalities": outputs}}
             with self.subTest(inputs=inputs, outputs=outputs), \
@@ -187,6 +185,24 @@ class Discovery(unittest.TestCase):
             report = models.discover({"openrouter"})
         self.assertEqual(report["models"], [])
         catalog.assert_not_called()
+
+    def test_zen_malformed_modalities_leave_free_offers_visible_but_unready(self):
+        for inputs, outputs in [(None, None), ([], []), ("text", ["text"]),
+                                (["text"], "text"), ([None], ["text"])]:
+            caps = {"tools": True, "input": inputs, "output": outputs}
+            with self.subTest(inputs=inputs, outputs=outputs), \
+                    patch.object(models, "review_metadata", return_value={"opencode/new-free": {"capabilities": caps}}), \
+                    patch.object(models, "fetch", side_effect=[self.zen, self.docs]):
+                report = models.discover({"opencode"})
+            self.assertEqual(report["providers"]["opencode"]["status"], "ok")
+            self.assertEqual([(row["model"], row["state"]) for row in report["models"]],
+                             [("new-free", "client-unsupported")])
+            self.assertEqual(models.pin_status(report, [adapters.Lane("opencode", "opencode/new-free")]),
+                             {"opencode:opencode/new-free": "free"})
+            # Priced-json modalities are primary evidence, unlike Zen's advisory
+            # client fields: malformed primary modalities cannot qualify an offer.
+            item = {**self.item, "architecture": {"input_modalities": inputs, "output_modalities": outputs}}
+            self.assertEqual(models.priced_candidates({"data": [item]}, "https://provider.test"), [])
 
     def test_omitting_a_known_charge_column_cannot_certify_free_pricing(self):
         docs = self.docs.replace("<th>Cached Write</th>", "").replace("<td>Free</td><td>-</td>", "<td>Free</td>").replace("<td>-</td><td>-</td>", "<td>-</td>")
@@ -488,7 +504,8 @@ class PinVerdicts(unittest.TestCase):
     def test_an_empty_zen_join_is_unknown_not_gone(self):
         # Live ids serve nothing the docs table documents: a successful empty join.
         report = self.zen_report({"data": [{"id": "other-served"}]})
-        self.assertEqual(report["providers"]["opencode"], {"status": "empty", "rows": []})
+        self.assertEqual(report["providers"]["opencode"],
+                         {"status": "empty", "rows": [], "served_ids": ["other-served"]})
         self.assertIn("no rows", report["warnings"][-1])
         self.assertTrue(all(v == "unknown" for v in models.pin_status(report, self.PINS).values()))
         self.assertEqual(models.classify_roster(report, self.PINS, [])["missing"], [])
@@ -526,6 +543,28 @@ class PinVerdicts(unittest.TestCase):
                          [r["selector"] for r in report["models"]])
         self.assertEqual(models.classify_roster(report, pins, [])["missing"],
                          ["opencode:opencode/doc-gone", "opencode:opencode/paid-pin"])
+
+    def test_a_live_id_missing_from_the_docs_is_unknown_not_gone(self):
+        pins = [*self.PINS, adapters.Lane("opencode", "opencode/undocumented")]
+        report = self.zen_report({"data": [{"id": "pinned-free"}, {"id": "undocumented"}]})
+        self.assertEqual(report["providers"]["opencode"]["status"], "ok")
+        self.assertEqual(models.pin_status(report, pins),
+                         {"opencode:opencode/pinned-free": "free",
+                          "opencode:opencode/paid-pin": "gone",
+                          "opencode:opencode/doc-gone": "gone",
+                          "opencode:opencode/undocumented": "unknown"})
+        self.assertNotIn("opencode:opencode/undocumented", models.classify_roster(report, pins, [])["missing"])
+        self.assertNotIn("opencode:opencode/undocumented", [r["selector"] for r in report["models"]])
+
+    def test_endpoint_eligibility_does_not_erase_a_served_pins_price(self):
+        docs = self.DOCS.replace("/chat/completions", "/systemone")
+        report = self.zen_report({"data": [{"id": "pinned-free"}, {"id": "paid-pin"}]}, docs=docs)
+        self.assertEqual(report["providers"]["opencode"]["status"], "ok")
+        self.assertEqual(models.pin_status(report, self.PINS),
+                         {"opencode:opencode/pinned-free": "free",
+                          "opencode:opencode/paid-pin": "gone",
+                          "opencode:opencode/doc-gone": "gone"})
+        self.assertEqual(report["models"], [])  # System One remains ineligible for review offers.
 
     def test_priced_json_read_carries_each_rows_price_state(self):
         pins = [adapters.Lane("opencode", "openrouter/free-id"),
