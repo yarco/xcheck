@@ -80,7 +80,6 @@ OPT_IN = (
     # are the provider's (opencode.ai/v2/docs/console/models, Privacy); mind what a packet holds.
     Lane("opencode", "opencode/space-bunny-free"),  # zero retention, no training
     Lane("opencode", "opencode/cat-jam-free"),  # not used for training; retained 30 days for safety
-    Lane("opencode", "opencode/step-5-preview-free"),  # zero retention, no training
     Lane("opencode", "opencode/deepseek-v4.1-flash-free"),  # zero retention, no training; qualified 2026-10-15
     Lane("opencode", "opencode/big-pickle"),  # free-period data may improve the model; qualified 2026-10-15
     Lane("opencode", "opencode/longcat-2.5-preview-free"),  # zero retention, no training; qualified 2026-10-15
