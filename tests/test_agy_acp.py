@@ -327,7 +327,7 @@ class Lanes(unittest.TestCase):
     def test_required_pro_remains_default_but_skips_without_inference(self):
         peer = adapters.Lane("agy", "gemini-3.1-pro-preview")
         self.assertIn(peer, adapters.DEFAULT_ROSTER)
-        self.assertIn(adapters.Lane("agy", "gemini-3.8-flash-high"), adapters.DEFAULT_ROSTER)
+        self.assertIn(adapters.Lane("agy", "gemini-3.8-flash"), adapters.DEFAULT_ROSTER)
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
                         "--lanes", "agy:gemini-3.1-pro-preview", "--mode", "headless", "--skip-capacity")
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)

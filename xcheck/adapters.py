@@ -68,25 +68,36 @@ DEFAULT_ROSTER = (
     # Both Gemini lanes are required defaults. An unadvertised selector
     # is reported as skipped before inference, never silently substituted.
     Lane("agy", "gemini-3.1-pro-preview"),
-    Lane("agy", "gemini-3.8-flash-high"),
+    Lane("agy", "gemini-3.8-flash"),
 )
 
 # Supported but never default (`run --add`). Pins are the operator's current
 # extras; they can be dropped from a roster without changing the protocol.
-# The opencode pins are zero-price offers confirmed by `xcheck models`; keep
-# discovering other offers with it rather than pinning more. A vanished free
-# offer fails doctor until the pin is refreshed.
+# The opencode pins are zero-price offers confirmed by `xcheck models`.
+# That command labels a ready row `pinned`, `deferred`, or `--add`. A Zen
+# `--add` line is an unclassified offer and is the whole queue. A vanished
+# free offer fails doctor until the pin is refreshed.
 OPT_IN = (
     Lane("devin", "swe-2-max"),
     # Free OpenCode Zen pins, each qualified by a real review run. Data terms
-    # are the provider's (opencode.ai/console/docs/models, Privacy); mind what a packet holds.
+    # are the provider's (opencode.ai/v2/docs/console/models, Privacy); mind what a packet holds.
     Lane("opencode", "opencode/space-bunny-free"),  # zero retention, no training
-    Lane("opencode", "opencode/cat-jam-free"),  # zero retention, no training; free period collects feedback
+    Lane("opencode", "opencode/cat-jam-free"),  # not used for training; retained 30 days for safety
     Lane("opencode", "opencode/step-5-preview-free"),  # zero retention, no training
+    Lane("opencode", "opencode/deepseek-v4.1-flash-free"),  # zero retention, no training; qualified 2026-10-15
     Lane("opencode", "opencode/mimo-v2.6-flash-free"),  # may be used to improve the model
     Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),  # Contributor: may log or train
     # Free OpenRouter pin, qualified by a real review run; served by NVIDIA itself.
     Lane("opencode", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"),  # NVIDIA trial: logged; no personal or confidential data
+)
+
+# Ready offers that were qualified and not pinned. Discovery keeps labeling
+# them `deferred`, so a later listing does not present them as new. Absence
+# from this tuple is not a ban: an offer that returns after a failed endpoint
+# shows up as `--add` again.
+DEFERRED = (
+    Lane("opencode", "opencode/longcat-2.5-preview-free"),  # silent mid-review
+    Lane("opencode", "opencode/big-pickle"),  # tool call after the answer
 )
 
 

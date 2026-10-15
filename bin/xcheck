@@ -147,6 +147,11 @@ def main() -> int:
                 print(f"xcheck: model discovery failed: {type(error).__name__}: {error}", file=sys.stderr)
                 return 1
             total = len(result["models"])
+            # Marks use the full result. `--limit` may hide a row; it must not
+            # hide an unclassified offer or invent a vanished pin.
+            roster = models.classify_roster(result, (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN),
+                                            adapters.DEFERRED)
+            result["roster"] = roster
             result["total"] = total
             result["models"] = result["models"][:a.limit]
             if a.json:
@@ -156,9 +161,16 @@ def main() -> int:
                 print(f"Checked {result['checked_at']}; prices and availability from provider sources")
                 for warning in result["warnings"]:
                     print(f"Warning: {warning}")
+                shown = set()
                 for row in result["models"]:
-                    action = "--add" if row["state"] == "ready" else row["state"]
+                    shown.add(row["selector"])
+                    action = roster["marks"].get(row["selector"], row["state"])
                     print(f"{row['release_date'] or 'unknown':10} {action} {row['selector']}")
+                for selector, action in roster["marks"].items():
+                    if selector not in shown and action in ("--add", "pinned", "deferred"):
+                        print(f"{'':10} {action} {selector}")
+                for selector in roster["missing"]:
+                    print(f"{'':10} missing {selector}")
                 print(f"{len(result['models'])} shown of {total}; --provider ID filters; --json includes sources and account setup")
             return 1 if result["warnings"] else 0
         if a.cmd == "install":

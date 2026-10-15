@@ -509,7 +509,7 @@ def doctor() -> int:
           "ok   claude: native limit flags and a first-party subscription login present")
     bad += bool(problem)
     # Read OpenCode through the same scoped API used at lane admission.
-    from .models import review_metadata
+    from . import models
     opencode_listings = {}
     listings: dict[tuple, tuple[str, str | None]] = {}
 
@@ -525,14 +525,31 @@ def doctor() -> int:
                 listings[tuple(cmd)] = ("", f"model listing failed: {type(error).__name__}")
         return listings[tuple(cmd)]
 
-    agy = adapters.Lane("agy", "gemini-3.8-flash-high")
+    agy = adapters.Lane("agy", "gemini-3.8-flash")
     blocked = adapters.unavailable(agy)
     stamp = adapters.AGY_ACP_DIR / "VERSION"
     version = stamp.read_text().strip() if stamp.is_file() else "unknown (run agy-acp-server-update)"
     print(f"FAIL agy: {blocked}" if blocked else f"ok   agy: acpx, ACP server {version} and Keychain login present")
     bad += bool(blocked)
     acp_models = None if blocked else agy_acp_models()
-    for lane in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN):
+    # Provider reads decide each free pin's verdict; the client catalog check
+    # below stays a separate gate. When discovery fetched a provider's catalog
+    # the read carries its ids or the failure class, so the check reuses that
+    # instead of booting the model API again; it fetches only when discovery
+    # did not. `gone` fails; `unknown` and `new` do not.
+    pins = (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)
+    pin_providers = {"opencode"} | {l.model.split("/", 1)[0]
+                                    for l in pins if l.kind == "opencode"}
+    try:
+        report = models.discover(pin_providers)
+    except Exception as error:
+        print(f"unknown opencode discovery: {type(error).__name__}")
+        report = {}
+    roster = models.classify_roster(report, pins, adapters.DEFERRED)
+    verdicts = roster["verdicts"]
+    new_offers = sorted(s for s, m in roster["marks"].items()
+                        if m == "--add" and s.startswith("opencode:opencode/"))
+    for lane in pins:
         if lane.kind == "agy":
             ok = acp_models is not None and lane.model in acp_models
             print(f"{'ok  ' if ok else 'FAIL'} agy model {lane.model} "
@@ -544,16 +561,23 @@ def doctor() -> int:
         if lane.kind == "opencode":
             provider = lane.model.split("/", 1)[0]
             if provider not in opencode_listings:
-                try:
-                    opencode_listings[provider] = (review_metadata(provider), None)
-                except (OSError, subprocess.SubprocessError, ValueError) as error:
-                    opencode_listings[provider] = ({}, f"model API failed: {type(error).__name__}")
+                read = (report.get("providers") or {}).get(provider) or {}
+                if "client_ids" in read:
+                    opencode_listings[provider] = (set(read["client_ids"]), None)
+                elif "client_error" in read:
+                    opencode_listings[provider] = (set(), f"model API failed: {read['client_error']}")
+                else:
+                    try:
+                        opencode_listings[provider] = (set(models.review_metadata(provider)), None)
+                    except (OSError, subprocess.SubprocessError, ValueError) as error:
+                        opencode_listings[provider] = (set(), f"model API failed: {type(error).__name__}")
             catalog, problem = opencode_listings[provider]
             ok = problem is None and lane.model in catalog
-            print(f"{'ok  ' if ok else 'FAIL'} opencode model {lane.model} "
+            verdict = verdicts.get(f"opencode:{lane.model}", "unknown")
+            print(f"{verdict:8}opencode pin {lane.model}: "
                   + (f"unchecked: {problem}" if problem else
                      "listed by model API" if ok else "NOT in opencode api model.list --standalone"))
-            bad += not ok
+            bad += not ok or verdict == "gone"
             continue
         if cmd is None:
             continue
@@ -565,4 +589,7 @@ def doctor() -> int:
         ok = re.search(r"(?m)^[ \t]*(?:[-*][ \t]+)?" + re.escape(lane.model) + r"(?=[ \t]|$)", text) is not None
         print(f"{'ok  ' if ok else 'FAIL'} {lane.kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")
         bad += not ok
+    for selector in new_offers:
+        print(f"new     {selector}: ready Zen offer, neither pinned nor deferred; "
+              "qualify with one real run before pinning")
     return 1 if bad else 0

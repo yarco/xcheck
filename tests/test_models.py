@@ -390,5 +390,304 @@ class Discovery(unittest.TestCase):
         self.assertNotIn("models.dev", output.getvalue())
 
 
+class RosterMarks(unittest.TestCase):
+    def report(self, models_rows, warnings=None, sources=None, providers=None):
+        if providers is None:  # an ok read over the rows' own served ids
+            providers = {"opencode": {"status": "ok", "rows": [
+                {"model": r["selector"].split("/", 1)[1], "free": True}
+                for r in models_rows if r["selector"].startswith("opencode:opencode/")]}}
+        return {"models": models_rows, "warnings": warnings or [], "providers": providers,
+                "sources": {"opencode": {}} if sources is None else sources}
+
+    def test_ready_rows_are_marked_and_a_failed_or_empty_read_is_not_missing(self):
+        pins = [adapters.Lane("opencode", "opencode/kept"), adapters.Lane("opencode", "opencode/gone"),
+                adapters.Lane("devin", "swe-2-max")]
+        deferred = [adapters.Lane("opencode", "opencode/held")]
+        rows = [
+            {"selector": "opencode:opencode/kept", "state": "ready"},
+            {"selector": "opencode:opencode/held", "state": "ready"},
+            {"selector": "opencode:opencode/fresh", "state": "ready"},
+            {"selector": "opencode:opencode/new-client", "state": "needs-client-setup"},
+        ]
+        gap = models.classify_roster(self.report(rows), pins, deferred)
+        self.assertEqual(gap["marks"]["opencode:opencode/kept"], "pinned")
+        self.assertEqual(gap["marks"]["opencode:opencode/held"], "deferred")
+        self.assertEqual(gap["marks"]["opencode:opencode/fresh"], "--add")
+        self.assertEqual(gap["marks"]["opencode:opencode/new-client"], "needs-client-setup")
+        self.assertEqual(gap["missing"], ["opencode:opencode/gone"])
+        # A client-metadata warning is not a provider read failure: a `gone`
+        # verdict still prints, because only the provider read decides it.
+        warned = self.report(rows, ["opencode OpenCode metadata unavailable; client support unconfirmed: ValueError"])
+        self.assertEqual(models.classify_roster(warned, pins, deferred)["missing"], ["opencode:opencode/gone"])
+        failed = self.report([], ["opencode primary source failed; offers omitted: URLError"],
+                             providers={"opencode": {"status": "failed", "rows": []}})
+        self.assertEqual(models.classify_roster(failed, pins, deferred)["missing"], [])
+        empty = self.report([], providers={"opencode": {"status": "empty", "rows": []}})
+        self.assertEqual(models.classify_roster(empty, pins, deferred)["missing"], [])
+        unqueried = self.report(rows, providers={})
+        self.assertEqual(models.classify_roster(unqueried, pins, deferred)["missing"], [])
+        # A pin priced above zero on an ok read is `gone` too.
+        priced = self.report(rows, providers={"opencode": {"status": "ok", "rows": [
+            {"model": "kept", "free": True}, {"model": "gone", "free": False}]}})
+        self.assertEqual(models.classify_roster(priced, pins, deferred)["missing"], ["opencode:opencode/gone"])
+
+
+class PinVerdicts(unittest.TestCase):
+    """A pin verdict reads only its provider read: the status plus the
+    pre-filter rows of exact served ids and their zero-price flag. The
+    client-capability filter and the display limit never move a verdict."""
+    DOCS = """<table>
+<tr><th>Model</th><th>Model ID</th><th>Endpoint</th><th>AI SDK Package</th></tr>
+<tr><td>Pinned Free</td><td>pinned-free</td><td><code>https://opencode.ai/inference/v1/chat/completions</code></td><td>sdk</td></tr>
+<tr><td>Paid Pin</td><td>paid-pin</td><td><code>https://opencode.ai/inference/v1/chat/completions</code></td><td>sdk</td></tr>
+<tr><td>Documented Gone</td><td>doc-gone</td><td><code>https://opencode.ai/inference/v1/chat/completions</code></td><td>sdk</td></tr>
+</table>
+<table>
+<tr><th>Model</th><th>Input</th><th>Output</th><th>Cached Read</th><th>Cached Write</th></tr>
+<tr><td>Pinned Free</td><td>Free</td><td>Free</td><td>Free</td><td>-</td></tr>
+<tr><td>Paid Pin</td><td>$1</td><td>$1</td><td>-</td><td>-</td></tr>
+<tr><td>Documented Gone</td><td>Free</td><td>Free</td><td>-</td><td>-</td></tr>
+</table>"""
+    PINS = [adapters.Lane("opencode", "opencode/pinned-free"),
+            adapters.Lane("opencode", "opencode/paid-pin"),
+            adapters.Lane("opencode", "opencode/doc-gone")]
+
+    def setUp(self):
+        root = tempfile.TemporaryDirectory(prefix="xcheck-models-test-")
+        self.addCleanup(root.cleanup)
+        isolate = patch.object(files, "ROOT", pathlib.Path(root.name))
+        isolate.start()
+        self.addCleanup(isolate.stop)
+
+    def zen_report(self, payload, docs=None, metadata=None):
+        with patch.object(models, "client_metadata", return_value=metadata if metadata is not None else {}), \
+                patch.object(models, "fetch", side_effect=[payload, self.DOCS if docs is None else docs]):
+            return models.discover({"opencode"})
+
+    def test_a_fetch_error_leaves_every_pin_unknown(self):
+        pins = [adapters.Lane("opencode", "openrouter/away:free")]
+        with patch.object(models, "fetch", side_effect=OSError("offline")):
+            report = models.discover({"openrouter"})
+        self.assertEqual(report["providers"]["openrouter"], {"status": "failed", "rows": []})
+        self.assertEqual(models.pin_status(report, pins), {"opencode:openrouter/away:free": "unknown"})
+        self.assertEqual(models.classify_roster(report, pins, [])["missing"], [])
+        # A provider the report never queried is unknown too.
+        self.assertEqual(models.pin_status({"providers": {}}, pins), {"opencode:openrouter/away:free": "unknown"})
+
+    def test_a_changed_zen_table_fails_the_whole_read(self):
+        for docs in [self.DOCS + "\n" + self.DOCS,  # ambiguous duplicate tables
+                     self.DOCS.replace("<td>Paid Pin</td>", "<td>Pinned Free</td>", 1)]:  # duplicate endpoint name
+            with self.subTest(docs=docs[:60]), \
+                    patch.object(models, "client_metadata", return_value={}), \
+                    patch.object(models, "fetch", side_effect=[{"data": [{"id": "pinned-free"}]}, docs]):
+                report = models.discover({"opencode"})
+            self.assertEqual(report["providers"]["opencode"]["status"], "failed")
+            self.assertTrue(all(v == "unknown" for v in models.pin_status(report, self.PINS).values()))
+            self.assertEqual(models.classify_roster(report, self.PINS, [])["missing"], [])
+
+    def test_an_empty_zen_join_is_unknown_not_gone(self):
+        # Live ids serve nothing the docs table documents: a successful empty join.
+        report = self.zen_report({"data": [{"id": "other-served"}]})
+        self.assertEqual(report["providers"]["opencode"], {"status": "empty", "rows": []})
+        self.assertIn("no rows", report["warnings"][-1])
+        self.assertTrue(all(v == "unknown" for v in models.pin_status(report, self.PINS).values()))
+        self.assertEqual(models.classify_roster(report, self.PINS, [])["missing"], [])
+
+    def test_absent_priced_and_capability_gapped_pins(self):
+        zen = {"data": [{"id": "pinned-free"}, {"id": "paid-pin"}]}  # doc-gone is documented but not served
+        no_tools = {"opencode/pinned-free": {"capabilities": {"tools": False,
+                                             "input": ["text"], "output": ["text"]}}}
+        report = self.zen_report(zen, metadata=no_tools)
+        self.assertEqual(models.pin_status(report, self.PINS),
+                         {"opencode:opencode/pinned-free": "free",   # client tools:false never turns free into gone
+                          "opencode:opencode/paid-pin": "gone",      # served at a non-zero price
+                          "opencode:opencode/doc-gone": "gone"})     # absent from the live list on an ok read
+        self.assertNotIn("opencode:opencode/pinned-free",
+                         [r["selector"] for r in report["models"]])  # the client filter dropped the offer only
+        self.assertEqual(models.classify_roster(report, self.PINS, [])["missing"],
+                         ["opencode:opencode/doc-gone", "opencode:opencode/paid-pin"])
+
+    def test_a_served_id_whose_price_did_not_parse_is_unknown_for_that_pin_only(self):
+        # "no-price" is documented, live, and chat-served but has no pricing row.
+        docs = self.DOCS.replace("</table>",
+                                 "<tr><td>No Price</td><td>no-price</td>"
+                                 "<td><code>https://opencode.ai/inference/v1/chat/completions</code></td>"
+                                 "<td>sdk</td></tr></table>", 1)
+        pins = [*self.PINS, adapters.Lane("opencode", "opencode/no-price")]
+        report = self.zen_report({"data": [{"id": "pinned-free"}, {"id": "paid-pin"}, {"id": "no-price"}]},
+                                 docs=docs)
+        self.assertEqual(report["providers"]["opencode"]["status"], "ok")
+        self.assertEqual(models.pin_status(report, pins),
+                         {"opencode:opencode/pinned-free": "free",
+                          "opencode:opencode/paid-pin": "gone",
+                          "opencode:opencode/doc-gone": "gone",
+                          "opencode:opencode/no-price": "unknown"})
+        self.assertNotIn("opencode:opencode/no-price",  # unpriced offers are not listed
+                         [r["selector"] for r in report["models"]])
+        self.assertEqual(models.classify_roster(report, pins, [])["missing"],
+                         ["opencode:opencode/doc-gone", "opencode:opencode/paid-pin"])
+
+    def test_priced_json_read_carries_each_rows_price_state(self):
+        pins = [adapters.Lane("opencode", "openrouter/free-id"),
+                adapters.Lane("opencode", "openrouter/unpriced"),
+                adapters.Lane("opencode", "openrouter/absent")]
+        payload = {"data": [{"id": "free-id", "pricing": {"prompt": "0", "completion": "0"}},
+                            {"id": "unpriced"}]}
+        with patch.object(models, "fetch", return_value=payload):
+            report = models.discover({"openrouter"})
+        self.assertEqual(report["providers"]["openrouter"]["status"], "ok")
+        self.assertEqual(models.pin_status(report, pins),
+                         {"opencode:openrouter/free-id": "free",
+                          "opencode:openrouter/unpriced": "unknown",
+                          "opencode:openrouter/absent": "gone"})
+        self.assertEqual(models.classify_roster(report, pins, [])["missing"], ["opencode:openrouter/absent"])
+
+    def test_roster_classification_returns_the_verdicts_it_computes(self):
+        # Callers print the same verdicts `missing` was derived from — one
+        # `pin_status` pass, not two.
+        report = self.zen_report({"data": [{"id": "pinned-free"}, {"id": "paid-pin"}]})
+        roster = models.classify_roster(report, self.PINS, [])
+        self.assertEqual(roster["verdicts"], {"opencode:opencode/pinned-free": "free",
+                                              "opencode:opencode/paid-pin": "gone",
+                                              "opencode:opencode/doc-gone": "gone"})
+        self.assertEqual(roster["missing"], ["opencode:opencode/doc-gone",
+                                             "opencode:opencode/paid-pin"])
+
+    def test_a_duplicate_zen_pricing_header_fails_the_whole_read(self):
+        # A second Input column makes every parsed charge ambiguous; the last
+        # duplicate must not reprice a paid offer free.
+        endpoint_table, pricing_table = self.DOCS.split("</table>", 1)
+        pricing_table = pricing_table.replace("<th>Cached Write</th>",
+                                              "<th>Cached Write</th><th>Input</th>")
+        pricing_table = pricing_table.replace("</td></tr>", "</td><td>Free</td></tr>")
+        report = self.zen_report({"data": [{"id": "pinned-free"}, {"id": "paid-pin"}]},
+                                 docs=endpoint_table + "</table>" + pricing_table)
+        self.assertEqual(report["providers"]["opencode"]["status"], "failed")
+        self.assertEqual(report["models"], [])
+        self.assertTrue(all(v == "unknown" for v in models.pin_status(report, self.PINS).values()))
+        self.assertEqual(models.classify_roster(report, self.PINS, [])["missing"], [])
+
+    def test_duplicate_priced_json_ids_fail_the_whole_read(self):
+        # Two rows for one id make the price verdict order-dependent; neither
+        # order may produce a verdict or an offer.
+        pin = [adapters.Lane("opencode", "openrouter/offer")]
+        free = {"id": "offer", "pricing": {"prompt": "0", "completion": "0"}}
+        paid = {"id": "offer", "pricing": {"prompt": "1", "completion": "1"}}
+        for data in ([free, paid], [paid, free]):
+            with self.subTest(order=data[0]["pricing"]["prompt"]), \
+                    patch.object(models, "fetch", return_value={"data": data}):
+                report = models.discover({"openrouter"})
+            self.assertEqual(report["providers"]["openrouter"]["status"], "failed")
+            self.assertEqual(report["models"], [])
+            self.assertEqual(models.pin_status(report, pin), {"opencode:openrouter/offer": "unknown"})
+
+    def test_malformed_primary_arrays_fail_while_an_empty_one_is_empty(self):
+        # `data` must be a list of entries with nonblank string ids; a
+        # non-list, a missing/null/blank id is a failed read, not an empty
+        # inventory — a blank identity never proves a pin was withdrawn.
+        pin = [adapters.Lane("opencode", "openrouter/offer")]
+        cases = (({"data": []}, "empty"), ({"data": {}}, "failed"),
+                 ({"data": [{"pricing": {}}]}, "failed"), ({"data": [{"id": None}]}, "failed"),
+                 ({"data": [{"id": ""}]}, "failed"), ({"data": [{"id": "   "}]}, "failed"))
+        for payload, status in cases:
+            with self.subTest(payload=payload), patch.object(models, "fetch", return_value=payload):
+                report = models.discover({"openrouter"})
+            self.assertEqual(report["providers"]["openrouter"]["status"], status)
+            self.assertEqual(report["models"], [])
+            self.assertEqual(models.pin_status(report, pin), {"opencode:openrouter/offer": "unknown"})
+        # Zen's live list goes through the same identity validation.
+        report = self.zen_report({"data": [{"id": ""}, {"id": "pinned-free"}]})
+        self.assertEqual(report["providers"]["opencode"]["status"], "failed")
+        self.assertEqual(report["models"], [])
+        self.assertTrue(all(v == "unknown" for v in models.pin_status(report, self.PINS).values()))
+
+    def test_blank_zen_table_names_fail_the_whole_read(self):
+        # A missing join key is an incomplete table row: a blank model name in
+        # either Zen table fails the whole read, even on a row serving no live
+        # id. Blank names must not match each other and certify a price.
+        endpoint_table, pricing_table = self.DOCS.split("</table>", 1)
+        cases = [
+            # blank name on a served row, both tables (the reported repro)
+            self.DOCS.replace("<td>Pinned Free</td>", "<td></td>"),
+            # whitespace-only names count as blank
+            self.DOCS.replace("<td>Pinned Free</td>", "<td>   </td>"),
+            # blank name in one table only, still on a served row
+            endpoint_table.replace("<td>Paid Pin</td>", "<td></td>", 1) + "</table>" + pricing_table,
+            endpoint_table + "</table>" + pricing_table.replace("<td>Paid Pin</td>", "<td></td>", 1),
+            # blank names on unserved rows are just as malformed
+            endpoint_table.replace("<td>Documented Gone</td>", "<td></td>", 1) + "</table>" + pricing_table,
+            endpoint_table + "</table>" + pricing_table.replace("<td>Documented Gone</td>", "<td></td>", 1),
+        ]
+        for docs in cases:
+            with self.subTest(docs=docs):
+                report = self.zen_report({"data": [{"id": "pinned-free"}, {"id": "paid-pin"}]}, docs=docs)
+            self.assertEqual(report["providers"]["opencode"]["status"], "failed")
+            self.assertEqual(report["models"], [])
+            self.assertTrue(all(v == "unknown"
+                                for v in models.pin_status(report, self.PINS).values()))
+
+    def test_malformed_client_capabilities_keep_the_offer_visible(self):
+        # Malformed advisory capabilities are unconfirmed client support, not a
+        # provider failure: the provider-confirmed offer stays listed and the
+        # provider-served pin verdict stays `free`.
+        payload = {"data": [{"id": "offer", "pricing": {"prompt": "0", "completion": "0"},
+                             "supported_parameters": ["tools"],
+                             "architecture": {"input_modalities": ["text"],
+                                              "output_modalities": ["text"]}}]}
+        pin = [adapters.Lane("opencode", "openrouter/offer")]
+        for caps in (None, [], ["bad"], 7, "bad", {}, {"tools": False,
+                                                     "input": ["text"], "output": ["text"]}):
+            with self.subTest(caps=repr(caps)), \
+                    patch.object(models, "fetch", return_value=payload), \
+                    patch.object(models, "review_metadata",
+                                 return_value={"openrouter/offer": {"capabilities": caps}}):
+                report = models.discover({"openrouter"})
+            self.assertEqual(report["providers"]["openrouter"]["status"], "ok")
+            self.assertEqual(models.pin_status(report, pin), {"opencode:openrouter/offer": "free"})
+            self.assertEqual(len(report["models"]), 1)
+            self.assertNotEqual(report["models"][0]["state"], "ready")
+            self.assertFalse(any("primary source failed" in w for w in report["warnings"]),
+                             report["warnings"])
+
+    def test_cli_classifies_a_default_roster_opencode_pin(self):
+        # An opencode pin in the default roster is still a pin: marks and the
+        # `missing` diagnostic cover it, not only OPT_IN members.
+        roster = (*adapters.DEFAULT_ROSTER, adapters.Lane("opencode", "opencode/default-pin"))
+        report = {"checked_at": "now", "warnings": [], "sources": {}, "notice": "n",
+                  "models": [{"provider": "opencode", "release_date": "", "state": "ready",
+                              "selector": "opencode:opencode/default-pin"}],
+                  "providers": {"opencode": {"status": "ok", "rows": [
+                      {"model": "default-pin", "price": "zero", "free": True}]}}}
+        cli = runpy.run_path(str(pathlib.Path(__file__).resolve().parent.parent / "bin/xcheck"))["main"]
+        for rows, want in ((report["providers"]["opencode"]["rows"], "pinned opencode:opencode/default-pin"),
+                           ([{"model": "other", "price": "zero", "free": True}],
+                            "missing opencode:opencode/default-pin")):
+            report["providers"]["opencode"]["rows"] = rows
+            output = io.StringIO()
+            with self.subTest(want=want), patch.object(adapters, "DEFAULT_ROSTER", roster), \
+                    patch.object(models, "discover", return_value=report), \
+                    patch.object(sys, "argv", ["xcheck", "models"]), patch.object(sys, "stdout", output):
+                self.assertEqual(cli(), 0)
+            self.assertIn(want, output.getvalue())
+            self.assertNotIn("--add opencode:opencode/default-pin", output.getvalue())
+
+    def test_cli_prints_the_pin_queue_even_past_the_display_limit(self):
+        rows = [{"provider": "opencode", "release_date": f"2026-01-{n:02d}", "state": "ready",
+                 "selector": f"opencode:opencode/old-{n}"} for n in range(1, 22)]
+        rows.append({"provider": "opencode", "release_date": "2020-01-01", "state": "ready",
+                     "selector": "opencode:opencode/space-bunny-free"})
+        report = {"checked_at": "now", "models": rows, "warnings": [], "sources": {"opencode": {}}, "notice": "Live prices"}
+        cli = runpy.run_path(str(pathlib.Path(__file__).resolve().parent.parent / "bin/xcheck"))["main"]
+        output = io.StringIO()
+        with patch.object(models, "discover", return_value=report), \
+             patch.object(sys, "argv", ["xcheck", "models", "--limit", "5"]), patch.object(sys, "stdout", output):
+            self.assertEqual(cli(), 0)
+        text = output.getvalue()
+        self.assertIn("pinned opencode:opencode/space-bunny-free", text)
+        self.assertIn("--add opencode:opencode/old-1", text)
+        self.assertEqual(text.count("--add "), 21)
+        self.assertIn("5 shown of 22", text)
+
+
 if __name__ == "__main__":
     unittest.main()

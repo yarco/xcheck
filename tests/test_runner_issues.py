@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import test_xcheck as support
 import test_runtime_e2e as runtime
-from xcheck import adapters, capacity, install, lane, run
+from xcheck import adapters, capacity, install, lane, models, run
 
 # The fake OpenCode server's native upstream rate-limit error (tests/fake/harness).
 UPSTREAM_LIMIT = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
@@ -102,10 +102,13 @@ class ReportStartup(unittest.TestCase):
         problem = self.admission(subprocess.CompletedProcess([], 1, '', 'boom'))
         self.assertIn('startup-unavailable', problem)
 
-    def doctor(self, probe, listing_failure=False, suffix=False, acp_models=None):
+    def doctor(self, probe, listing_failure=False, suffix=False, acp_models=None, report=None,
+               fetch=None):
         helps = {tuple(cmd): (support.FIX / 'cli-help' / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
+        self.calls = []
         def fake_run(cmd, **_):
+            self.calls.append(list(cmd))
             if tuple(cmd) in helps:
                 return subprocess.CompletedProcess(cmd, 0, helps[tuple(cmd)], '')
             if cmd[-2:] == ['version', '--json']:
@@ -116,10 +119,17 @@ class ReportStartup(unittest.TestCase):
                 data = [{"providerID": m.split("/", 1)[0], "id": m.split("/", 1)[1]} for m in pins if "/" in m]
                 return subprocess.CompletedProcess(cmd, 1 if listing_failure else 0, json.dumps({"data": data}), "")
             return subprocess.CompletedProcess(cmd, 1 if listing_failure else 0, '\n'.join(pins), '')
+        discovery = ({"side_effect": report} if isinstance(report, BaseException)
+                     else {"return_value": report or {"providers": {}, "models": []}})
+        # `fetch` runs real discovery over fake provider URLs; otherwise
+        # `report` stubs the discovery result entirely.
+        discovery_or_fetch = (patch.object(models, 'discover', **discovery) if fetch is None
+                              else patch.object(models, 'fetch', side_effect=fetch))
         with patch.object(install, 'source_root', return_value=support.REPO), \
                 patch.object(install, 'installed_digest', return_value=install.digest(support.REPO)), \
                 patch.object(run.subprocess, 'run', side_effect=fake_run), \
                 patch.object(adapters, 'unavailable', return_value=None), \
+                discovery_or_fetch, \
                 patch.object(run, 'agy_acp_models', return_value=acp_models if acp_models is not None else
                              [peer.model for peer in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN) if peer.kind == 'agy']), \
                 redirect_stdout(io.StringIO()) as out:
@@ -133,7 +143,7 @@ class ReportStartup(unittest.TestCase):
         code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''),
                                  acp_models=['gemini-3.8-flash-low'])
         self.assertEqual(code, 1, text)
-        self.assertIn('agy model gemini-3.8-flash-high NOT advertised by the ACP server', text)
+        self.assertIn('agy model gemini-3.8-flash NOT advertised by the ACP server', text)
 
     def test_doctor_fails_live_startup_even_when_all_flags_and_pins_exist(self):
         code, text = self.doctor(subprocess.CompletedProcess([], 1, '',
@@ -160,6 +170,117 @@ class ReportStartup(unittest.TestCase):
                 code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), **kwargs)
                 self.assertEqual(code, 1, text)
                 self.assertIn('unchecked: model listing exited 1' if kwargs.get('listing_failure') else 'NOT in opencode api model.list', text)
+
+    def test_doctor_prints_free_gone_unknown_and_advises_new(self):
+        zen_rows = [{"model": lane.model.split("/", 1)[1], "free": True}
+                    for lane in adapters.OPT_IN if lane.model.startswith("opencode/")]
+        or_pin = next(lane.model for lane in adapters.OPT_IN if lane.model.startswith("openrouter/"))
+        report = {"providers": {"opencode": {"status": "ok", "rows": zen_rows},
+                                "openrouter": {"status": "ok", "rows": [{"model": or_pin.split("/", 1)[1], "free": True}]}},
+                  "models": [{"selector": "opencode:opencode/fresh-offer", "state": "ready"}]}
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), report=report)
+        self.assertEqual(code, 0, text)
+        self.assertIn('free    opencode pin opencode/space-bunny-free: listed by model API', text)
+        self.assertIn('new     opencode:opencode/fresh-offer', text)
+
+        # A pin absent from an ok provider read is `gone` and fails doctor,
+        # even while the client catalog still lists it.
+        gone_rows = [row for row in zen_rows if row["model"] != "muse-spark-1.3-contributor-free"]
+        gone = {**report, "providers": {**report["providers"], "opencode": {"status": "ok", "rows": gone_rows}}}
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), report=gone)
+        self.assertEqual(code, 1, text)
+        self.assertIn('gone    opencode pin opencode/muse-spark-1.3-contributor-free: listed by model API', text)
+
+        # Failed and empty reads are `unknown`: printed, never fatal.
+        unknown = {**report, "models": [],
+                   "providers": {"opencode": {"status": "failed", "rows": []},
+                                 "openrouter": {"status": "empty", "rows": []}}}
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), report=unknown)
+        self.assertEqual(code, 0, text)
+        self.assertIn('unknown opencode pin opencode/space-bunny-free: listed by model API', text)
+        self.assertIn(f'unknown opencode pin {or_pin}: listed by model API', text)
+        self.assertNotIn('gone    ', text)
+        self.assertNotIn('new     ', text)
+
+        # A discovery error is printed as unknown and does not fail doctor.
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''),
+                                 report=ValueError("boom"))
+        self.assertEqual(code, 0, text)
+        self.assertIn('unknown opencode discovery: ValueError', text)
+        self.assertIn('unknown opencode pin opencode/space-bunny-free', text)
+
+    def test_doctor_reuses_the_catalog_discovery_already_fetched(self):
+        # A provider read records the client catalog ids discovery fetched, so
+        # the pin check does not boot `opencode api model.list` a second time.
+        zen_rows = [{"model": lane.model.split("/", 1)[1], "price": "zero", "free": True}
+                    for lane in adapters.OPT_IN if lane.model.startswith("opencode/")]
+        or_pin = next(lane.model for lane in adapters.OPT_IN if lane.model.startswith("openrouter/"))
+        report = {"providers": {"opencode": {"status": "ok", "rows": zen_rows,
+                                             "client_ids": [l.model for l in adapters.OPT_IN
+                                                            if l.model.startswith("opencode/")]},
+                                "openrouter": {"status": "ok",
+                                               "rows": [{"model": or_pin.split("/", 1)[1],
+                                                         "price": "zero", "free": True}],
+                                               "client_ids": [or_pin]}},
+                  "models": []}
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), report=report)
+        self.assertEqual(code, 0, text)
+        self.assertIn('free    opencode pin opencode/space-bunny-free: listed by model API', text)
+        self.assertEqual([c for c in self.calls if c[:3] == ['opencode', 'api', 'model.list']], [])
+
+        # A catalog failure recorded on the read reports the failure class the
+        # same way the live call would, without retrying the boot.
+        failed = {"providers": {"opencode": {"status": "ok", "rows": zen_rows,
+                                             "client_error": "ValueError"},
+                                "openrouter": {"status": "ok",
+                                               "rows": [{"model": or_pin.split("/", 1)[1],
+                                                         "price": "zero", "free": True}],
+                                               "client_error": "ValueError"}},
+                  "models": []}
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), report=failed)
+        self.assertEqual(code, 1, text)
+        self.assertIn('free    opencode pin opencode/space-bunny-free: '
+                      'unchecked: model API failed: ValueError', text)
+        self.assertIn(f'free    opencode pin {or_pin}: unchecked: model API failed: ValueError', text)
+        self.assertEqual([c for c in self.calls if c[:3] == ['opencode', 'api', 'model.list']], [])
+
+    def test_doctor_reuses_the_catalog_a_live_discovery_fetched(self):
+        # Real discovery boots `model.list` once per provider; the pin check
+        # consumes the recorded ids rather than booting it again per pin.
+        zen_ids = [l.model.split("/", 1)[1] for l in adapters.OPT_IN
+                   if l.model.startswith("opencode/")]
+        docs = ("<table><tr><th>Model</th><th>Model ID</th><th>Endpoint</th><th>AI SDK Package</th></tr>"
+                + "".join(f"<tr><td>{i}</td><td>{i}</td>"
+                          "<td><code>https://opencode.ai/inference/v1/chat/completions</code></td>"
+                          "<td>sdk</td></tr>" for i in zen_ids)
+                + "</table><table><tr><th>Model</th><th>Input</th><th>Output</th>"
+                  "<th>Cached Read</th><th>Cached Write</th></tr>"
+                + "".join(f"<tr><td>{i}</td><td>Free</td><td>Free</td><td>Free</td><td>-</td></tr>"
+                          for i in zen_ids)
+                + "</table>")
+        or_pin = next(lane.model for lane in adapters.OPT_IN if lane.model.startswith("openrouter/"))
+
+        def fake_fetch(url, as_json=True):
+            if url == models.ZEN:
+                return {"data": [{"id": i} for i in zen_ids]}
+            if url == models.ZEN_DOCS:
+                return docs
+            if url == models.OPENROUTER:
+                return {"data": [{"id": or_pin.split("/", 1)[1],
+                                  "pricing": {"prompt": "0", "completion": "0"},
+                                  "supported_parameters": ["tools"],
+                                  "architecture": {"input_modalities": ["text"],
+                                                   "output_modalities": ["text"]}}]}
+            raise AssertionError(f"unexpected fetch {url}")
+
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''),
+                                 fetch=fake_fetch)
+        self.assertEqual(code, 0, text)
+        self.assertIn('free    opencode pin opencode/space-bunny-free: listed by model API', text)
+        self.assertIn(f'free    opencode pin {or_pin}: listed by model API', text)
+        boots = [c for c in self.calls if c[:3] == ['opencode', 'api', 'model.list']]
+        self.assertEqual(len(boots), len({l.model.split("/", 1)[0] for l in adapters.OPT_IN
+                                          if l.kind == "opencode"}))
 
 
 class ReportMeters(unittest.TestCase):

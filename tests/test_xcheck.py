@@ -1233,22 +1233,23 @@ class Installation(unittest.TestCase):
                             path.chmod(0o755)
 
     def test_doctor_rejects_failed_help_even_when_no_adapter_flags_are_needed(self):
-        from xcheck import install, run
+        from xcheck import install, models, run
         with patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(adapters, "HELP_COMMANDS", {"opencode acp": (["opencode", "acp", "--help"], [])}), \
              patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "unavailable")), \
              patch.object(adapters, "unavailable", return_value=None), \
+             patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(run, "agy_acp_models", return_value=[]), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(run.doctor(), 1)
         self.assertIn("FAIL opencode acp: help command exited 1", output.getvalue())
 
     def test_doctor_detects_stale_installed_copy_from_captured_help(self):
-        from xcheck import install, run
+        from xcheck import install, models, run
         helps = {tuple(cmd): (FIX / "cli-help" / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
-        models = "\n".join(l.model for l in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))
+        listed = "\n".join(l.model for l in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))
 
         def fake_run(cmd, **_):
             if tuple(cmd) in helps:
@@ -1256,15 +1257,16 @@ class Installation(unittest.TestCase):
             if cmd[-2:] == ["version", "--json"]:
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"currentVersion": adapters.GROK_VERIFIED_VERSION}), "")
             if cmd[:2] == ["opencode", "api"]:
-                data = [{"providerID": m.split("/", 1)[0], "id": m.split("/", 1)[1]} for m in models.splitlines() if "/" in m]
+                data = [{"providerID": m.split("/", 1)[0], "id": m.split("/", 1)[1]} for m in listed.splitlines() if "/" in m]
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": data}), "")
-            return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), models), "")
+            return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), listed), "")
 
         with patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value="stale"), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
-             patch.object(run, "agy_acp_models", return_value=models.splitlines()), \
+             patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
+             patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(run.doctor(), 1)
         self.assertIn("FAIL installed copy stale != source", output.getvalue())
@@ -1273,7 +1275,8 @@ class Installation(unittest.TestCase):
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
-             patch.object(run, "agy_acp_models", return_value=models.splitlines()), \
+             patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
+             patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(run.doctor(), 0)
 
@@ -1282,7 +1285,8 @@ class Installation(unittest.TestCase):
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
-             patch.object(run, "agy_acp_models", return_value=models.splitlines()), \
+             patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
+             patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(run.doctor(), 1)
         self.assertIn("grok: missing ['--sandbox']", output.getvalue())

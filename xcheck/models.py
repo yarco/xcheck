@@ -37,20 +37,29 @@ SOURCES = {
 }
 
 
-def zero_cost(cost: dict, required: tuple[str, str]) -> bool:
-    """Known input/output and every reported charge must be exactly zero."""
+def price_state(cost: dict, required: tuple[str, str]) -> str:
+    """zero | nonzero | unknown. A missing row or key, an unparsed value, or a
+    non-finite number is `unknown` — evidence of no price, not of a nonzero one."""
     if not isinstance(cost, dict) or any(k not in cost for k in required):
-        return False
+        return "unknown"
+    nonzero = False
     for value in cost.values():
         if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-            return False
+            return "unknown"
         try:
             number = Decimal(str(value))
         except InvalidOperation:
-            return False
-        if not number.is_finite() or number != 0:
-            return False
-    return True
+            return "unknown"
+        if not number.is_finite():
+            return "unknown"
+        if number != 0:
+            nonzero = True
+    return "nonzero" if nonzero else "zero"
+
+
+def zero_cost(cost: dict, required: tuple[str, str]) -> bool:
+    """Known input/output and every reported charge must be exactly zero."""
+    return price_state(cost, required) == "zero"
 
 
 class PriceTables(HTMLParser):
@@ -104,17 +113,40 @@ def html_tables(text: str) -> list[list[list[str]]]:
     return parser.tables
 
 
-def zen_candidates(payload: dict, docs: str) -> list[dict]:
-    """Join documented free prices and chat endpoints to live IDs. No ID pins."""
+def data_rows(payload: dict) -> list[dict]:
+    """The provider's `data` array: entries with unique nonblank string ids.
+    Anything else is a malformed primary structure — a failed read, not a
+    successful empty inventory."""
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise ValueError("provider model list is not an array")
+    seen = set()
+    for item in data:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) \
+                or not item["id"].strip():
+            raise ValueError("provider model entry is malformed")
+        if item["id"] in seen:
+            raise ValueError("provider serves a duplicate model id")
+        seen.add(item["id"])
+    return data
+
+
+def zen_join(payload: dict, docs: str) -> list[dict]:
+    """The Zen provider read: documented chat endpoints joined to live IDs,
+    each row flagged by whether the documented price is exactly zero. These
+    are the pre-filter rows a pin verdict reads; a documented model that is
+    not served does not appear here at all."""
     tables = html_tables(docs)
     endpoints = [t for t in tables if t and t[0] == ["Model", "Model ID", "Endpoint", "AI SDK Package"]]
     pricing = [t for t in tables if t and t[0][:5] == ["Model", "Input", "Output", "Cached Read", "Cached Write"]]
     if len(endpoints) != 1 or len(pricing) != 1:
         raise ValueError("Zen documentation tables changed; no prices confirmed")
-    live = {m["id"] for m in payload["data"]}
+    if len(set(pricing[0][0])) != len(pricing[0][0]):
+        raise ValueError("ambiguous Zen pricing headers")
+    live = {m["id"] for m in data_rows(payload)}
     prices = {}
     for row in pricing[0][1:]:
-        if len(row) != len(pricing[0][0]):
+        if len(row) != len(pricing[0][0]) or not row[0].strip():
             raise ValueError("incomplete Zen pricing row")
         if row[0] in prices:
             raise ValueError("ambiguous Zen pricing row")
@@ -125,7 +157,7 @@ def zen_candidates(payload: dict, docs: str) -> list[dict]:
     result = []
     names, identifiers = set(), set()
     for row in endpoints[0][1:]:
-        if len(row) != 4:
+        if len(row) != 4 or not row[0].strip():
             raise ValueError("incomplete Zen endpoint row")
         name, model, endpoint, _ = row
         if name in names or model in identifiers:
@@ -134,10 +166,20 @@ def zen_candidates(payload: dict, docs: str) -> list[dict]:
         identifiers.add(model)
         if model not in live or not endpoint.endswith(("/chat/completions", "/responses", "/messages")):
             continue
-        if zero_cost(prices.get(name), ("Input", "Output")):
-            result.append({"model": model, "name": name, "release_date": "",
-                           "date_source": "", "tool_call": None, "pricing_source": ZEN_DOCS})
+        state = price_state(prices.get(name), ("Input", "Output"))
+        result.append({"model": model, "name": name, "free": state == "zero", "price": state})
     return result
+
+
+def zen_offer(row: dict) -> dict:
+    """One joined read row as an offer, before the client capability check."""
+    return {"model": row["model"], "name": row["name"], "release_date": "",
+            "date_source": "", "tool_call": None, "pricing_source": ZEN_DOCS}
+
+
+def zen_candidates(payload: dict, docs: str) -> list[dict]:
+    """Join documented free prices and chat endpoints to live IDs. No ID pins."""
+    return [zen_offer(row) for row in zen_join(payload, docs) if row["free"]]
 
 
 def text_review(inputs, outputs, tools) -> bool:
@@ -253,20 +295,43 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
     if providers and (unknown := providers - definitions.keys()):
         raise ValueError(f"no primary discovery source for: {', '.join(sorted(unknown))}; add a --sources file")
     warnings, result = [], []
+    reads = {}
     for provider, source in definitions.items():
         if providers and provider not in providers:
             continue
+        # The provider read pin verdicts rely on: status plus the pre-filter
+        # rows (exact served ids and whether each provider price is zero).
+        read = reads[provider] = {"status": "failed", "rows": []}
         try:
             payload = fetch(source["models_url"])
-            rows = (zen_candidates(payload, fetch(source["docs_url"], as_json=False))
-                    if source["format"] == "zen" else priced_candidates(payload, source["models_url"]))
+            if source["format"] == "zen":
+                joined = zen_join(payload, fetch(source["docs_url"], as_json=False))
+                rows = [zen_offer(row) for row in joined if row["free"]]
+            else:
+                joined = []
+                for item in data_rows(payload):
+                    state = price_state(item.get("pricing"), ("prompt", "completion"))
+                    joined.append({"model": item["id"], "free": state == "zero", "price": state})
+                rows = priced_candidates(payload, source["models_url"])
+            read["rows"] = joined
+            read["status"] = "ok" if joined else "empty"
+            if not joined:
+                warnings.append(f"{provider} primary source returned no rows; offers omitted")
+                continue
             if not rows:
                 continue
             try:
                 metadata = review_metadata(provider)
+                if not isinstance(metadata, dict):
+                    raise ValueError("model API returned a non-mapping catalog")
             except (OSError, subprocess.SubprocessError, ValueError) as error:
                 metadata = {}
+                read["client_error"] = type(error).__name__
                 warnings.append(f"{provider} OpenCode metadata unavailable; client support unconfirmed: {type(error).__name__}")
+            else:
+                # The pin-catalog check reuses this listing instead of booting
+                # the standalone model API a second time for the same provider.
+                read["client_ids"] = sorted(k for k in metadata if k.startswith(f"{provider}/"))
             confirmed = []
             for row in rows:
                 selector = f"opencode:{provider}/{row['model']}"
@@ -278,8 +343,12 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
                 if lane.model != f"{provider}/{row['model']}" or lane.effort:
                     warnings.append(f"{provider} has a model ID unsupported by the lane selector; omitted")
                     continue
-                local = metadata.get(lane.model, {})
-                caps = local.get("capabilities", {})
+                # Malformed client metadata is unconfirmed support, never a
+                # provider-read failure: the provider's own row still governs.
+                local = metadata.get(lane.model)
+                local = local if isinstance(local, dict) else {}
+                caps = local.get("capabilities")
+                caps = caps if isinstance(caps, dict) else {}
                 if source["format"] == "zen":
                     row["pricing_source"] = source["docs_url"]
                     row["tool_call"] = caps.get("tools")
@@ -309,5 +378,66 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
     # client metadata. Dated offers retain newest-first order after them.
     result.sort(key=lambda r: (not r["release_date"], r["release_date"], r["provider"], r["model"]), reverse=True)
     return {"checked_at": datetime.now(timezone.utc).isoformat(), "models": result, "warnings": warnings,
+            "providers": reads,
             "sources": {k: v for k, v in definitions.items() if not providers or k in providers},
             "notice": "Provider-confirmed zero-price offers. Verify account quota and data policy; connect before opting in. Dates are advisory. No inference or config changes."}
+
+
+def pin_status(report: dict, pins) -> dict:
+    """free | gone | unknown for each opencode pin, from the provider reads.
+
+    `unknown` while the provider was not queried or its read is `failed` or
+    `empty`. `gone` needs an `ok` read whose pre-filter rows omit the exact
+    served id or show it at a parsed non-zero price. `free` means the rows
+    hold that id at a parsed zero price; client capability gaps
+    (`tools: false`, missing metadata, `needs-client-setup`) never turn
+    `free` into `gone`. A served id whose price is missing or unparseable is
+    `unknown` for that pin only — siblings on the same read keep theirs. A
+    row carrying only `free` without `price` keeps the boolean's meaning.
+    """
+    reads = report.get("providers") or {}
+    verdicts = {}
+    for lane in pins:
+        if lane.kind != "opencode":
+            continue
+        provider, _, ident = lane.model.partition("/")
+        read = reads.get(provider) or {}
+        verdict = "unknown"
+        if read.get("status") == "ok":
+            row = next((r for r in read.get("rows") or [] if r.get("model") == ident), None)
+            if row is None:
+                verdict = "gone"
+            elif "price" in row:
+                verdict = {"zero": "free", "nonzero": "gone"}.get(row["price"], "unknown")
+            else:
+                verdict = "free" if row.get("free") else "gone"
+        verdicts[f"opencode:{lane.model}"] = verdict
+    return verdicts
+
+
+def classify_roster(report: dict, pins, deferred) -> dict:
+    """Mark ready offers against the integrated pins.
+
+    A ready row is `pinned`, `deferred`, or `--add`. `--add` is the only
+    unclassified offer. `missing` is a `gone` pin: its provider read is `ok`
+    and the pre-filter rows omit its exact id or show it at a non-zero price.
+    A provider read that failed, returned no rows, or was never queried is
+    `unknown` and prints no missing line; neither may delete a pin. The
+    `verdicts` map is the `pin_status` result callers print per pin.
+    """
+    pin_set = {f"opencode:{lane.model}" for lane in pins if lane.kind == "opencode"}
+    deferred_set = {f"opencode:{lane.model}" for lane in deferred if lane.kind == "opencode"}
+    marks = {}
+    for row in report.get("models") or []:
+        selector = row["selector"]
+        if row.get("state") != "ready":
+            marks[selector] = row["state"]
+        elif selector in pin_set:
+            marks[selector] = "pinned"
+        elif selector in deferred_set:
+            marks[selector] = "deferred"
+        else:
+            marks[selector] = "--add"
+    verdicts = pin_status(report, pins)
+    missing = [s for s in sorted(pin_set) if verdicts.get(s) == "gone"]
+    return {"marks": marks, "missing": missing, "verdicts": verdicts}

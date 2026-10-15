@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-from xcheck import adapters, install, run
+from xcheck import adapters, install, models, run
 
 class ExactListedModels(unittest.TestCase):
 
@@ -28,7 +28,7 @@ class ExactListedModels(unittest.TestCase):
                 data = [{"providerID": p.model.split("/", 1)[0], "id": p.model.split("/", 1)[1]} for p in adapters.OPT_IN if p.kind == "opencode"]
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": data}), "")
             return subprocess.CompletedProcess(cmd, 0, '\n'.join((p.model for p in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))), '')
-        with patch.object(install, 'source_root', return_value=REPO), patch.object(install, 'installed_digest', return_value=install.digest(REPO)), patch.object(run.subprocess, 'run', side_effect=fake), patch.object(adapters, 'unavailable', return_value=None), patch.object(run, 'agy_acp_models', return_value=['gemini-3.8-flash-high', 'gemini-3.1-pro-preview']), redirect_stdout(io.StringIO()) as output:
+        with patch.object(install, 'source_root', return_value=REPO), patch.object(install, 'installed_digest', return_value=install.digest(REPO)), patch.object(run.subprocess, 'run', side_effect=fake), patch.object(adapters, 'unavailable', return_value=None), patch.object(models, 'discover', return_value={"providers": {}, "models": []}), patch.object(run, 'agy_acp_models', return_value=['gemini-3.8-flash', 'gemini-3.1-pro-preview']), redirect_stdout(io.StringIO()) as output:
             code = run.doctor()
         return (code, output.getvalue())
 
