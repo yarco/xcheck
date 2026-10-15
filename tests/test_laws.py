@@ -101,6 +101,30 @@ class AnswerContractLaws(unittest.TestCase):
         self.assertEqual(validate.check(render(parts), contract),
                          ("invalid", ["PROOF does not match the proof target's last line"]))
 
+    @given(answer(), st.sampled_from(["- PROOF: {s}", "PROOF: {s}", "**PROOF**\n{s}", "### PROOF\n{s}"]), SENTENCE)
+    @SETTINGS
+    def test_a_proof_line_quoted_in_the_findings_does_not_decide(self, a, shape, sentence):
+        """Property: findings that discuss a PROOF line do not replace the
+        answer's own final PROOF. Oracle: the construction (done by the first
+        law). Catches: taking the first PROOF-shaped line in the answer."""
+        parts, contract = a
+        parts = {**parts, "body": parts["body"] + "\n" + shape.format(s=sentence)}
+        self.assertEqual(validate.check(render(parts), contract), ("done", []))
+
+    @given(answer(), st.data())
+    @SETTINGS
+    def test_a_quoted_correct_token_cannot_cover_a_wrong_final_proof(self, a, data):
+        """Property: a wrong final PROOF fails even when the findings quote
+        the correct token on a PROOF line. Oracle: the contract token."""
+        parts, contract = a
+        token = contract.token
+        i = data.draw(st.integers(len("MANIFEST_TAIL_TOKEN: "), len(token) - 1))
+        swapped = token[:i] + ("0" if token[i] != "0" else "1") + token[i + 1:]
+        parts = {**parts, "body": parts["body"] + f"\nPROOF: {token}",
+                 "proof": parts["proof"].replace(token, swapped)}
+        self.assertEqual(validate.check(render(parts), contract),
+                         ("invalid", ["PROOF does not match the proof target's last line"]))
+
     @given(answer(), st.integers(0, 3), st.booleans())
     @SETTINGS
     def test_trailing_blank_lines_and_crlf_do_not_change_the_verdict(self, a, blanks, crlf):

@@ -83,8 +83,9 @@ PROOF_LINE = re.compile(r"^\s*(?:[-+*]\s+)?(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+
 
 
 def _proof(lines: list[str]) -> str | None:
-    for i, line in enumerate(lines):
-        m = PROOF_LINE.match(line)
+    # The last PROOF line decides: findings may quote PROOF lines.
+    for i in reversed(range(len(lines))):
+        m = PROOF_LINE.match(lines[i])
         if not m:
             continue
         value = (m.group(1) or "").strip()
