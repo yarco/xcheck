@@ -102,8 +102,8 @@ def _proof(lines: list[str]) -> str | None:
 def _substantive(lines: list[str], keyword: str, token: str) -> bool:
     """Some review text beyond the schema scaffolding (heading keyword, PROOF,
     token, marker). Text on the heading line itself counts."""
-    structural = re.compile(r"^(?:[-+*]\s+)?(?:[#*_]+\s*)?(?:\d+[.)]\s*)?(?:[*_]+)?PROOF\b|^(?:RESULT_COMPLETE|RESULT_INVALID)$", re.I)
-    body = " ".join(l for l in (x.strip() for x in lines) if l and not structural.match(l))
+    body = " ".join(l for l in (x.strip() for x in lines)
+                    if l and not PROOF_LINE.match(l) and l not in (COMPLETE, INVALID))
     body = body.replace(token, " ")
     body = re.sub(re.escape(keyword), " ", body, flags=re.I)
     return len(re.sub(r"[\W\d_]+", "", body)) >= 12

@@ -111,6 +111,16 @@ class AnswerContractLaws(unittest.TestCase):
         parts = {**parts, "body": parts["body"] + "\n" + shape.format(s=sentence)}
         self.assertEqual(validate.check(render(parts), contract), ("done", []))
 
+    @given(answer(), st.sampled_from(["Proof", "PROOF", "Proofs", "- Proof"]))
+    @SETTINGS
+    def test_review_prose_starting_with_proof_is_review_text(self, a, word):
+        """Property: a findings sentence that begins with the word Proof is
+        review text, not the schema PROOF line. Oracle: the construction.
+        Catches: stripping every line that starts with PROOF before counting."""
+        parts, contract = a
+        parts = {**parts, "body": f"{word} {parts['body']}"}
+        self.assertEqual(validate.check(render(parts), contract), ("done", []))
+
     @given(answer(), st.data())
     @SETTINGS
     def test_a_quoted_correct_token_cannot_cover_a_wrong_final_proof(self, a, data):
