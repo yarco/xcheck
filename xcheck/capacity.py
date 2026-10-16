@@ -4,7 +4,7 @@ Each pool has one free meter that runs no inference:
 
   codex   `codex app-server` JSON-RPC `account/rateLimits/read`  (5 h and weekly windows)
   claude  Anthropic OAuth usage endpoint, token from the login keychain
-  grok    credits meter: CLI billing view, else GetGrokCreditsConfig used-percent
+  grok    credits meter: CLI billing view, else GetGrokCreditsConfig as /usage reads it
   agy     `agy -p /usage --output-format json` (a client-side command: zero turns)
   opencode opt-in (no protocol meter)
   devin   opt-in (no protocol meter)
@@ -271,8 +271,9 @@ def _grok(lane: Lane) -> dict[str, float]:
     if windows:
         return windows
     # The CLI credits view can name the weekly period and the balances without
-    # a usage percent. Balances are not a quota. The same token's credits
-    # config, the one behind /usage, still carries the used-percent.
+    # a usage percent, even while usage is above zero, so its silence is not a
+    # reading. Balances are not a quota. The same token's credits config, the
+    # one behind /usage, is decoded the way grok.com's /usage decodes it.
     windows = grok_web_windows(_post(GROK_WEB_CREDITS_URL, {
         "Authorization": f"Bearer {key}", "Origin": "https://grok.com",
         "Referer": "https://grok.com/?_s=usage", "Accept": "*/*",
@@ -281,7 +282,7 @@ def _grok(lane: Lane) -> dict[str, float]:
     }, b"\x00\x00\x00\x00\x00", GROK_REJECTED))
     if not windows:
         raise ValueError("Grok credits view supplied neither creditUsagePercent nor GrokBuild usagePercent, "
-                         "and GetGrokCreditsConfig supplied no used-percent; "
+                         "and GetGrokCreditsConfig supplied no readable unified-billing config; "
                          "quota reserve cannot be verified. Check Grok /usage and recheck "
                          "xcheck capacity --lanes grok:grok-4.7:xhigh before a fresh run")
     return windows
@@ -300,13 +301,18 @@ def grok_windows(payload: dict) -> dict[str, float]:
 
 
 def grok_web_windows(data: bytes) -> dict[str, float]:
-    """Used-percent from GetGrokCreditsConfig. Left = 100 − the highest one.
+    """Used-percent from GetGrokCreditsConfig, read the way grok.com's /usage reads it.
 
-    A gRPC-web data frame holds the credits config. Each fixed32 whose field
-    number is 1 and whose value is inside 0..100 is a used-percent, and the
-    worse one binds. The trailer frame is status only. A frame that is not a
-    clean protobuf message, or a message with no in-range percent, supplies
-    nothing: bytes are not scanned for a percent, and balances are not consulted.
+    One gRPC-web data frame holds the response; its field 1 is the credits
+    config. The config's fields, from the web client's schema: 1
+    creditUsagePercent (float), 7 productUsage (repeated {1 product, 2
+    usagePercent}), 8 currentPeriod ({1 type, …}), 11 isUnifiedBillingUser.
+    Like the web client, a unified-billing config without field 1 has used
+    0%: proto3 omits a zero float, and every observed percent is a whole
+    number, so a week's usage under 1% arrives as no field. Grok shows no
+    percent for a config that is not unified billing, and neither does this.
+    Any frame or message that does not parse cleanly, a missing config, or
+    a percent outside 0..100 supplies nothing. Balances are not consulted.
     """
     frames: list[bytes] = []
     index = 0
@@ -318,65 +324,67 @@ def grok_web_windows(data: bytes) -> dict[str, float]:
         if data[index] & 0x80 == 0:
             frames.append(data[index + 5:end])
         index = end
-    if index != len(data):
+    if index != len(data) or len(frames) != 1:
         return {}
-    used: list[float] = []
-    for frame in frames:
-        found = _grok_used_percents(frame)
-        if found is None:
-            return {}
-        used.extend(found)
-    if not used:
+    response = _pb_fields(frames[0])
+    configs = [v for f, w, v in response or () if f == 1 and w == 2]
+    if len(configs) != 1 or (config := _pb_fields(configs[0])) is None:
         return {}
-    return {"weekly credits": 100.0 - max(used)}
+    if not any(f == 11 and w == 0 and v == 1 for f, w, v in config):
+        return {}
+    used = [v for f, w, v in config if f == 1 and w == 5] or [0.0]
+    period = "credits"
+    for f, w, v in config:
+        if f == 7 and w == 2:
+            product = _pb_fields(v)
+            if product is None:
+                return {}
+            used += [x for g, k, x in product if g == 2 and k == 5]
+        elif f == 8 and w == 2:
+            current = _pb_fields(v)
+            if current is None:
+                return {}
+            if any(g == 1 and k == 0 and x == 2 for g, k, x in current):  # USAGE_PERIOD_TYPE_WEEKLY
+                period = "weekly credits"
+    if not all(math.isfinite(u) and 0.0 <= u <= 100.0 for u in used):
+        return {}
+    return {period: 100.0 - max(used)}
 
 
-def _grok_used_percents(data: bytes, depth: int = 0) -> list[float] | None:
-    """Field-1 used-percents, or None when this buffer is not a clean message.
-
-    Length-delimited bytes that are not themselves a clean message are opaque.
-    They contribute no percent and do not fail the message around them.
-    """
-    found: list[float] = []
+def _pb_fields(data: bytes) -> list[tuple[int, int, object]] | None:
+    """One protobuf message's top-level fields as (number, wire type, value),
+    or None when the bytes are not a clean message. Varints are ints,
+    fixed32 is a float, length-delimited values stay bytes."""
+    fields: list[tuple[int, int, object]] = []
     index = 0
     while index < len(data):
         parsed = _varint(data, index)
-        if parsed is None or parsed[0] == 0:
+        if parsed is None or parsed[0] >> 3 == 0:
             return None
         key, index = parsed
         field, wire = key >> 3, key & 0x07
         if wire == 0:
-            nxt = _varint(data, index)
-            if nxt is None:
+            parsed = _varint(data, index)
+            if parsed is None:
                 return None
-            _, index = nxt
+            value, index = parsed
         elif wire == 1:
             if index + 8 > len(data):
                 return None
-            index += 8
+            value, index = data[index:index + 8], index + 8
         elif wire == 2:
-            nxt = _varint(data, index)
-            if nxt is None:
+            parsed = _varint(data, index)
+            if parsed is None or parsed[1] + parsed[0] > len(data):
                 return None
-            length, index = nxt
-            end = index + length
-            if end > len(data):
-                return None
-            if depth < 4:
-                nested = _grok_used_percents(data[index:end], depth + 1)
-                if nested is not None:
-                    found.extend(nested)
-            index = end
+            value, index = data[parsed[1]:parsed[1] + parsed[0]], parsed[1] + parsed[0]
         elif wire == 5:
             if index + 4 > len(data):
                 return None
-            value = struct.unpack_from("<f", data, index)[0]
-            index += 4
-            if field == 1 and math.isfinite(value) and 0.0 <= value <= 100.0:
-                found.append(float(value))
+            value, index = struct.unpack_from("<f", data, index)[0], index + 4
         else:
             return None
-    return found
+        fields.append((field, wire, value))
+    return fields
 
 
 def _varint(data: bytes, index: int) -> tuple[int, int] | None:

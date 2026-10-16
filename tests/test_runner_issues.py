@@ -2,7 +2,7 @@
 
 Grok fixtures: a CLI credits view with balance fields only, and
 GetGrokCreditsConfig frames captured 2026-10-09 (used-percent 2) and
-2026-10-16 (no used-percent), stored as hex.
+2026-10-16 (no used-percent: 0% used), stored as hex.
 Qwen fixture: acceptance run's native error, without identifiers or headers.
 """
 
@@ -318,6 +318,24 @@ class ReportMeters(unittest.TestCase):
         payload['config']['creditUsagePercent'] = 95
         self.assertEqual(self.grok_reading(payload).status, 'reserve-low')
 
+    @staticmethod
+    def grok_config(*fields, unified=True, trailer=True):
+        """A GetGrokCreditsConfig gRPC-web body around config fields (raw bytes)."""
+        config = b''.join(fields) + (bytes([0x58, 1]) if unified else b'')
+        msg = bytes([0x0A, len(config)]) + config
+        frame = bytes([0]) + len(msg).to_bytes(4, 'big') + msg
+        return frame + (bytes([0x80, 0, 0, 0, 15]) + b'grpc-status:0\r\n' if trailer else b'')
+
+    @staticmethod
+    def percent(value, field=1):
+        return bytes([field << 3 | 5]) + struct.pack('<f', value)
+
+    def product(self, value):
+        entry = bytes([0x08, 2]) + self.percent(value, 2)
+        return bytes([0x3A, len(entry)]) + entry
+
+    WEEKLY = bytes([0x42, 2, 0x08, 2])
+
     def test_grok_web_credits_config_supplies_the_missing_percent(self):
         payload = json.loads((support.FIX / 'capacity/grok-no-quota.json').read_text())
         web = bytes.fromhex((support.FIX / 'capacity/grok-web-credits.hex').read_text())
@@ -327,41 +345,58 @@ class ReportMeters(unittest.TestCase):
         self.assertEqual(capacity.grok_web_windows(web), {'weekly credits': 98.0})
         self.assertEqual(capacity.grok_web_windows(b''), {})
         self.assertEqual(capacity.grok_web_windows(b'not a frame'), {})
-        worse = bytes([0x0D]) + struct.pack('<f', 2.0) + bytes([0x0D]) + struct.pack('<f', 40.0)
-        worse = bytes([0]) + len(worse).to_bytes(4, 'big') + worse
+        # The product meter binds when it is the worse one.
+        worse = self.grok_config(self.percent(2.0), self.product(40.0), self.WEEKLY)
         self.assertEqual(capacity.grok_web_windows(worse), {'weekly credits': 60.0})
 
-    def test_grok_web_frame_without_a_percent_stays_unknown(self):
-        # Captured 2026-10-16 after the weekly reset: the same clean message
-        # as the 10-09 frame minus field 1 and the product-usage entry. An
-        # absent percent is not read as zero used.
+    def test_grok_web_config_without_a_percent_is_zero_used(self):
+        # Captured 2026-10-16 after the weekly reset: the 10-09 message minus
+        # field 1 and the product-usage entry. grok.com's /usage reads a
+        # unified-billing config without creditUsagePercent as 0% used.
         payload = json.loads((support.FIX / 'capacity/grok-no-quota.json').read_text())
         web = bytes.fromhex((support.FIX / 'capacity/grok-web-credits-no-percent.hex').read_text())
-        self.assertEqual(capacity.grok_web_windows(web), {})
+        self.assertEqual(capacity.grok_web_windows(web), {'weekly credits': 100.0})
         reading = self.grok_reading(payload, web)
+        self.assertEqual(reading.status, 'eligible', reading.note)
+        self.assertIn('100% left', reading.note)
+
+    def test_grok_web_zero_default_needs_a_unified_billing_config(self):
+        # Grok shows no percent unless the config is unified billing; an empty
+        # or foreign message must not become 100% left.
+        self.assertEqual(capacity.grok_web_windows(self.grok_config(self.WEEKLY, unified=False)), {})
+        self.assertEqual(capacity.grok_web_windows(self.grok_config(unified=False)), {})
+        empty = bytes([0]) + (0).to_bytes(4, 'big')
+        self.assertEqual(capacity.grok_web_windows(empty), {})
+        payload = json.loads((support.FIX / 'capacity/grok-no-quota.json').read_text())
+        reading = self.grok_reading(payload, self.grok_config(self.WEEKLY, unified=False))
         self.assertEqual(reading.status, 'capacity-unknown', reading.note)
-        self.assertIn('GetGrokCreditsConfig supplied no used-percent', reading.note)
+        self.assertIn('GetGrokCreditsConfig supplied no readable unified-billing config', reading.note)
 
     def test_grok_web_unclean_frame_supplies_no_percent(self):
-        # Illegal wire type, then a field-1 float of 0. Scanning ahead would
-        # read that as 100% left and admit the lane.
-        dirty_body = bytes([0x0F, 0x0D]) + struct.pack('<f', 0.0)
-        dirty = bytes([0]) + len(dirty_body).to_bytes(4, 'big') + dirty_body
-        self.assertEqual(capacity.grok_web_windows(dirty), {})
-        clean_body = bytes([0x0D]) + struct.pack('<f', 0.0)
-        clean = bytes([0]) + len(clean_body).to_bytes(4, 'big') + clean_body
+        # Each broken shape would read as 100% left if the zero default
+        # applied to it; all fail closed instead.
+        illegal = bytes([0x0F]) + self.percent(0.0)
+        self.assertEqual(capacity.grok_web_windows(self.grok_config(illegal)), {})
+        bad_product = bytes([0x3A, 2, 0x0F, 0x00])
+        self.assertEqual(capacity.grok_web_windows(self.grok_config(bad_product, self.WEEKLY)), {})
+        bad_period = bytes([0x42, 2, 0x0F, 0x00])
+        self.assertEqual(capacity.grok_web_windows(self.grok_config(bad_period)), {})
+        out_of_range = self.grok_config(self.percent(140.0), self.WEEKLY)
+        self.assertEqual(capacity.grok_web_windows(out_of_range), {})
+        truncated = self.grok_config(self.WEEKLY, trailer=False)[:-1]
+        self.assertEqual(capacity.grok_web_windows(truncated), {})
+        two = self.grok_config(self.WEEKLY, trailer=False) * 2
+        self.assertEqual(capacity.grok_web_windows(two), {})
+        clean = self.grok_config(self.percent(0.0), self.WEEKLY)
         self.assertEqual(capacity.grok_web_windows(clean), {'weekly credits': 100.0})
-        garbage = bytes([0x0F, 0x0D]) + struct.pack('<f', 0.0)
-        body = bytes([0x0D]) + struct.pack('<f', 40.0) + bytes([0x12, len(garbage)]) + garbage
-        frame = bytes([0]) + len(body).to_bytes(4, 'big') + body
-        self.assertEqual(capacity.grok_web_windows(frame), {'weekly credits': 60.0})
+        # Opaque fields the schema does not read stay opaque.
+        opaque = bytes([0x12, 3, 0xFF, 0xFF, 0xFF])
+        self.assertEqual(capacity.grok_web_windows(self.grok_config(opaque, self.percent(40.0), self.WEEKLY)),
+                         {'weekly credits': 60.0})
 
     def test_grok_web_used_percent_still_applies_the_reserve(self):
         payload = json.loads((support.FIX / 'capacity/grok-no-quota.json').read_text())
-        # Field 1, wire type 5: a used-percent of 95, inside one data frame.
-        body = bytes([0x0D]) + struct.pack('<f', 95.0)
-        frame = bytes([0]) + len(body).to_bytes(4, 'big') + body
-        reading = self.grok_reading(payload, frame)
+        reading = self.grok_reading(payload, self.grok_config(self.percent(95.0), self.WEEKLY))
         self.assertEqual(reading.status, 'reserve-low', reading.note)
         self.assertIn('5% left', reading.note)
 
