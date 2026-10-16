@@ -7,6 +7,7 @@ the real ones, so every worker gets an empty home holding only a Grok login
 stub and the fake Agy server."""
 
 import atexit
+import json
 import os
 import shutil
 import sys
@@ -27,3 +28,10 @@ os.environ["XCHECK_ROOT"] = str(HOME / "runs")
 agy = HOME / ".local" / "lib" / "antigravity-acp"
 agy.mkdir(parents=True)
 (agy / "agy_acp_server.par").symlink_to(Path(__file__).resolve().parent / "fake" / "harness")
+# A fixed free roster in place of the daily refresh's file (adapters.FREE_ROSTER).
+roster = HOME / ".local" / "state" / "xcheck"
+roster.mkdir(parents=True)
+(roster / "free-roster.json").write_text(json.dumps({"lanes": [
+    "opencode:opencode/space-bunny-free", "opencode:opencode/cat-jam-free",
+    "opencode:opencode/muse-spark-1.3-contributor-free",
+    "opencode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"]}))

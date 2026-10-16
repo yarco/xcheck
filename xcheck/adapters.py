@@ -68,30 +68,6 @@ DEFAULT_ROSTER = (
     Lane("agy", "gemini-3.8-flash"),
 )
 
-# Supported but never default (`run --add`). Pins are the operator's current
-# extras; they can be dropped from a roster without changing the protocol.
-# The opencode pins are zero-price offers confirmed by `xcheck models`.
-# That command labels a ready row `pinned`, `deferred`, or `--add`. A Zen
-# `--add` line is an unclassified offer and is the whole queue. A vanished
-# free offer fails doctor until the pin is refreshed.
-OPT_IN = (
-    Lane("devin", "swe-2-max"),
-    # Free OpenCode Zen pins, each qualified by a real review run. Data terms
-    # are the provider's (opencode.ai/v2/docs/console/models, Privacy); mind what a packet holds.
-    Lane("opencode", "opencode/space-bunny-free"),  # zero retention, no training
-    Lane("opencode", "opencode/cat-jam-free"),  # not used for training; retained 30 days for safety
-    Lane("opencode", "opencode/deepseek-v4.1-flash-free"),  # zero retention, no training; qualified 2026-10-15
-    Lane("opencode", "opencode/big-pickle"),  # free-period data may improve the model; qualified 2026-10-15
-    Lane("opencode", "opencode/longcat-2.5-preview-free"),  # zero retention, no training; qualified 2026-10-15
-    Lane("opencode", "opencode/mimo-v2.6-flash-free"),  # may be used to improve the model
-    Lane("opencode", "opencode/muse-spark-1.3-contributor-free"),  # Contributor: may log or train
-    Lane("opencode", "opencode/nemotron-3.5-super-vl-free"),  # NVIDIA trial: logged; no personal or confidential data; qualified 2026-10-15
-    # Operator pin 2026-10-15 for a newly provisioned offer; its first run ended invalid.
-    Lane("opencode", "opencode/nemotron-3.5-lightning-free"),  # NVIDIA trial: logged; no personal or confidential data
-    # Free OpenRouter pin, qualified by a real review run; served by NVIDIA itself.
-    Lane("opencode", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"),  # NVIDIA trial: logged; no personal or confidential data
-)
-
 # Offers awaiting usable qualification, not excluded models. A deferral
 # records an observed run outcome, never an inferred permanent model defect.
 # Recheck current access and investigate the failure boundary before retesting.
@@ -123,6 +99,37 @@ def parse_lane(spec: str) -> Lane:
     if kind not in ("agy", "opencode", "devin") and not effort:
         raise ValueError(f"{kind} lane needs an explicit effort: {spec!r}")
     return Lane(kind, model, effort)
+
+
+
+# Free OpenCode lanes are not hand-pinned. The daily refresh
+# (~/git-projects/xcheck-free-models, launchd 08:00 Lisbon) writes this file
+# atomically: every zero-price offer whose OpenCode probe produced output that
+# day. A failed refresh leaves the last good file in place. Missing or
+# unreadable means no free lanes, never a guessed list.
+FREE_ROSTER = Path.home() / ".local" / "state" / "xcheck" / "free-roster.json"
+
+
+def free_lanes(path: Path = FREE_ROSTER) -> tuple[Lane, ...]:
+    try:
+        selectors = json.loads(path.read_text(encoding="utf-8"))["lanes"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
+    lanes = []
+    for selector in selectors if isinstance(selectors, list) else ():
+        try:
+            lane = parse_lane(selector)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if lane.kind == "opencode" and lane not in lanes:
+            lanes.append(lane)
+    return tuple(lanes)
+
+
+# Supported but never default (`run --add`): the operator's Devin default and
+# the free lanes the daily refresh verified. `xcheck models` marks a ready row
+# `pinned` when it is here, else `--add` until the next refresh adds it.
+OPT_IN = (Lane("devin", "swe-2-max"), *free_lanes())
 
 
 class Unavailable(Exception):

@@ -536,7 +536,8 @@ def doctor() -> int:
     # below stays a separate gate. When discovery fetched a provider's catalog
     # the read carries its ids or the failure class, so the check reuses that
     # instead of booting the model API again; it fetches only when discovery
-    # did not. `gone` fails; `unknown` and `new` do not.
+    # did not. `gone` fails until the next daily refresh drops the lane;
+    # `unknown` and `new` do not fail.
     pins = (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)
     pin_providers = {"opencode"} | {l.model.split("/", 1)[0]
                                     for l in pins if l.kind == "opencode"}
@@ -590,6 +591,6 @@ def doctor() -> int:
         print(f"{'ok  ' if ok else 'FAIL'} {lane.kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")
         bad += not ok
     for selector in new_offers:
-        print(f"new     {selector}: ready Zen offer, neither pinned nor deferred; "
-              "qualify with one real run before pinning")
+        print(f"new     {selector}: ready Zen offer, not in the free roster yet; "
+              "the daily refresh adds it once its probe produces output")
     return 1 if bad else 0

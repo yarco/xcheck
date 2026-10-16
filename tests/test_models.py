@@ -730,3 +730,24 @@ class PinVerdicts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreeRoster(unittest.TestCase):
+    """The daily refresh owns the free lanes; xcheck only reads its file."""
+
+    def test_reads_opencode_lanes_and_ignores_everything_else(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "free-roster.json"
+            self.assertEqual(adapters.free_lanes(path), ())  # missing file: no free lanes
+            for text in ("not json", "[]", '{"lanes": "x"}'):
+                path.write_text(text)
+                self.assertEqual(adapters.free_lanes(path), ())
+            path.write_text(json.dumps({"lanes": [
+                "opencode:opencode/glm-5.3-flash-free", "opencode:opencode/glm-5.3-flash-free",
+                "opencode:openrouter/x/y:free", "codex:gpt-6.1-sol:high", "opencode:../evil", 7]}))
+            self.assertEqual([lane.model for lane in adapters.free_lanes(path)],
+                             ["opencode/glm-5.3-flash-free", "openrouter/x/y:free"])
+
+    def test_opt_in_is_devin_plus_the_roster_file(self):
+        self.assertEqual(adapters.OPT_IN[0], adapters.Lane("devin", "swe-2-max"))
+        self.assertEqual(adapters.OPT_IN[1:], adapters.free_lanes())
