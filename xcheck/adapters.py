@@ -104,8 +104,8 @@ def parse_lane(spec: str) -> Lane:
 
 # Free OpenCode lanes are not hand-pinned. The daily refresh
 # (~/git-projects/xcheck-free-models, launchd 08:00 Lisbon) writes this file
-# atomically: every zero-price offer whose OpenCode probe produced output that
-# day. A failed refresh leaves the last good file in place. Missing or
+# atomically: every zero-price offer whose lane ended done in that day's real
+# xcheck run. A failed refresh leaves the last good file in place. Missing or
 # unreadable means no free lanes, never a guessed list.
 FREE_ROSTER = Path.home() / ".local" / "state" / "xcheck" / "free-roster.json"
 

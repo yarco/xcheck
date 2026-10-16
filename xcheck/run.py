@@ -592,5 +592,5 @@ def doctor() -> int:
         bad += not ok
     for selector in new_offers:
         print(f"new     {selector}: ready Zen offer, not in the free roster yet; "
-              "the daily refresh adds it once its probe produces output")
+              "the daily refresh adds it once its lane check ends done")
     return 1 if bad else 0
