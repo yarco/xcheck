@@ -1,7 +1,8 @@
 """Regressions from the settled 2026-10-02 runner report; no live inference.
 
-Grok fixtures: a CLI credits view with balance fields only, and a
-GetGrokCreditsConfig frame captured 2026-10-09 (used-percent 2), stored as hex.
+Grok fixtures: a CLI credits view with balance fields only, and
+GetGrokCreditsConfig frames captured 2026-10-09 (used-percent 2) and
+2026-10-16 (no used-percent), stored as hex.
 Qwen fixture: acceptance run's native error, without identifiers or headers.
 """
 
@@ -329,6 +330,17 @@ class ReportMeters(unittest.TestCase):
         worse = bytes([0x0D]) + struct.pack('<f', 2.0) + bytes([0x0D]) + struct.pack('<f', 40.0)
         worse = bytes([0]) + len(worse).to_bytes(4, 'big') + worse
         self.assertEqual(capacity.grok_web_windows(worse), {'weekly credits': 60.0})
+
+    def test_grok_web_frame_without_a_percent_stays_unknown(self):
+        # Captured 2026-10-16 after the weekly reset: the same clean message
+        # as the 10-09 frame minus field 1 and the product-usage entry. An
+        # absent percent is not read as zero used.
+        payload = json.loads((support.FIX / 'capacity/grok-no-quota.json').read_text())
+        web = bytes.fromhex((support.FIX / 'capacity/grok-web-credits-no-percent.hex').read_text())
+        self.assertEqual(capacity.grok_web_windows(web), {})
+        reading = self.grok_reading(payload, web)
+        self.assertEqual(reading.status, 'capacity-unknown', reading.note)
+        self.assertIn('GetGrokCreditsConfig supplied no used-percent', reading.note)
 
     def test_grok_web_unclean_frame_supplies_no_percent(self):
         # Illegal wire type, then a field-1 float of 0. Scanning ahead would
