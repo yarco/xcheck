@@ -4,15 +4,19 @@ xcheck's Grok lane runs Grok's own documented ACP stdio server under acpx's
 generic custom-agent transport. There is no built-in Grok adapter in acpx and
 no private ACP client, wrapper, or protocol workaround anywhere in the path.
 
-Verified with **grok 1.0.52 (0920c8169e27)** and **acpx 0.19.4**.
+Verified with **grok 1.0.60 (01a8e1c591c0)** and **acpx 0.19.5**.
 
 This is a version-specific verification record. Runtime pins and argv live in `xcheck/adapters.py`; this launch sketch does not replace them. Recheck native startup, tools and event shapes after upgrades. Current admission comes from the installed `xcheck doctor` and lane preflight, not this recorded result. The [protocol](../../Multi-Agent%20Cross-Check%20Protocol.md) owns shared preconditions, interaction paths and invariants.
 
-The 1.0.52 zero-turn startup probes retained six native tools in packet mode
-(four allowed tools plus the two MCP dispatch tools), and eight in live mode.
-No operator hooks loaded or ran. Live headless and Herdr smoke runs exercised
-shell, native web fetch and read-only qmd MCP and reached native completion.
-The CLI binary is the upstream release; only xcheck’s admission pin changed.
+The 1.0.60 zero-turn startup probes (2026-10-16) retained six native tools in
+packet mode (four allowed tools plus the two MCP dispatch tools), and eight in
+live mode, as 1.0.52 did. No operator hooks loaded or ran (`total_hooks=0`).
+Live headless and Herdr qualification runs exercised shell, native web fetch
+and read-only qmd MCP and reached native completion (`end_turn`, `done`).
+1.0.60 adds more `_x.ai/*` notifications to the stream (queue, settings,
+announcements, `session/prompt_complete`); the reader ignores them and still
+settles on the `session/prompt` response. The CLI binary is the upstream
+release; only xcheck’s admission pin changed.
 
 ## Launch shape
 
@@ -63,8 +67,12 @@ tools: [read_file, grep, list_dir, run_terminal_cmd, web_search, web_fetch]
 open** to the full toolset — the doc's example names (`grep_search`,
 `run_terminal_command`, `bash`) do exactly that. The lane's debug log records
 `tools allowlist applied` with `tool_count=8` (6 allowlisted + Grok's
-`search_tool`/`use_tool` MCP meta-tools). Do not rename entries without a
-zero-turn probe. When the run disables web, the two web ids are dropped and
+`search_tool`/`use_tool` MCP meta-tools) on the `session_start` command
+advertisement. After the internal `skills_reload` the same line reports
+`tool_count=17`: the 8 plus the 9 tools qmd, semble and deepwiki register,
+which the model reaches only through `use_tool`. A rise equal to the
+registered MCP tool count is not a fail-open; any other count is. Do not
+rename entries without a zero-turn probe. When the run disables web, the two web ids are dropped and
 `disable_web_search = true` + `features.web_fetch = false` close the surface.
 
 `run_terminal_cmd` is the sanctioned shell for a lane that needs disposable
@@ -182,7 +190,7 @@ applied) — plus flag drift checks for `grok agent --help` and `acpx`.
 
 - **Version admission gate**: `GROK_VERIFIED_VERSION` in `adapters.py` pins
   the native version this adapter was verified against (currently
-  `1.0.52 (0920c8169e27)`). `run_lane` probes `grok --sandbox off --cwd <work> version
+  `1.0.60 (01a8e1c591c0)`). `run_lane` probes `grok --sandbox off --cwd <work> version
   --json` (zero inference, same call doctor makes) before spawning and
   **skips** the lane with `native-unverified: grok <actual> is not the
   adapter-verified <pin>…` on any mismatch — the comparison is an exact

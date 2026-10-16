@@ -328,7 +328,7 @@ GROK_WEB_TOOLS = ("web_search", "web_fetch")
 # makes the profile allowlist fail OPEN to the full toolset, so lanes refuse
 # to start on any other version until it is revalidated — a string compare
 # on the parsed `version --json` value, never a substring match.
-GROK_VERIFIED_VERSION = "1.0.52 (0920c8169e27)"
+GROK_VERIFIED_VERSION = "1.0.60 (01a8e1c591c0)"
 GROK_ENV = {
     # A subscription session, never a paid API-key fallback (XAI_API_KEY is
     # scrubbed anyway; this refuses to use it if one ever leaked in).
