@@ -136,6 +136,12 @@ class Reader(unittest.TestCase):
 
 
 class Quoting(unittest.TestCase):
+    def test_a_missing_acpx_names_the_nvm_remedy(self):
+        with patch.object(adapters.shutil, "which", return_value=None):
+            reason = adapters.unavailable(adapters.parse_lane("agy:gemini-3.8-flash"))
+        self.assertIn("acpx is not on PATH", reason)
+        self.assertIn("nvm Node's npm", reason)
+
     def test_third_party_agy_selectors_are_refused_before_launch(self):
         with self.assertRaisesRegex(ValueError, "Gemini"):
             adapters.parse_lane("agy:claude-sonnet-4-6")

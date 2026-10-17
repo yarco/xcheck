@@ -771,7 +771,10 @@ def unavailable(lane: Lane) -> str | None:
     if lane.kind == "claude":
         return claude_problem()
     if not shutil.which("acpx"):
-        return "startup-unavailable: acpx is not on PATH; install it with npm install -g acpx"
+        # An npm -g update stopped mid-reify leaves the link renamed to a hidden .acpx-* file,
+        # and an agent shell's plain npm is Homebrew's, which installs into another prefix.
+        return ("startup-unavailable: acpx is not on PATH; restore a hidden .acpx-* link beside "
+                "nvm's node, or reinstall with the active nvm Node's npm (never Homebrew's)")
     if lane.kind == "agy" and not AGY_ACP_SERVER.is_file():
         return f"startup-unavailable: {AGY_ACP_SERVER} is missing; run agy-acp-server-update"
     try:
