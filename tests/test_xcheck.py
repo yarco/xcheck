@@ -1480,6 +1480,20 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertIn("already launched", p.stderr)
 
+    def test_a_missing_base_is_refused_before_launch(self):
+        p = self.xcheck("run", "--base", str(self.base / "missing"), "--orch", "other", "--mode", "headless",
+                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("does not exist", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+
+    def test_a_gemini_pro_lane_is_refused_before_launch(self):
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
+                        "--skip-capacity", "--lanes", "agy:gemini-3.1-pro-high")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("Gemini Pro is never", p.stderr)
+        self.assertFalse((self.base / ".launched").exists())
+
     def test_a_refused_first_invocation_does_not_burn_the_base(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",
                         "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")

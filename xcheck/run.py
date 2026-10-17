@@ -173,6 +173,8 @@ def _message(web: bool, kind: str) -> str:
 def detach(argv: list[str], base: Path) -> int:
     """Start `run` as a detached supervisor; return once it has launched."""
     base = base.resolve()
+    if not base.is_dir():
+        raise RunError(f"{base} does not exist; stage PACKET.md, PROMPT.md and evidence/ there first")
     if (base / ".launched").exists():
         raise RunError(f"{base} was already launched; use `xcheck wait` or a fresh BASE")
     log = base / "supervisor.log"
