@@ -87,6 +87,8 @@ def parse_lane(spec: str) -> Lane:
     kind, model = parts[0], parts[1]
     if kind == "agy" and not model.startswith("gemini-"):
         raise ValueError("Agy's ACP server supports only Gemini selectors")
+    if kind == "agy" and "pro" in model.split("-"):
+        raise ValueError("Gemini Pro is never a cross-check lane (operator rule); Flash is the Agy lane")
     effort = parts[2] if len(parts) == 3 else ""
     ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind == "opencode" else r"[A-Za-z0-9][A-Za-z0-9._-]*"
     for part in (model, effort):

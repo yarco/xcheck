@@ -44,13 +44,13 @@ class LaneNames(unittest.TestCase):
         self.assertEqual(Lane("codex", "gpt-6.1-sol", "high").name, "codex-gpt-6.1-sol-high")
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").name, "grok-4.7-xhigh")
         self.assertEqual(Lane("claude", "claude-opus-5-5", "high").name, "claude-opus-5-5-high")
-        self.assertEqual(Lane("agy", "gemini-3.1-pro-high").name, "agy-gemini-3.1-pro-high")
+        self.assertEqual(Lane("agy", "gemini-3.8-flash-high").name, "agy-gemini-3.8-flash-high")
         self.assertEqual(Lane("devin", "swe-2-max").name, "devin-swe-2-max")
         self.assertEqual(Lane("codex", "gpt-6.1-sol-high", "high").name, "codex-gpt-6.1-sol-high")
 
     def test_pools(self):
         self.assertEqual(Lane("agy", "gemini-3.8-flash-high").pool, "agy-gemini")
-        self.assertEqual(Lane("agy", "gemini-pro-agent").pool, "agy-gemini")
+        self.assertEqual(Lane("agy", "gemini-flash-agent").pool, "agy-gemini")
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").pool, "grok")
         self.assertEqual(Lane("devin", "swe-2-max").pool, "devin")
 
@@ -78,7 +78,7 @@ class LaneNames(unittest.TestCase):
         bunny = adapters.parse_lane("opencode:openrouter/stealth/space-bunny-alpha")
         self.assertEqual(bunny.name, "opencode-openrouter-stealth-space-bunny-alpha")
         self.assertEqual(bunny.pool, "opencode-openrouter")
-        for bad in ("codex:gpt-6.1-sol", "agy:gemini-3.1-pro-high:high", "nope:x:y", "codex",
+        for bad in ("codex:gpt-6.1-sol", "agy:gemini-3.8-flash:high", "nope:x:y", "codex",
                     "devin:swe-2-max:high"):  # selector carries effort
             with self.assertRaises(ValueError):
                 adapters.parse_lane(bad)
@@ -1196,9 +1196,9 @@ class Capacity(unittest.TestCase):
         from xcheck.capacity import agy_windows
         data = {"groups": [{"buckets": [{"id": "gemini-weekly", "remaining_fraction": 0.0},
                                         {"id": "gemini-5h", "remaining_fraction": 1, "disabled": True}]}]}
-        self.assertEqual(agy_windows(data, "gemini-pro-agent"), {"gemini-weekly": 0.0})
+        self.assertEqual(agy_windows(data, "gemini-flash-agent"), {"gemini-weekly": 0.0})
         with self.assertRaises(KeyError):
-            agy_windows({"groups": []}, "gemini-pro-agent")
+            agy_windows({"groups": []}, "gemini-flash-agent")
 
     def test_manual_claude_reading_must_be_fresh(self):
         from datetime import datetime, timedelta, timezone

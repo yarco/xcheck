@@ -136,6 +136,12 @@ class Reader(unittest.TestCase):
 
 
 class Quoting(unittest.TestCase):
+    def test_gemini_pro_is_never_a_lane(self):
+        for spec in ("agy:gemini-3.1-pro-high", "agy:gemini-pro", "agy:gemini-3.8-pro"):
+            with self.assertRaisesRegex(ValueError, "never"):
+                adapters.parse_lane(spec)
+        adapters.parse_lane("agy:gemini-3.8-flash")
+
     def test_a_missing_acpx_names_the_nvm_remedy(self):
         with patch.object(adapters.shutil, "which", return_value=None):
             reason = adapters.unavailable(adapters.parse_lane("agy:gemini-3.8-flash"))
@@ -300,7 +306,7 @@ class Lanes(unittest.TestCase):
             config.write_text(text)
             with self.subTest(text=text), patch.object(adapters, "ACPX_CONFIG", config), \
                     patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}"}):
-                self.assertIn("object", adapters.unavailable(adapters.Lane("agy", "gemini-pro-agent")))
+                self.assertIn("object", adapters.unavailable(adapters.Lane("agy", "gemini-flash-agent")))
 
     def test_doctor_quotes_its_agent_and_scrubs_the_lane_environment(self):
         from xcheck import run
@@ -308,8 +314,8 @@ class Lanes(unittest.TestCase):
         with patch.object(adapters, "AGY_ACP_SERVER", server), \
                 patch.dict(os.environ, {"ACPX_AUTH_TOKEN": "synthetic", "TEST_API_KEY": "synthetic"}), \
                 patch.object(run.subprocess, "run") as execute:
-            execute.return_value = subprocess.CompletedProcess([], 1, "Available models: gemini-pro-agent\n", "")
-            self.assertEqual(run.agy_acp_models(), ["gemini-pro-agent"])
+            execute.return_value = subprocess.CompletedProcess([], 1, "Available models: gemini-flash-agent\n", "")
+            self.assertEqual(run.agy_acp_models(), ["gemini-flash-agent"])
         argv = execute.call_args.args[0]
         self.assertEqual(shlex.split(argv[argv.index("--agent") + 1]), [str(server)])
         env = execute.call_args.kwargs["env"]
