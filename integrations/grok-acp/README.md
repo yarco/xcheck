@@ -4,7 +4,7 @@ xcheck's Grok lane runs Grok's own documented ACP stdio server under acpx's
 generic custom-agent transport. There is no built-in Grok adapter in acpx and
 no private ACP client, wrapper, or protocol workaround anywhere in the path.
 
-Verified with **grok 1.0.60 (01a8e1c591c0)** and **acpx 0.19.5**.
+Verified with **grok 1.0.62 (1474f9cbdd91)**. Installed acpx is 0.19.6; `xcheck doctor` accepts its flags. The 2026-10-17 probe spoke to `grok agent stdio` directly.
 
 This is a version-specific verification record. Runtime pins and argv live in `xcheck/adapters.py`; this launch sketch does not replace them. Recheck native startup, tools and event shapes after upgrades. Current admission comes from the installed `xcheck doctor` and lane preflight, not this recorded result. The [protocol](../../Multi-Agent%20Cross-Check%20Protocol.md) owns shared preconditions, interaction paths and invariants.
 
@@ -17,6 +17,17 @@ and read-only qmd MCP and reached native completion (`end_turn`, `done`).
 announcements, `session/prompt_complete`); the reader ignores them and still
 settles on the `session/prompt` response. The CLI binary is the upstream
 release; only xcheck’s admission pin changed.
+
+The 1.0.62 zero-turn probes (2026-10-17) kept that allowlist. Packet mode
+logged `allowed=["read_file", "grep", "list_dir", "run_terminal_cmd"]`,
+`tool_count=6` at session start and `tool_count=15` after skills reload
+(those six plus qmd 4, semble 2 and deepwiki 3). Live mode added
+`web_search` and `web_fetch`, with `tool_count=8` then `17`. Both runs
+logged `total_hooks=0` and no `hook.run`, and only qmd, semble and deepwiki
+reached ready. `session/new` reported `currentModelId=grok-4.7` and
+`reasoning_effort=xhigh`. `_x.ai/session/setup`, `models/update`,
+`mcp/init_progress` and `mcp_initialized` carry no `stopReason`; the reader
+still ignores them.
 
 ## Launch shape
 
@@ -190,7 +201,7 @@ applied) — plus flag drift checks for `grok agent --help` and `acpx`.
 
 - **Version admission gate**: `GROK_VERIFIED_VERSION` in `adapters.py` pins
   the native version this adapter was verified against (currently
-  `1.0.60 (01a8e1c591c0)`). `run_lane` probes `grok --sandbox off --cwd <work> version
+  `1.0.62 (1474f9cbdd91)`). `run_lane` probes `grok --sandbox off --cwd <work> version
   --json` (zero inference, same call doctor makes) before spawning and
   **skips** the lane with `native-unverified: grok <actual> is not the
   adapter-verified <pin>…` on any mismatch — the comparison is an exact
