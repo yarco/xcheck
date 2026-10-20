@@ -167,7 +167,7 @@ def _claude(lane: Lane) -> dict[str, float]:
         raise LoginRequired(f"no Claude login in the keychain: run {CLAUDE_LOGIN}")
     if p.returncode != 0:
         raise OSError(f"keychain unreadable (security exit {p.returncode}; 36 = locked: run "
-                      f"keychain-unlock-gui, or set {CLAUDE_MANUAL[0]} and {CLAUDE_MANUAL[1]})")
+                      f"an interactive login Keychain unlock, or set {CLAUDE_MANUAL[0]} and {CLAUDE_MANUAL[1]})")
     credentials = json.loads(p.stdout)["claudeAiOauth"]
     expires = credentials.get("expiresAt")
     if "expiresAt" in credentials:
@@ -418,18 +418,16 @@ def _agy(lane: Lane) -> dict[str, float]:
 
 
 def agy_windows(data: dict, model: str) -> dict[str, float]:
-    """The ACP lane's Gemini pool has a 5 h and a weekly bucket.
-    A disabled 5 h bucket (its fraction is meaningless while the weekly one is
-    exhausted) is left out; a missing bucket is an error."""
+    """The standard Gemini pool has a 5 h and a weekly bucket; Argon models draw
+    on a separate weekly-only bucket. A disabled bucket (its fraction is
+    meaningless while the weekly one is exhausted) is left out; a missing
+    bucket is an error."""
     if not model.startswith("gemini-"):
         raise ValueError("Agy's ACP server supports only Gemini selectors")
     buckets = {b["id"]: b for g in data["groups"] for b in g.get("buckets") or []}
-    windows = {}
-    for name in ("gemini-5h", "gemini-weekly"):
-        b = buckets[name]
-        if not b.get("disabled"):
-            windows[name] = 100.0 * float(b["remaining_fraction"])
-    return windows
+    names = ("gemini-argon-wtu-weekly",) if "argon" in model else ("gemini-5h", "gemini-weekly")
+    return {name: 100.0 * float(buckets[name]["remaining_fraction"])
+            for name in names if not buckets[name].get("disabled")}
 
 
 # ------------------------------------------------------------------ shared

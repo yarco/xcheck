@@ -28,7 +28,7 @@ class ExactListedModels(unittest.TestCase):
                 data = [{"providerID": p.model.split("/", 1)[0], "id": p.model.split("/", 1)[1]} for p in adapters.OPT_IN if p.kind == "opencode"]
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": data}), "")
             return subprocess.CompletedProcess(cmd, 0, '\n'.join((p.model for p in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))), '')
-        with patch.object(install, 'source_root', return_value=REPO), patch.object(install, 'installed_digest', return_value=install.digest(REPO)), patch.object(run.subprocess, 'run', side_effect=fake), patch.object(adapters, 'unavailable', return_value=None), patch.object(models, 'discover', return_value={"providers": {}, "models": []}), patch.object(run, 'agy_acp_models', return_value=['gemini-3.8-flash']), redirect_stdout(io.StringIO()) as output:
+        with patch.object(install, 'source_root', return_value=REPO), patch.object(install, 'installed_digest', return_value=install.digest(REPO)), patch.object(run.subprocess, 'run', side_effect=fake), patch.object(adapters, 'unavailable', return_value=None), patch.object(models, 'discover', return_value={"providers": {}, "models": []}), patch.object(run, 'agy_acp_models', return_value=['gemini-3.8-flash', 'gemini-4-argon']), redirect_stdout(io.StringIO()) as output:
             code = run.doctor()
         return (code, output.getvalue())
 
@@ -47,3 +47,10 @@ class ExactListedModels(unittest.TestCase):
         self.assertEqual(code, 1, text)
         self.assertIn('grok model grok-4.7 unchecked: model listing exited 1', text)
         self.assertNotIn('grok model grok-4.7 NOT in', text)
+
+    def test_one_lane_local_roster_does_not_index_missing_defaults(self):
+        with patch.object(adapters, "DEFAULT_ROSTER", (adapters.Lane("claude", "example", "high"),)):
+            code, text = self.doctor('', '  swe-2-max SWE-2 Max [Free]\n')
+        self.assertEqual(code, 0, text)
+        self.assertIn('ok   codex: Codex CLI present', text)
+        self.assertIn('ok   claude: native limit flags', text)

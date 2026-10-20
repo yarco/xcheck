@@ -503,10 +503,12 @@ def doctor() -> int:
         problem = grok_admission_check(Path(tmp))
     print(f"FAIL grok: {problem}" if problem else "ok   grok: startup with --sandbox off (zero inference)")
     bad += bool(problem)
-    problem = adapters.unavailable(adapters.DEFAULT_ROSTER[0])
+    # These are kind-scoped readiness checks, not positions in the optional
+    # local roster (which may contain one lane or a different order).
+    problem = adapters.unavailable(adapters.Lane("codex", ""))
     print(f"FAIL codex: {problem}" if problem else "ok   codex: Codex CLI present")
     bad += bool(problem)
-    problem = adapters.unavailable(adapters.DEFAULT_ROSTER[1])
+    problem = adapters.unavailable(adapters.Lane("claude", ""))
     print(f"FAIL claude: {problem}" if problem else
           "ok   claude: native limit flags and a first-party subscription login present")
     bad += bool(problem)
@@ -530,7 +532,7 @@ def doctor() -> int:
     agy = adapters.Lane("agy", "gemini-3.8-flash")
     blocked = adapters.unavailable(agy)
     stamp = adapters.AGY_ACP_DIR / "VERSION"
-    version = stamp.read_text().strip() if stamp.is_file() else "unknown (run agy-acp-server-update)"
+    version = stamp.read_text().strip() if stamp.is_file() else "unknown (verify the installed ACP server)"
     print(f"FAIL agy: {blocked}" if blocked else f"ok   agy: acpx, ACP server {version} and Keychain login present")
     bad += bool(blocked)
     acp_models = None if blocked else agy_acp_models()

@@ -20,7 +20,7 @@ if sys.version_info < (3, 12):  # xcheck needs 3.12+; bin/xcheck would re-exec a
 HOME = Path(tempfile.mkdtemp(prefix="xcheck-test-home-"))
 atexit.register(shutil.rmtree, HOME, True)
 os.environ["HOME"] = str(HOME)
-for name in ("XCHECK_GROK_HOME", "XCHECK_AGY_ACP_DIR", "XCHECK_ROOT"):
+for name in ("XCHECK_GROK_HOME", "XCHECK_AGY_ACP_DIR", "XCHECK_ROOT", "XCHECK_CONFIG"):
     os.environ.pop(name, None)
 os.environ["XCHECK_ROOT"] = str(HOME / "runs")
 (HOME / ".grok").mkdir()

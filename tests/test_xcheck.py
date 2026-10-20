@@ -1068,6 +1068,8 @@ class Capacity(unittest.TestCase):
         self.assertEqual(report["num_turns"], 0)  # /usage is free
         gemini = c.agy_windows(report["command"]["data"], "gemini-3.8-flash-high")
         self.assertEqual(set(gemini), {"gemini-5h", "gemini-weekly"})
+        argon = c.agy_windows(report["command"]["data"], "gemini-4-argon")
+        self.assertEqual(set(argon), {"gemini-argon-wtu-weekly"})
         with self.assertRaisesRegex(ValueError, "Gemini"):
             c.agy_windows(report["command"]["data"], "claude-sonnet-4-6")
 
@@ -1136,8 +1138,8 @@ class Capacity(unittest.TestCase):
         from xcheck import capacity as c
         roster = adapters.DEFAULT_ROSTER
         flash = Lane("agy", "gemini-3.8-flash-high")
-        self.assertEqual(c.sharing(flash, roster), 1)
-        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 10)
+        self.assertEqual(c.sharing(flash, roster), 2)
+        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 15)
 
     def test_tightest_window_must_exceed_the_reserve(self):
         from xcheck.capacity import judge
@@ -1173,10 +1175,11 @@ class Capacity(unittest.TestCase):
     def test_missing_agy_windows_fail_closed_for_each_acp_pin(self):
         from xcheck import capacity as c
         for model in (lane.model for lane in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN) if lane.kind == "agy"):
-            for window in ("5h", "weekly"):
+            windows = ("gemini-argon-wtu-weekly",) if "argon" in model else ("gemini-5h", "gemini-weekly")
+            for window in windows:
                 data = self.fixture("agy-usage.json")["command"]["data"]
                 for group in data["groups"]:
-                    group["buckets"] = [b for b in group["buckets"] if b["id"] != f"gemini-{window}"]
+                    group["buckets"] = [b for b in group["buckets"] if b["id"] != window]
                 with self.subTest(model=model, window=window), \
                      patch.dict(c.METERS, {"agy": lambda lane: c.agy_windows(data, lane.model)}):
                     self.assertEqual(c.read(Lane("agy", model)).status, "capacity-unknown")

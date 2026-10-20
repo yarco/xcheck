@@ -98,6 +98,8 @@ def main() -> int:
 
     a = p.parse_args()
     try:
+        from xcheck import settings
+        settings.apply()
         if a.cmd == "run" and not a.supervisor:
             code = run.detach([x for x in sys.argv[1:] if x != "--detach"] + ["--supervisor"], a.base)
             return code if code or a.detach else run.wait(a.base, None)

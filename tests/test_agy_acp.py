@@ -284,7 +284,7 @@ class Lanes(unittest.TestCase):
                 self.assertIn(reason, row["reason"])
 
     def test_a_missing_or_locked_login_skips_before_admission(self):
-        for login, reason in (("absent", "no Antigravity ACP login"), ("locked", "keychain-unlock-gui")):
+        for login, reason in (("absent", "no Antigravity ACP login"), ("locked", "unlock it interactively")):
             with self.subTest(login=login):
                 self.base = self.second_base()
                 row = self.agy(env={"FAKE_AGY_LOGIN": login})

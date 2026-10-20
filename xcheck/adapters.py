@@ -66,6 +66,7 @@ DEFAULT_ROSTER = (
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
     Lane("agy", "gemini-3.8-flash"),
+    Lane("agy", "gemini-4-argon"),
 )
 
 # Offers awaiting usable qualification, not excluded models. A deferral
@@ -88,7 +89,7 @@ def parse_lane(spec: str) -> Lane:
     if kind == "agy" and not model.startswith("gemini-"):
         raise ValueError("Agy's ACP server supports only Gemini selectors")
     if kind == "agy" and "pro" in model.split("-"):
-        raise ValueError("Gemini Pro is never a cross-check lane (operator rule); Flash is the Agy lane")
+        raise ValueError("Gemini Pro is never a cross-check lane (operator rule); use a Flash or Argon selector")
     effort = parts[2] if len(parts) == 3 else ""
     ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind == "opencode" else r"[A-Za-z0-9][A-Za-z0-9._-]*"
     for part in (model, effort):
@@ -104,8 +105,7 @@ def parse_lane(spec: str) -> Lane:
 
 
 
-# Free OpenCode lanes are not hand-pinned. The daily refresh
-# (~/git-projects/xcheck-free-models, launchd 08:00 Lisbon) writes this file
+# Free OpenCode lanes are not hand-pinned. An optional external refresh writes this file
 # atomically: every zero-price offer whose lane ended done in that day's real
 # xcheck run. A failed refresh leaves the last good file in place. Missing or
 # unreadable means no free lanes, never a guessed list.
@@ -685,7 +685,7 @@ def claude_problem() -> str | None:
 # itself stays in the Keychain (service gemini, account antigravity-acp). Its
 # temp files go to the lane home, and uvx-started MCP servers use a uv cache
 # only Agy lanes share (ROOT/.cache/agy-uv), never the operator's.
-# Kept current by agy-acp-server-update; XCHECK_AGY_ACP_DIR points tests at a fake.
+# Installed separately; XCHECK_AGY_ACP_DIR selects a local server directory.
 AGY_ACP_DIR = Path(os.environ.get("XCHECK_AGY_ACP_DIR") or Path.home() / ".local/lib/antigravity-acp")
 AGY_ACP_SERVER = AGY_ACP_DIR / "agy_acp_server.par"
 AGY_LOGIN = ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity-acp"]
@@ -778,7 +778,7 @@ def unavailable(lane: Lane) -> str | None:
         return ("startup-unavailable: acpx is not on PATH; restore a hidden .acpx-* link beside "
                 "nvm's node, or reinstall with the active nvm Node's npm (never Homebrew's)")
     if lane.kind == "agy" and not AGY_ACP_SERVER.is_file():
-        return f"startup-unavailable: {AGY_ACP_SERVER} is missing; run agy-acp-server-update"
+        return f"startup-unavailable: {AGY_ACP_SERVER} is missing; install the Antigravity ACP server or set XCHECK_AGY_ACP_DIR"
     try:
         config = json.loads(ACPX_CONFIG.read_text()) if ACPX_CONFIG.exists() else {}
     except (OSError, ValueError) as e:
@@ -798,7 +798,7 @@ def unavailable(lane: Lane) -> str | None:
         return None
     login = subprocess.run(AGY_LOGIN, capture_output=True).returncode
     if login == 36:
-        return "auth-required: the login keychain is locked; run keychain-unlock-gui at the screen"
+        return "auth-required: the login keychain is locked; unlock it interactively at the screen"
     if login:
         return ("auth-required: no Antigravity ACP login in the Keychain (service gemini, account "
                 "antigravity-acp); sign in once by running any acpx prompt against the server and "

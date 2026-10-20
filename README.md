@@ -1,69 +1,83 @@
-# xcheck — Multi-Agent Cross-Check
+# xcheck
 
-Fan one immutable review packet out to **other** agent CLIs (Codex, Claude Code, Grok, Agy, Devin, OpenCode) as real processes, collect one answer file per lane, and leave judgment to the orchestrating model.
+**One review packet. Independent agent processes. Evidence before agreement.**
 
-- One operator, one macOS machine, attended runs.
-- The code owns everything with one mechanical right answer: exact argv, process groups, deadlines, capacity, locks, placement, stream parsing, validation, status.
-- The orchestrating model owns judgment: roster, packet, diagnosing a failed lane, adjudication, `CONSENSUS.md`.
+xcheck sends an immutable packet to other coding-agent CLIs, collects their natively completed answers, and leaves the final decision to the orchestrator. It uses existing native logins; it does not provision API accounts or enable billing.
 
-The full protocol — packet contract, lane statuses, placement and views, capacity, invariants, merge rules — lives in [Multi-Agent Cross-Check Protocol.md](Multi-Agent%20Cross-Check%20Protocol.md).
-
-## Install
-
-```bash
-bin/xcheck install   # publishes the read-only, content-addressed copy to ~/.local/bin/xcheck
-xcheck doctor        # verify the installed copy, flags, and model pins
+```mermaid
+flowchart LR
+    A[Operator + orchestrator] --> B[Immutable packet]
+    B --> C[Codex / Claude native streams]
+    B --> D[Grok / Agy / Devin / OpenCode via ACP]
+    C --> E[Validated results + lane status]
+    D --> E
+    E --> F[Premise checks + CONSENSUS.md]
 ```
 
-`install` also writes `~/.codex/rules/xcheck.rules`, which lets a Codex
-orchestrator run the installed `xcheck` (`run`, `wait`, `status`, `activity`,
-`cancel`, `doctor`, `capacity`, `models`) without a sandbox prompt. Codex and Claude lanes run the installed CLIs'
-own headless streams (`codex exec --json`, `claude -p --output-format stream-json`). Grok, Agy, Devin and OpenCode lanes
-are ACP sessions: they need stock `acpx` (`npm install -g acpx`) and each harness's ACP server (`grok agent stdio`,
-Devin/OpenCode's `acp` subcommands, Antigravity's separately installed server). Every lane shows its stream in both
-placements. The ACP forms of the Codex and Claude lanes are kept on the `acp/codex` and `acp/claude` branches until
-upstream fixes what they needed patching for (see the protocol note).
-Herdr placement requires the operator's `~/.agents/bin/herdr-caller-context` helper; missing or unverified context falls back to headless in auto mode. Lane shells run
-through your zsh rc files; if
-yours load secrets, they must skip that load when the lane guard variable is
-set, or keys will reach peers with shell access (the protocol note covers the
-re-verification).
+The runner owns process control, quota admission, pool locks, snapshots, completion parsing and validation. The orchestrator owns scope, evidence, reviewer selection and judgment. There is no reviewer vote and no automatic retry of a review turn.
 
-Requires Python 3.12+ (stdlib only at runtime) plus the harness CLIs you plan to use as peers. Hypothesis is needed for the test suite only.
+[Start here](docs/adoption.md) · [Full protocol](Multi-Agent%20Cross-Check%20Protocol.md) · [Local integration](docs/local-integration.md) · [Examples](examples/README.md)
 
-## Run
+## Try it without accounts
+
+Requires Python 3.12+ on macOS. The runtime is standard library only.
 
 ```bash
-xcheck run --base /tmp/agent-offload/<slug> --orch <your-harness>
+git clone https://github.com/yarco/xcheck.git
+cd xcheck
+python3 examples/offline_demo.py
 ```
 
-Stage `BASE/PACKET.md`, `BASE/PROMPT.md`, and `BASE/evidence/` before launching. See the protocol note for the packet contract, the answer grammar, and the merge rules.
+This installs into a disposable HOME and runs two fake native streams. It verifies installation, local configuration, packet snapshots, completion and proof validation. It calls no real model or account and does not establish review quality.
 
-Use the [preconditions and source authority](Multi-Agent%20Cross-Check%20Protocol.md#preconditions-and-source-authority) before launch. The installed `xcheck` is the sole supported launcher; leave mode unset for automatic Herdr/headless placement. Native streams are the answer channel; panes display them. Own subagents and direct peer CLI scripts are not cross-check launchers.
+## Use your native subscriptions
 
-| Interaction | Command and purpose |
+Install and sign in to the peer CLIs you choose, then:
+
+```bash
+python3 bin/xcheck install
+export PATH="$HOME/.local/bin:$PATH"
+xcheck doctor
+python3 examples/stage_demo.py /tmp/agent-offload/my-first-review
+xcheck run --base /tmp/agent-offload/my-first-review --orch claude \
+  --lanes codex:gpt-6.1-sol:high --web packet
+```
+
+Use your actual orchestrator kind and a fresh BASE each time. The model ID above is a repository pin, not a promise of current account availability. Admission checks the selected lane again before inference. `doctor` checks the whole supported roster and can report gaps unrelated to your chosen lane.
+
+A real run consumes the selected native subscription or provider allowance. A zero-price offer still needs current price/access verification and acceptable data terms. No live model review is required for the offline example.
+
+## The workflow
+
+1. Stage whole source files, provenance, task and output schema. Put an unpredictable token in the proof target last.
+2. Launch once. Every lane receives the same captured packet. The orchestrator's own harness cannot be a peer.
+3. Retain one host wait or a verified completion callback. Silence is pending; there is no default review timeout. Interrupting a waiter detaches it.
+4. Collect final assistant messages only after native turn completion. Validate heading, review text, proof and final marker. Report every skipped, failed or invalid lane.
+5. Open the real files to check findings' premises. Record confirmed, rejected and uncertain rulings in `CONSENSUS.md`; verify each admitted repair independently.
+
+`done` means the answer met the output contract. It does not mean the reviewer was correct, read every file, stayed within all instructions, or supplied independent evidence.
+
+| Need | Command |
 |---|---|
-| Readiness | `doctor`, `models`, `capacity`: inspect current runtime, exact model support, provider offers and quota; no review inference |
-| Launch | `run --base B --orch H`: snapshot a fresh packet and start selected peers; `--detach` returns without waiting for settlement |
-| Observe/reattach | `activity --base B` for metadata; `status --base B` for lane states; `wait --base B` for completion without relaunch |
-| Stop | `cancel --base B [--lane NAME] --reason TEXT`: explicit scoped cancellation; interrupting a waiter only detaches |
-| Adjudicate | Read settled results and write `BASE/CONSENSUS.md` under the protocol's [merge rules](Multi-Agent%20Cross-Check%20Protocol.md#merge) |
+| Inspect readiness and current offers | `doctor`, `capacity`, `models` |
+| Launch once | `run --base B --orch H` |
+| Reattach without relaunching | `wait --base B` |
+| Inspect states or text-free progress | `status --base B`, `activity --base B` |
+| Intentionally stop work | `cancel --base B --reason TEXT` |
 
-There is no default review timeout; the one-hour warning is diagnostic. Required defaults survive temporary unavailability and retain their selected effort. Dated verification records and captured fixtures do not establish current availability or pricing. See the protocol's [invariants](Multi-Agent%20Cross-Check%20Protocol.md#invariants) and [routine qualification rules](Multi-Agent%20Cross-Check%20Protocol.md#routine-review-planning-and-qualification).
+## Boundaries
 
-## Tests
+Supported scope is one operator on one macOS machine, with attended runs. Codex and Claude use first-party headless streams; Grok, Agy, Devin and OpenCode use stock acpx and their native ACP servers. Optional Herdr placement needs a verified caller-context adapter; otherwise auto mode is headless.
+
+This is not an isolation boundary for hostile evidence. Some peers retain shell, network or local-tool access beyond the packet; `--web packet` disables supported built-in web tools and requests no retrieval, but cannot enforce general network isolation. Review your configured tools and native account terms before sharing private material. Machine-local adapters, configuration, logs and transcripts belong outside version control.
+
+## Develop
 
 ```bash
-uv run --python '>=3.12' --with-requirements requirements-test.txt pytest   # ~25 s, all cores (pytest.ini)
+uv run --python '>=3.12' --with-requirements requirements-test.txt pytest
 git diff --check
 ```
 
-Optional long acceptance (185 s):
+Tests use disposable homes, isolated pools and fake CLIs. The optional long acceptance command and adapter qualification rules are in the full protocol. After runtime edits, reinstall from the intended source checkout and run `xcheck doctor`.
 
-```bash
-uv run --python '>=3.12' --with-requirements requirements-test.txt pytest tests/acceptance_runtime.py
-```
-
-## License
-
-[MIT](LICENSE).
+[MIT](LICENSE)

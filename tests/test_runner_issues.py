@@ -186,11 +186,12 @@ class ReportStartup(unittest.TestCase):
 
         # A pin absent from an ok provider read is `gone` and fails doctor,
         # even while the client catalog still lists it.
-        gone_rows = [row for row in zen_rows if row["model"] != "muse-spark-1.3-contributor-free"]
+        gone_pin = zen_rows[0]["model"]
+        gone_rows = [row for row in zen_rows if row["model"] != gone_pin]
         gone = {**report, "providers": {**report["providers"], "opencode": {"status": "ok", "rows": gone_rows}}}
         code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''), report=gone)
         self.assertEqual(code, 1, text)
-        self.assertIn('gone    opencode pin opencode/muse-spark-1.3-contributor-free: listed by model API', text)
+        self.assertIn(f'gone    opencode pin opencode/{gone_pin}: listed by model API', text)
 
         # Failed and empty reads are `unknown`: printed, never fatal.
         unknown = {**report, "models": [],
