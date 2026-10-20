@@ -93,14 +93,48 @@ def _native_times(value):
             and math.isfinite(value[key])}
 
 
-def opencode_native(run, name, session):
+def _opencode_messages(run, name, session):
+    """Read only a session created for this run's exact lane workspace."""
     path = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
+    with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1)) as db:
+        owner = db.execute('SELECT directory, time_created FROM session_v2 WHERE id=?', (session,)).fetchone()
+        if not owner or Path(owner[0]).resolve() != workspace(run.lane(name)).resolve() or owner[1] < run.epoch * 1000:
+            raise ValueError('native session ownership could not be verified')
+        return db.execute("SELECT data, time_updated FROM session_message WHERE session_id=? AND type='assistant' ORDER BY time_updated DESC, seq DESC LIMIT 20", (session,)).fetchall()
+
+
+def opencode_failure(run, name):
+    """Supplement a settled ACP auth failure, which V2 strips of its cause.
+
+    Never export the native response body, headers or credential data. This
+    is deliberately separate from progress snapshots, which stay text-free.
+    An unavailable/mismatched store leaves the authoritative ACP error intact.
+    """
     try:
-        with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1)) as db:
-            owner = db.execute('SELECT directory, time_created FROM session_v2 WHERE id=?', (session,)).fetchone()
-            if not owner or Path(owner[0]).resolve() != workspace(run.lane(name)).resolve() or owner[1] < run.epoch * 1000:
-                return dict(unavailable='native session ownership could not be verified')
-            rows = db.execute("SELECT data, time_updated FROM session_message WHERE session_id=? AND type='assistant' ORDER BY time_updated DESC, seq DESC LIMIT 20", (session,)).fetchall()
+        session = json.loads((run.lane_dir(name) / 'activity.json').read_text())['session_id']
+        if not isinstance(session, str):
+            return None
+        rows = _opencode_messages(run, name, session)
+        message = json.loads(rows[0][0]) if rows else {}
+        model = message.get('model') or {}
+        expected = run.lane(name).model
+        expected = expected if '/' in expected else f'opencode/{expected}'
+        if f"{model.get('providerID')}/{model.get('id')}" != expected:
+            return None
+        error = message.get('error') or {}
+        if error.get('type') != 'provider.auth' or not isinstance(error.get('message'), str):
+            return None
+        result = dict(kind='native_error', type='provider.auth', message=' '.join(error['message'].split())[:500])
+        if isinstance(error.get('status'), int) and not isinstance(error['status'], bool):
+            result['status'] = error['status']
+        return result
+    except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError, KeyError):
+        return None
+
+
+def opencode_native(run, name, session):
+    try:
+        rows = _opencode_messages(run, name, session)
         result, skipped = {}, 0
         for raw, updated in rows:
             try:

@@ -463,6 +463,13 @@ def _kill(proc: subprocess.Popen) -> None:
 def _finish(run: Run, name: str, started: float, status: str, reason: str, code, reader, err_path,
             pane: Pane | None = None) -> int:
     reason = "; ".join([reason, *reader.notes()])
+    diagnostics = list(reader.diagnostics)
+    if status == 'failed' and run.lane(name).kind == 'opencode':
+        native = activity.opencode_failure(run, name)
+        if native:
+            diagnostics.append(native)
+            http = f" (HTTP {native['status']})" if 'status' in native else ''
+            reason += f"; native {native['type']}{http}: {native['message']}"
     text = reader.text
     if text.strip():
         atomic_write(run.base / f"RESULT-{name}.md", text if text.endswith("\n") else text + "\n")
@@ -472,7 +479,7 @@ def _finish(run: Run, name: str, started: float, status: str, reason: str, code,
         "lane": name, "status": status, "reason": reason, "exit_code": code,
         "error": reader.error, "started": now(started), "ended": now(),
         "seconds": round(time.time() - started), "result_bytes": len(text.encode()),
-        "stderr_tail": tail, "diagnostics": reader.diagnostics,
+        "stderr_tail": tail, "diagnostics": diagnostics,
     }
     atomic_write(run.lane_dir(name) / "exit.json", json.dumps(record, indent=2))
     print(f"xcheck lane {name}: {status} — {reason}", flush=True)

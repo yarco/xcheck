@@ -1,14 +1,17 @@
 """OpenCode ACP keeps exact provider/effort selection and native lifecycle."""
 
 import json
+import os
+import sqlite3
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 import test_xcheck as support
 from test_agy_acp import PROMPT, chunk, rpc
-from xcheck import activity, adapters, files, pools, run
+from xcheck import activity, adapters, files, lane as runner, pools, run
 
 PEER = adapters.Lane("opencode", "opencode/muse-spark-1.3-contributor-free", "high")
 
@@ -51,6 +54,63 @@ class Reader(unittest.TestCase):
         self.assertEqual(meter.data["session_id"], "ses_lane")
         self.assertEqual(meter.data["completed_tools"], 1)
         self.assertNotIn("SECRET", json.dumps(meter.data))
+
+
+class NativeAuthFailure(unittest.TestCase):
+    setUp = support.EndToEnd.setUp
+
+    def test_settlement_recovers_typed_auth_error_without_response_payload(self):
+        peer = adapters.Lane('opencode', 'opencode/big-pickle')
+        name = peer.name
+        current = files.Run(self.base, {name: peer}, support.CONTRACT, False, 0, None,
+                            'headless', 'codex', 'now', {}, {}, epoch=100)
+        directory = current.lane_dir(name)
+        directory.mkdir(parents=True)
+        (directory / 'activity.json').write_text('{"session_id":"ses_auth"}')
+        store = self.root / 'native-store'
+        path = store / 'opencode/opencode.db'
+        path.parent.mkdir(parents=True)
+        error = dict(type='provider.auth', status=401,
+                     message='This API key has expired. Create a new API key in OpenCode Console.',
+                     response=dict(body='SECRET response', headers={'authorization': 'SECRET token'}))
+        message = dict(model=dict(providerID='opencode', id='big-pickle'), content=[], error=error)
+        with closing(sqlite3.connect(path)) as db, db:
+            for _, ddl in json.loads((support.FIX / 'opencode-v2-schema.json').read_text()):
+                db.execute(ddl)
+            db.execute('INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                       ('ses_auth', 'fixture', 'fixture', str(files.workspace(peer)), '2.0.32', 101000, 101000))
+            db.execute('INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                       ('msg_auth', 'ses_auth', 'assistant', 1, 102000, 102000, json.dumps(message)))
+        reader = adapters.Reader('opencode')
+        reader.error = 'Authentication required: provider authentication required'
+        with patch.dict(os.environ, XDG_DATA_HOME=str(store)):
+            # Progress remains metadata-only, even when the native record has an error.
+            self.assertNotIn('expired', json.dumps(activity.opencode_native(current, name, 'ses_auth')))
+            runner._finish(current, name, time.time(), 'failed', reader.error, 1, reader, directory / 'stderr.log')
+            record = json.loads((directory / 'exit.json').read_text())
+            self.assertEqual(record['status'], 'failed')
+            self.assertEqual(record['error'], reader.error)
+            self.assertIn('HTTP 401', record['reason'])
+            self.assertIn('API key has expired', record['reason'])
+            self.assertEqual(record['diagnostics'][0]['type'], 'provider.auth')
+            self.assertNotIn('SECRET', json.dumps(record))
+            self.assertFalse((self.base / f'RESULT-{name}.md').exists())
+            # Neither a reused workspace nor another model's failure can diagnose this lane.
+            for sql, args in [
+                ('UPDATE session_v2 SET time_created=?', (99000,)),
+                ('UPDATE session_v2 SET time_created=?, directory=?', (101000, str(self.root / 'other'))),
+            ]:
+                with closing(sqlite3.connect(path)) as db, db:
+                    db.execute(sql, args)
+                self.assertIsNone(activity.opencode_failure(current, name))
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute('UPDATE session_v2 SET directory=?', (str(files.workspace(peer)),))
+                message['model']['id'] = 'another-model'
+                db.execute('UPDATE session_message SET data=?', (json.dumps(message),))
+            self.assertIsNone(activity.opencode_failure(current, name))
+        with patch.object(activity, 'opencode_failure') as probe:
+            runner._finish(current, name, time.time(), 'timeout', 'operator cap', 1, reader, directory / 'stderr.log')
+            probe.assert_not_called()
 
 
 class Lanes(unittest.TestCase):

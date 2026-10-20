@@ -25,7 +25,14 @@ STILL_RUNNING = 3
 POLL = 0.2  # seconds between local file/lock checks; no model is involved
 REVIEW_ALERT_AFTER = 3600  # owner-requested diagnostic warning, never a termination limit
 
-DELIVER = "Print your complete answer as your final message; the harness saves it."
+DELIVER = (
+    "Print your complete answer as your final message after all tools; the harness saves it. "
+    "Keep the final PROOF and completion marker on two separate plain lines, "
+    "with no Markdown fences, headings or commentary between or after them. "
+    "Copy the proof target's last non-empty line exactly, including any leading punctuation. "
+    "The ending is:\nPROOF: <the exact last non-empty line of the proof target>\nRESULT_COMPLETE\n"
+    "If you cannot do the task, use RESULT_INVALID instead, as PROMPT.md specifies."
+)
 
 MESSAGE = (
     "You are one reviewer in a multi-model review that the owner of these files "
