@@ -84,6 +84,10 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         raise RunError(f"duplicate lanes: {names}")
     if orch in {l.kind for l in lanes}:
         raise RunError(f"a {orch} orchestrator must not launch a {orch} peer")
+    try:
+        assigned = adapters.assign_accounts(lanes)
+    except ValueError as e:
+        raise RunError(str(e)) from None
 
     ctx, refusal = herdr.resolve_caller() if mode in ("auto", "herdr") else (None, "")
     if mode == "herdr" and ctx is None:
@@ -118,7 +122,8 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     run = Run(base=base, lanes={l.name: l for l in lanes}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
               herdr=ctx or {}, capacity=not skip_capacity, forced=sorted(force_lanes),
-              epoch=time.time())
+              epoch=time.time(),
+              accounts={n: {"name": a, "store": str(adapters.OPENCODE_ACCOUNTS[a])} for n, a in assigned.items()})
     try:
         for name in run.lanes:
             d = run.lane_dir(name)
@@ -133,6 +138,8 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     atomic_write(base / "supervisor.pid", str(os.getpid()))  # for operators; liveness is the lock
     _alive = hold_life(base / "supervisor.alive")
     print(f"xcheck: {len(run.lanes)} lanes ({mode}) → {', '.join(run.lanes)}", flush=True)
+    if run.accounts:
+        print("xcheck: OpenCode accounts → " + ", ".join(f"{n}: {a['name']}" for n, a in run.accounts.items()), flush=True)
     if run.capacity:
         # Before any lane holds a pool: an Agy account short on quota is rotated to one that covers
         # every selected Agy lane. Each lane still reads its own pool at admission.
@@ -435,7 +442,8 @@ def render_status(run: Run) -> str:
             e = json.loads(_exit_path(run, name).read_text())
         except (OSError, ValueError):
             e = {"status": "running", "reason": "no exit.json yet"}
-        rows.append({"lane": name, **e})
+        account = (run.accounts or {}).get(name)
+        rows.append({"lane": name, **({"account": account["name"]} if account else {}), **e})
     atomic_write(run.base / "STATUS.json", json.dumps(
         {"base": str(run.base), "mode": run.mode, "orch": run.orch, "started": run.started,
          "contract": vars(run.contract), "lanes": rows}, indent=2))
@@ -444,7 +452,8 @@ def render_status(run: Run) -> str:
              "| lane | status | seconds | note |", "|---|---|---|---|"]
     for r in rows:
         note = (r.get("reason") or "").replace("|", "\\|").replace("\n", " ")
-        lines.append(f"| {r['lane']} | {r['status']} | {r.get('seconds', '')} | {note} |")
+        lane = f"{r['lane']} ({r['account']})" if r.get("account") else r["lane"]
+        lines.append(f"| {lane} | {r['status']} | {r.get('seconds', '')} | {note} |")
     text = "\n".join(lines) + "\n"
     atomic_write(run.base / "STATUS.md", text)
     return text
@@ -609,6 +618,11 @@ def doctor() -> int:
         ok = re.search(r"(?m)^[ \t]*(?:[-*][ \t]+)?" + re.escape(lane.model) + r"(?=[ \t]|$)", text) is not None
         print(f"{'ok  ' if ok else 'FAIL'} {lane.kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")
         bad += not ok
+    for account, store in adapters.OPENCODE_ACCOUNTS.items():
+        problem = adapters.account_problem(store)
+        print(f"FAIL opencode account {account}: {problem}" if problem else
+              f"ok   opencode account {account}: Zen credential stored in {store}")
+        bad += bool(problem)
     for selector in new_offers:
         print(f"new     {selector}: ready Zen offer, not in the free roster yet; "
               "the daily refresh adds it once its lane check ends done")

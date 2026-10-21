@@ -14,7 +14,12 @@ Optional `~/.config/xcheck/config.json` is read at each command invocation. `XCH
   ],
   "caller_context_helper": "~/.local/libexec/xcheck-caller-context",
   "free_roster": "~/.local/state/xcheck/free-roster.json",
-  "agy_rotate_command": "~/.local/bin/agy-rotate"
+  "agy_rotate_command": "~/.local/bin/agy-rotate",
+  "opencode_accounts": {
+    "a": "/absolute/path/to/opencode-a.db",
+    "b": "/absolute/path/to/opencode-b.db"
+  },
+  "opencode_lanes_per_account": 5
 }
 ```
 
@@ -25,6 +30,8 @@ The helper path and optional roster path preserve the existing default locations
 `free_roster` points to an optional JSON object such as `{"lanes":["opencode:provider/model"]}`. Missing/unreadable roster files produce no optional free lanes. The file is a selection aid, not proof of current price, availability or quality. `xcheck models` checks provider sources live; an external qualification job is not bundled. `doctor` checks optional roster pins as well as defaults.
 
 `agy_rotate_command` names an optional executable that owns the operator's Antigravity accounts. When a run reads any selected, non-forced Agy lane below its reserve, the supervisor calls it once, before any lane is admitted, as `<cmd> auto --need <bucket,…> --above <pct>`. The needed buckets are the union over every selected Agy lane (Argon's weekly bucket plus Flash's Gemini 5 h and weekly buckets), and the threshold is the run's Agy reserve. The command keeps the current account when it already covers them, otherwise switches the whole account: the ACP server's Keychain login and the `agy` CLI login that answers `/usage` must change together. Exit 0 means a qualifying account is current. Its exit status and last output lines go to `BASE/agy-rotation.json`. Each lane still reads its own pool at admission, so a rotation that failed, found no account, or was refused because another run's Agy lane held the pool leaves the ordinary `reserve-low` skip. `--skip-capacity` never rotates. Without the key nothing rotates.
+
+`opencode_accounts` maps account names to OpenCode store paths. Each path is absolute or starts with `~/`. Insertion order is the round-robin order for that machine's Zen lanes (a bare model or `opencode/…`). OpenRouter and Z.ai lanes are not assigned. `opencode_lanes_per_account` is an optional positive integer (default 5) capping how many Zen lanes of one run share an account. Omit `opencode_accounts` to keep the native default store and apply no cap. An empty object is refused, as are two paths that resolve to the same file. A run that needs more Zen lanes than the accounts allow, or whose assigned store file is missing, exits 2 before anything starts: a missing file would be created empty and the lane would run anonymously. The assignment is fixed in `run.json` and shown on that lane's status row. Sign each store in once with `OPENCODE_DB=<store> opencode auth login opencode --standalone --method device`. `opencode auth switch` is machine-global and does not pin a lane. These values are store paths, not tokens. Do not put credentials in this file. `doctor` prints one line per configured account.
 
 ## Herdr caller-context adapter
 

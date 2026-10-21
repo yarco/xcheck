@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+import tempfile
 import time
 import unittest
 from contextlib import closing
@@ -112,6 +113,34 @@ class NativeAuthFailure(unittest.TestCase):
             runner._finish(current, name, time.time(), 'timeout', 'operator cap', 1, reader, directory / 'stderr.log')
             probe.assert_not_called()
 
+    def test_assigned_account_store_is_the_native_record(self):
+        peer = adapters.Lane('opencode', 'opencode/big-pickle')
+        name = peer.name
+        store = self.root / 'b.db'
+        current = files.Run(self.base, {name: peer}, support.CONTRACT, False, 0, None,
+                            'headless', 'codex', 'now', {}, {}, epoch=100,
+                            accounts={name: {'name': 'b', 'store': str(store)}})
+        directory = current.lane_dir(name)
+        directory.mkdir(parents=True)
+        (directory / 'activity.json').write_text('{"session_id":"ses_auth"}')
+        error = dict(type='provider.auth', status=401, message='This API key has expired.')
+        message = dict(model=dict(providerID='opencode', id='big-pickle'), content=[], error=error)
+        with closing(sqlite3.connect(store)) as db, db:
+            for _, ddl in json.loads((support.FIX / 'opencode-v2-schema.json').read_text()):
+                db.execute(ddl)
+            db.execute('INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                       ('ses_auth', 'fixture', 'fixture', str(files.workspace(peer)), '2.0.32', 101000, 101000))
+            db.execute('INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                       ('msg_auth', 'ses_auth', 'assistant', 1, 102000, 102000, json.dumps(message)))
+        empty = self.root / 'empty-xdg'
+        empty.mkdir()
+        with patch.dict(os.environ, {'XDG_DATA_HOME': str(empty)}):
+            failure = activity.opencode_failure(current, name)
+            self.assertEqual(failure['type'], 'provider.auth')
+            self.assertIn('API key has expired', failure['message'])
+            current.accounts = {}
+            self.assertIsNone(activity.opencode_failure(current, name))
+
 
 class Lanes(unittest.TestCase):
     setUp = support.EndToEnd.setUp
@@ -212,6 +241,128 @@ class Lanes(unittest.TestCase):
                 stopped.assert_called_once_with(123)
                 row = json.loads((directory / "exit.json").read_text())
                 self.assertEqual(row["status"], "done" if completed else "failed", row)
+
+    def test_zen_lanes_split_across_accounts(self):
+        stores = {}
+        for name in ("a", "b"):
+            path = self.root / f"{name}.db"
+            path.write_text("credential\n")
+            stores[name] = path
+        cfg = self.root / "pool.json"
+        cfg.write_text(json.dumps({"opencode_accounts": {name: str(path) for name, path in stores.items()},
+                                   "opencode_lanes_per_account": 5}))
+        zen_a = adapters.Lane("opencode", "opencode/muse-spark-1.3-contributor-free")
+        zen_b = adapters.Lane("opencode", "opencode/space-bunny-free")
+        router = adapters.Lane("opencode", "openrouter/qwen/qwen3.8-27b:free", "high")
+        result = self.xcheck(
+            "run", "--base", str(self.base), "--orch", "codex", "--lanes",
+            f"{zen_a.kind}:{zen_a.model},{zen_b.kind}:{zen_b.model},{router.kind}:{router.model}:{router.effort}",
+            "--mode", "headless", "--skip-capacity", mode="custody",
+            env_extra={"XCHECK_CONFIG": str(cfg), "OPENCODE_DB": str(self.root / "orchestrator.db"),
+                       "OPENCODE_CONFIG_CONTENT": '{"permission":"deny"}'})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        launch = (self.base / "supervisor.log").read_text()
+        self.assertIn(f"{zen_a.name}: a", launch)
+        self.assertIn(f"{zen_b.name}: b", launch)
+        saved = json.loads((self.base / "run.json").read_text())["accounts"]
+        self.assertEqual(saved[zen_a.name], {"name": "a", "store": str(stores["a"])})
+        self.assertEqual(saved[zen_b.name], {"name": "b", "store": str(stores["b"])})
+        self.assertNotIn(router.name, saved)
+        rows = {row["lane"]: row for row in json.loads((self.base / "STATUS.json").read_text())["lanes"]}
+        self.assertEqual(rows[zen_a.name]["account"], "a")
+        self.assertEqual(rows[zen_b.name]["account"], "b")
+        self.assertNotIn("account", rows[router.name])
+        self.assertEqual({row["status"] for row in rows.values()}, {"done"})
+        status = (self.base / "STATUS.md").read_text()
+        self.assertIn(f"| {zen_a.name} (a) |", status)
+        self.assertIn(f"| {zen_b.name} (b) |", status)
+        self.assertIn(f"| {router.name} |", status)
+        self.assertNotIn(f"| {router.name} (", status)
+
+        def probe(lane):
+            return json.loads((self.root / ".lanes" / lane.pool / lane.name / "probe.json").read_text())
+
+        self.assertEqual(probe(zen_a)["opencode_db"], str(stores["a"]))
+        self.assertEqual(probe(zen_b)["opencode_db"], str(stores["b"]))
+        self.assertIsNone(probe(router)["opencode_db"])
+
+    def test_overflow_refuses_before_launch(self):
+        cfg = self.root / "pool.json"
+        cfg.write_text(json.dumps({
+            "opencode_accounts": {"a": str(self.root / "missing-a.db"), "b": str(self.root / "missing-b.db")},
+            "opencode_lanes_per_account": 1}))
+        result = self.xcheck(
+            "run", "--base", str(self.base), "--orch", "codex", "--lanes",
+            "opencode:opencode/muse-spark-1.3-contributor-free,opencode:opencode/space-bunny-free,opencode:big-pickle",
+            "--mode", "headless", "--skip-capacity", env_extra={"XCHECK_CONFIG": str(cfg)})
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("3 OpenCode Zen lanes exceed 2 accounts × 1 lanes", result.stderr)
+        self.assertFalse((self.base / ".launched").exists())
+        self.assertFalse((self.base / "lanes").exists())
+        self.assertFalse((self.base / "run.json").exists())
+
+
+class AccountPool(unittest.TestCase):
+    def test_round_robin_skips_other_providers_and_refuses_overflow_or_a_missing_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stores = {}
+            for name in ("a", "b", "c"):
+                path = root / f"{name}.db"
+                path.write_text("x")
+                stores[name] = path
+            lanes = [
+                adapters.Lane("opencode", "opencode/big-pickle"),
+                adapters.Lane("opencode", "openrouter/qwen/qwen3.8-27b:free"),
+                adapters.Lane("opencode", "zai-coding-plan/glm-5.3"),
+                adapters.Lane("opencode", "space-bunny-free"),
+                adapters.Lane("codex", "gpt-6.1-sol", "high"),
+                adapters.Lane("opencode", "opencode/mimo-v2.6-flash-free"),
+                adapters.Lane("opencode", "glm-5.3-flash-free"),
+            ]
+            with patch.object(adapters, "OPENCODE_ACCOUNTS", stores), \
+                    patch.object(adapters, "OPENCODE_LANES_PER_ACCOUNT", 5):
+                self.assertEqual(adapters.assign_accounts(lanes), {
+                    "opencode-big-pickle": "a",
+                    "opencode-space-bunny-free": "b",
+                    "opencode-mimo-v2.6-flash-free": "c",
+                    "opencode-glm-5.3-flash-free": "a",
+                })
+            with patch.object(adapters, "OPENCODE_ACCOUNTS", {}), \
+                    patch.object(adapters, "OPENCODE_LANES_PER_ACCOUNT", 5):
+                self.assertEqual(adapters.assign_accounts(lanes), {})
+            with patch.object(adapters, "OPENCODE_ACCOUNTS", stores), \
+                    patch.object(adapters, "OPENCODE_LANES_PER_ACCOUNT", 1):
+                with self.assertRaisesRegex(ValueError, "4 OpenCode Zen lanes exceed 3 accounts × 1 lanes"):
+                    adapters.assign_accounts(lanes)
+            broken = dict(stores)
+            broken["c"] = root / "absent.db"
+            with patch.object(adapters, "OPENCODE_ACCOUNTS", broken), \
+                    patch.object(adapters, "OPENCODE_LANES_PER_ACCOUNT", 5):
+                with self.assertRaisesRegex(ValueError, "missing for c"):
+                    adapters.assign_accounts(lanes)
+                one = [adapters.Lane("opencode", "big-pickle")]
+                self.assertEqual(adapters.assign_accounts(one), {"opencode-big-pickle": "a"})
+
+    def test_launch_puts_the_assigned_store_back_after_the_scrub(self):
+        from xcheck import models
+        from xcheck.lane import lane_env
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "a.db"
+            store.write_text("x")
+            work = root / "work"
+            work.mkdir()
+            peer = adapters.Lane("opencode", "opencode/space-bunny-free")
+            with patch.object(models, "client_metadata", return_value={peer.model: {"variants": {}}}) as metadata, \
+                    patch.dict(os.environ, {"OPENCODE_DB": str(root / "orchestrator.db"),
+                                            "OPENCODE_CONFIG_CONTENT": '{"permission":"deny"}'}):
+                spec = adapters.launch(peer, work, root / "message.txt", root / "harness.log", True, store)
+                env = lane_env(spec, work)
+                probed = metadata.call_args.kwargs["env"]["OPENCODE_DB"]
+            self.assertEqual(env["OPENCODE_DB"], str(store))
+            self.assertNotIn("OPENCODE_CONFIG_CONTENT", env)
+            self.assertEqual(probed, str(store))
 
 
 if __name__ == "__main__":

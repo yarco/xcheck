@@ -79,6 +79,24 @@ if kind == "opencode" and argv[:2] == ["api", "model.list"] and "--help" not in 
 if kind == "opencode" and argv[:1] == ["models"] and "--help" not in argv:
     print("\n".join(OPENCODE_MODELS))
     sys.exit(0)
+# `opencode auth list`: a store whose text is the marker holds one Zen credential.
+# Any other OPENCODE_DB, including a missing file, has none. Types only.
+if kind == "opencode" and argv[:2] == ["auth", "list"]:
+    if "--help" in argv:
+        print("--standalone --server --format")
+        sys.exit(0)
+    store = os.environ.get("OPENCODE_DB")
+    try:
+        signed_in = bool(store) and Path(store).is_file() and Path(store).read_text(encoding="utf-8") == "credential\n"
+    except (OSError, UnicodeDecodeError):
+        signed_in = False
+    if "--format" in argv and argv[argv.index("--format") + 1] == "json":
+        connections = [{"type": "credential", "method": "oauth", "label": "Personal"}] if signed_in else []
+        rows = [{"id": "opencode", "name": "OpenCode", "connections": connections}] if signed_in else []
+        print(json.dumps(rows))
+    else:
+        print("opencode Personal stored" if signed_in else "No authenticated integrations")
+    sys.exit(0)
 
 # The operator's claude: help (native flag contract), the zero-spend auth probe,
 # and the custody child the adapter spawns as the SDK would. Routing overrides
@@ -322,6 +340,7 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
                     wrote_outside = False
                 Path("probe.json").write_text(json.dumps({
                     "holds_busy": held, "wrote_outside": wrote_outside,
+                    "opencode_db": os.environ.get("OPENCODE_DB"),
                     "gemini_home": os.environ.get("GEMINI_HOME"),
                     "grok_home": os.environ.get("GROK_HOME"),
                     "grok_auth_path": os.environ.get("GROK_AUTH_PATH"),

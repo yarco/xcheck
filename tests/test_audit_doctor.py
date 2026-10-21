@@ -2,6 +2,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from contextlib import redirect_stdout
@@ -12,10 +13,12 @@ from xcheck import adapters, install, models, run
 
 class ExactListedModels(unittest.TestCase):
 
-    def doctor(self, grok_text, devin_text, failed_listing=False):
+    def doctor(self, grok_text, devin_text, failed_listing=False, auth=None):
         helps = {tuple(cmd): (REPO / 'tests/fixtures/cli-help' / f"{kind.replace(' ', '-')}.txt").read_text() for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
 
         def fake(cmd, **kw):
+            if cmd[:3] == ['opencode', 'auth', 'list'] and '--help' not in cmd and auth is not None:
+                return auth(cmd, **kw)
             if tuple(cmd) in helps:
                 return subprocess.CompletedProcess(cmd, 0, helps[tuple(cmd)], '')
             if cmd[-2:] == ['version', '--json']:
@@ -54,3 +57,34 @@ class ExactListedModels(unittest.TestCase):
         self.assertEqual(code, 0, text)
         self.assertIn('ok   codex: Codex CLI present', text)
         self.assertIn('ok   claude: native limit flags', text)
+
+    def test_opencode_accounts_are_one_line_each(self):
+        grok = 'Default model: grok-4.7\nAvailable models:\n  * grok-4.7 (default)\n'
+        devin = 'Available models (53 families)\n  swe-2-max  SWE-2 Max  [262K context, Free]\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            good, empty, missing = root / 'good.db', root / 'empty.db', root / 'missing.db'
+            good.write_text('x')
+            empty.write_text('x')
+            calls = []
+
+            def auth(cmd, **kwargs):
+                calls.append(kwargs.get('env', {}).get('OPENCODE_DB'))
+                if kwargs.get('env', {}).get('OPENCODE_DB') == str(good):
+                    body = [{'id': 'opencode', 'name': 'OpenCode',
+                             'connections': [{'type': 'credential', 'method': 'oauth', 'label': 'Personal'}]}]
+                    return subprocess.CompletedProcess(cmd, 0, json.dumps(body), '')
+                if kwargs.get('env', {}).get('OPENCODE_DB') == str(empty):
+                    return subprocess.CompletedProcess(cmd, 0, '[]', '')
+                return subprocess.CompletedProcess(cmd, 1, '', 'secret-stderr')
+
+            accounts = {'a': good, 'b': empty, 'c': missing}
+            with patch.dict(adapters.OPENCODE_ACCOUNTS, accounts, clear=True):
+                code, text = self.doctor(grok, devin, auth=auth)
+        self.assertIn(f'ok   opencode account a: Zen credential stored in {good}', text)
+        self.assertIn('FAIL opencode account b: no stored OpenCode Console credential; sign it in', text)
+        self.assertIn(f'FAIL opencode account c: store {missing} is missing', text)
+        self.assertNotIn('secret-stderr', text)
+        self.assertNotIn('Personal', text)
+        self.assertEqual(calls, [str(good), str(empty)])
+        self.assertEqual(code, 1, text)

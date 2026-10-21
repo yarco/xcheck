@@ -53,6 +53,11 @@ class Lane:
             return f"opencode-zen-{model}" if provider == "opencode" else f"opencode-{provider}"
         return self.kind
 
+    @property
+    def zen(self) -> bool:
+        """Spends an OpenCode Zen account (bare model or `opencode/…`)."""
+        return self.kind == "opencode" and self.pool.startswith("opencode-zen-")
+
     def to_json(self) -> dict:
         return {"kind": self.kind, "model": self.model, "effort": self.effort}
 
@@ -134,6 +139,62 @@ def free_lanes(path: Path = FREE_ROSTER) -> tuple[Lane, ...]:
 OPT_IN = (Lane("devin", "swe-2-max"), *free_lanes())
 
 
+# Zen's free tier limits each account (FreeUsageLimitError, HTTP 429), across
+# its free models. Local config may name several accounts, each an OpenCode
+# store holding one signed-in Zen credential; a lane reaches its account
+# through OPENCODE_DB. Empty: every lane uses the native default store.
+OPENCODE_ACCOUNTS: dict[str, Path] = {}
+OPENCODE_LANES_PER_ACCOUNT = 5  # eyeballed from 2026-10-21: 9 lanes on one account hit the limit
+
+
+def assign_accounts(lanes) -> dict[str, str]:
+    """Zen lane name → account name, round-robin in roster order. Raises
+    ValueError when the run needs more Zen lanes than the accounts allow or a
+    store is missing (OpenCode would create it empty and run anonymously)."""
+    zen = [lane.name for lane in lanes if lane.zen]
+    if not OPENCODE_ACCOUNTS or not zen:
+        return {}
+    names = list(OPENCODE_ACCOUNTS)
+    fits = len(names) * OPENCODE_LANES_PER_ACCOUNT
+    if len(zen) > fits:
+        raise ValueError(f"{len(zen)} OpenCode Zen lanes exceed {len(names)} accounts × "
+                         f"{OPENCODE_LANES_PER_ACCOUNT} lanes; select at most {fits} or add an account")
+    used = names[:len(zen)]
+    missing = [n for n in used if not OPENCODE_ACCOUNTS[n].is_file()]
+    if missing:
+        raise ValueError(f"OpenCode account store missing for {', '.join(missing)}; sign it in with "
+                         "`OPENCODE_DB=<store> opencode auth login opencode --standalone --method device`")
+    return {name: names[i % len(names)] for i, name in enumerate(zen)}
+
+
+def account_problem(store: Path) -> str | None:
+    """Zero-inference check that `store` holds a stored Zen credential. Reads
+    only connection types from `auth list`; never prints or keeps a secret."""
+    from .lane import lane_env
+    if not store.is_file():
+        return f"store {store} is missing"
+    spec = Launch(["opencode", "auth", "list", "--standalone", "--format", "json"], None,
+                  env_set={"OPENCODE_DB": str(store)})
+    try:
+        out = subprocess.run(spec.argv, cwd=store.parent, env=lane_env(spec, store.parent), capture_output=True,
+                             text=True, timeout=60, stdin=subprocess.DEVNULL)
+        # `auth list --format json` prints a list of {id, name, connections}.
+        # A non-zero exit or any other body is a failed check, not "no credential".
+        # Stderr is dropped: it is not part of the type-only read.
+        if out.returncode != 0:
+            return "`opencode auth list` failed"
+        integrations = json.loads(out.stdout)
+        if not isinstance(integrations, list):
+            return "`opencode auth list` unreadable (format)"
+        zen = [c for i in integrations if isinstance(i, dict) and i.get("id") == "opencode"
+               for c in i.get("connections") or [] if isinstance(c, dict)]
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError) as e:
+        return f"`opencode auth list` unreadable ({type(e).__name__})"
+    if not any(c.get("type") == "credential" for c in zen):
+        return "no stored OpenCode Console credential; sign it in"
+    return None
+
+
 class Unavailable(Exception):
     """A lane cannot start here; found while building its command, before spend."""
 
@@ -146,9 +207,10 @@ class Launch:
     kind: str = ""  # lane kind, for kind-scoped env scrubbing
 
 
-def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool,
+           store: Path | None = None) -> Launch:
     """The command for one lane. `work` is its workspace, `log` its forensic
-    log."""
+    log, `store` the OpenCode account store of a Zen lane (None: native default)."""
     if lane.kind == "codex":
         return _codex_launch(lane, work, message, log, web)
     if lane.kind == "claude":
@@ -160,7 +222,7 @@ def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launc
     if lane.kind == "devin":
         return _devin_launch(lane, work, message, log, web)
     if lane.kind == "opencode":
-        return _opencode_launch(lane, work, message, log)
+        return _opencode_launch(lane, work, message, log, store)
     raise ValueError(f"unknown kind {lane.kind}")
 
 
@@ -241,7 +303,7 @@ def _opencode_model(lane: Lane) -> list[str]:
     return ["--model", model]
 
 
-def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path) -> Launch:
+def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path, store: Path | None = None) -> Launch:
     from .files import ROOT
     agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
              "--run", str(log.parent.parent.parent), "--log", str(log), "--",
@@ -250,7 +312,8 @@ def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path) -> Launch
             "--cwd", str(work), *_opencode_model(lane), "--approve-all", "--auth-policy", "skip",
             "--no-terminal", "--no-fs", "--prompt-retries", "0", "--format", "json", "exec",
             "--config-option", "mode=build"]
-    spec = Launch(argv, None, env_set={**_opencode_env(lane), "XCHECK_ROOT": str(ROOT)})
+    spec = Launch(argv, None, env_set={**_opencode_env(lane), "XCHECK_ROOT": str(ROOT),
+                                       **({"OPENCODE_DB": str(store)} if store else {})})
     effort = lane.effort
     if not effort:
         # Unset, ACP selects the model's first (lowest) variant; `default`
@@ -827,6 +890,7 @@ HELP_COMMANDS = {
     "acpx exec": (["acpx", "exec", "--help"], ["--file", "--config-option"]),
     "opencode acp": (["opencode", "acp", "--help"], []),
     "opencode api": (["opencode", "api", "--help"], ["--standalone", "--param"]),
+    "opencode auth list": (["opencode", "auth", "list", "--help"], ["--standalone", "--format"]),
     "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
                "--respect-workspace-trust"]),
     "devin acp": (["devin", "acp", "--help"], ["--model"]),

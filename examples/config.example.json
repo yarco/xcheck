@@ -2,5 +2,10 @@
   "default_lanes": [
     "codex:gpt-6.1-sol:high",
     "claude:claude-opus-5-5:high"
-  ]
+  ],
+  "opencode_accounts": {
+    "a": "/absolute/path/to/opencode-a.db",
+    "b": "/absolute/path/to/opencode-b.db"
+  },
+  "opencode_lanes_per_account": 5
 }

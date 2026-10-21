@@ -25,7 +25,7 @@ The real installer publishes a read-only content-addressed snapshot under `~/.lo
 | Grok | Native ACP via acpx | Native CLI, stored login, currently admitted CLI version |
 | Agy | Antigravity ACP via acpx | Separately installed server, native Keychain login, `agy` quota meter, macOS Seatbelt |
 | Devin | Native ACP via acpx | Native CLI and existing login; opt-in, no xcheck quota meter |
-| OpenCode | Native ACP via acpx | Native CLI and selected provider's existing login; opt-in, no xcheck quota meter |
+| OpenCode | Native ACP via acpx | Native CLI and selected provider's existing login; opt-in, no xcheck quota meter. Optional `opencode_accounts` spreads Zen lanes across stores |
 
 Only ACP lanes need stock `acpx` (`npm install -g acpx`); Codex and Claude do not. Install each vendor CLI/server using its official distribution. xcheck does not install them, log you in, configure subscriptions or enable API billing. Model selectors and version admissions live in `xcheck/adapters.py`; the detailed protocol explains why each control exists.
 

@@ -125,12 +125,18 @@ class Run:
     capacity: bool = True        # each lane probes its pool before spending
     forced: list = None          # lanes launched past a capacity refusal
     epoch: float = 0.0           # lower bound for this run's native-session creation time
+    accounts: dict = None        # Zen lane → {"name", "store"}: its OpenCode account, fixed at launch
 
     def lane(self, name: str) -> Lane:
         return self.lanes[name]
 
     def lane_dir(self, name: str) -> Path:
         return self.base / "lanes" / name
+
+    def store(self, name: str) -> Path | None:
+        """The OpenCode store this lane spends from; None: the native default."""
+        account = (self.accounts or {}).get(name)
+        return Path(account["store"]) if account else None
 
     def save(self) -> None:
         atomic_write(self.base / "run.json", json.dumps({
@@ -139,7 +145,7 @@ class Run:
             "web": self.web, "idle": self.idle, "cap": self.cap, "mode": self.mode,
             "orch": self.orch, "started": self.started, "panes": self.panes,
             "herdr": self.herdr, "capacity": self.capacity,
-            "forced": self.forced or [], "epoch": self.epoch,
+            "forced": self.forced or [], "epoch": self.epoch, "accounts": self.accounts or {},
         }, indent=2))
 
     @classmethod
@@ -152,5 +158,5 @@ class Run:
             web=d["web"], idle=d["idle"], cap=d["cap"], mode=d["mode"],
             orch=d["orch"], started=d["started"], panes=d.get("panes", {}),
             herdr=d.get("herdr", {}), capacity=d.get("capacity", True),
-            forced=d.get("forced", []), epoch=d.get("epoch", 0.0),
+            forced=d.get("forced", []), epoch=d.get("epoch", 0.0), accounts=d.get("accounts", {}),
         )

@@ -95,7 +95,7 @@ def _native_times(value):
 
 def _opencode_messages(run, name, session):
     """Read only a session created for this run's exact lane workspace."""
-    path = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
+    path = run.store(name) or Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
     with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1)) as db:
         owner = db.execute('SELECT directory, time_created FROM session_v2 WHERE id=?', (session,)).fetchone()
         if not owner or Path(owner[0]).resolve() != workspace(run.lane(name)).resolve() or owner[1] < run.epoch * 1000:

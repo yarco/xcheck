@@ -30,7 +30,13 @@ class LocalConfiguration(unittest.TestCase):
                      '{"default_lanes":[]}', '{"free_roster":"relative.json"}',
                      '{"caller_context_helper":null}', '{"agy_rotate_command":"private-secret-relative"}',
                      '{"default_lanes":["private-secret"]}',
-                     '{"default_lanes":["codex:x:high","codex:x:high"]}')
+                     '{"default_lanes":["codex:x:high","codex:x:high"]}',
+                     '{"opencode_accounts":["private-secret"]}',
+                     '{"opencode_accounts":{"a":"private-secret.db"}}',
+                     '{"opencode_accounts":{"a":"/tmp/private-secret.db","b":"/tmp/private-secret.db"}}',
+                     '{"opencode_lanes_per_account":0}',
+                     '{"opencode_lanes_per_account":true}',
+                     '{"opencode_lanes_per_account":"5"}')
             for contents in cases:
                 if contents is not None:
                     cfg.write_text(contents)
@@ -64,6 +70,38 @@ class LocalConfiguration(unittest.TestCase):
                 self.assertIn(adapters.Lane("opencode", "demo-free"), adapters.OPT_IN)
                 self.assertEqual(herdr.resolve_caller(), (None, "caller-context state unconfirmed"))
             self.assertFalse(any(p.startswith("local/") or p.endswith(".json") for p in install.runtime_files()))
+
+    def test_opencode_account_shapes_apply_or_refuse_without_echoing_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = root / "config.json"
+            same = root / "same.db"
+            refused = {
+                '{"opencode_accounts":["a"]}': "absolute store paths",
+                '{"opencode_accounts":{"a":"relative.db"}}': "absolute store paths",
+                '{"opencode_accounts":{"a":"/tmp/x.db","b":"/tmp/x.db"}}': "one store twice",
+                json.dumps({"opencode_accounts": {"a": str(same), "b": str(same) + "/."}}): "one store twice",
+                '{"opencode_lanes_per_account":0}': "positive integer",
+                '{"opencode_lanes_per_account":true}': "positive integer",
+                '{"opencode_lanes_per_account":"5"}': "positive integer",
+            }
+            for contents, message in refused.items():
+                cfg.write_text(contents)
+                with patch.dict(os.environ, {"XCHECK_CONFIG": str(cfg)}), self.subTest(contents=contents):
+                    with self.assertRaisesRegex(ValueError, message):
+                        settings.load()
+            cfg.write_text(json.dumps({
+                "opencode_accounts": {"b": str(root / "b.db"), "a": "~/opencode-a.db"},
+                "opencode_lanes_per_account": 4,
+            }))
+            with patch.dict(os.environ, {"XCHECK_CONFIG": str(cfg)}), \
+                    patch.object(adapters, "OPENCODE_ACCOUNTS", {}), \
+                    patch.object(adapters, "OPENCODE_LANES_PER_ACCOUNT", 5):
+                settings.apply()
+                self.assertEqual(list(adapters.OPENCODE_ACCOUNTS), ["b", "a"])
+                self.assertEqual(adapters.OPENCODE_ACCOUNTS["b"], root / "b.db")
+                self.assertEqual(adapters.OPENCODE_ACCOUNTS["a"], Path.home() / "opencode-a.db")
+                self.assertEqual(adapters.OPENCODE_LANES_PER_ACCOUNT, 4)
 
 
 class ConfiguredRun(unittest.TestCase):

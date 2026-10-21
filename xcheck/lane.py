@@ -44,7 +44,7 @@ TAIL_LINES = 40
 # CLAUDE_MODEL_CONFIG (model routing) and CLAUDE_AGENT_* (adapter switches),
 # and the CLI reads CLAUDE_CONFIG_DIR as its settings and auth home.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE", "CODEX_COMPANION_", "CODEX_SANDBOX",
-                  "OPENCODE",  # an opencode orchestrator's session; any config override breaks the free tier
+                  "OPENCODE",  # orchestrator session and config overrides; env_set puts OPENCODE_DB back for an assigned Zen store
                   "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_",  # adapter and client overrides must not reach a peer
                   # Provider routing overrides: an ANTHROPIC_AUTH_TOKEN or
                   # ANTHROPIC_BASE_URL exported by another orchestrator would
@@ -271,7 +271,7 @@ def _run_lane(base: Path, name: str) -> int:
                 return _finish(run, name, started, "skipped", note, None, reader, err_path)
         atomic_write(d / "phase.json", json.dumps(dict(phase="starting")))
         try:
-            spec = adapters.launch(lane, work, message, log, run.web)
+            spec = adapters.launch(lane, work, message, log, run.web, run.store(name))
         except adapters.Unavailable as e:
             return _finish(run, name, started, "skipped", str(e), None, reader, err_path)
         env = lane_env(spec, work)
