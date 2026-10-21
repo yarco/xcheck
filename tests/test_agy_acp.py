@@ -212,6 +212,34 @@ class Lanes(unittest.TestCase):
         self.assertFalse(set(servers) & adapters.AGY_MCP_EXCLUDED)
         self.assertTrue(all(set(s) <= {"url", "command", "args", "env"} for s in servers.values()), servers)
 
+    def test_the_server_reads_a_staged_login_file_never_the_keychain(self):
+        # A server that opens the Keychain re-creates the item under its own
+        # identity, and every later reader then raises a password dialog.
+        probe_row = self.agy("custody")
+        self.assertEqual(probe_row["status"], "done", probe_row)
+        probe = json.loads((self.root / ".lanes" / "agy-gemini" / LANE / "probe.json").read_text())
+        self.assertEqual(probe["agy_file_storage"], "1")
+        self.assertEqual(probe["agy_token"], {"blob": {"refresh_token": "fake-refresh"}, "mode": "0o600"})
+        self.assertFalse((self.base / "lanes" / LANE / "gemini-home" / adapters.AGY_TOKEN).exists(),
+                         "a settled lane must not keep its login copy")
+
+    def test_a_login_item_without_a_token_skips_before_spend(self):
+        row = self.agy(env={"FAKE_AGY_LOGIN": "empty"})
+        self.assertEqual(row["status"], "skipped", row)
+        self.assertIn("no usable ACP login", row["reason"])
+
+    def test_seatbelt_refuses_keychain_writes(self):
+        work, home, uv = (self.root / n for n in ("w", "h", "u"))
+        for p in (work, home, uv):
+            p.mkdir()
+        keychains = Path.home() / "Library" / "Keychains"
+        keychains.mkdir(parents=True, exist_ok=True)
+        profile = adapters._agy_profile(self.root / "profile.sb", work, home, uv)
+        refused = subprocess.run(["/usr/bin/sandbox-exec", "-f", str(profile), "/usr/bin/touch",
+                                  str(keychains / "probe")], capture_output=True, text=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse((keychains / "probe").exists())
+
     def test_a_base_with_quotes_and_spaces_joins_its_canonical_pool_owner(self):
         original = self.base
         self.base = original.parent / "owner's spaced \"BASE\""
@@ -313,6 +341,7 @@ class Lanes(unittest.TestCase):
         server = self.root / "server's quoted path" / "agy_acp_server.par"
         with patch.object(adapters, "AGY_ACP_SERVER", server), \
                 patch.dict(os.environ, {"ACPX_AUTH_TOKEN": "synthetic", "TEST_API_KEY": "synthetic"}), \
+                patch.object(adapters, "agy_login"), \
                 patch.object(run.subprocess, "run") as execute:
             execute.return_value = subprocess.CompletedProcess([], 1, "Available models: gemini-flash-agent\n", "")
             self.assertEqual(run.agy_acp_models(), ["gemini-flash-agent"])
@@ -355,14 +384,16 @@ class Lanes(unittest.TestCase):
         from xcheck import run
         for tail in [". Use --model to choose.", ".   "]:
             text = "Available models: gemini-3.8-flash-high, gemini-3.8-flash-low" + tail
-            with self.subTest(tail=tail), patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
+            with self.subTest(tail=tail), patch.object(adapters, "agy_login"), \
+                    patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
                 self.assertEqual(run.agy_acp_models(), ["gemini-3.8-flash-high", "gemini-3.8-flash-low"])
 
     def test_advertised_model_list_drops_the_sentence_period(self):
         from xcheck import run
         text = ('Cannot apply --model "x": the ACP agent did not advertise that model. '
                 'Available models: gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-3.8-flash-low.')
-        with patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
+        with patch.object(adapters, "agy_login"), \
+                    patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
             self.assertEqual(run.agy_acp_models(),
                              ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"])
 

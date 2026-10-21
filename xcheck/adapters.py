@@ -744,14 +744,24 @@ def claude_problem() -> str | None:
 #   agy_acp_server.par           Google's server; it logs in with agy's OAuth client
 # The server's own terminal sandbox exists only for oauth-business admin
 # controls, so the Seatbelt profile is the write boundary. Everything the server
-# reads from GEMINI_HOME is the lane's: auth type, MCP list, no hooks; the login
-# itself stays in the Keychain (service gemini, account antigravity-acp). Its
-# temp files go to the lane home, and uvx-started MCP servers use a uv cache
-# only Agy lanes share (ROOT/.cache/agy-uv), never the operator's.
+# reads from GEMINI_HOME is the lane's: auth type, MCP list, no hooks, and a copy
+# of the login. The canonical login is the Keychain item (service gemini, account
+# antigravity-acp) that agy-rotate writes through /usr/bin/security; the lane
+# reads it the same way and the server never touches the Keychain
+# (AGY_ACP_FORCE_FILE_STORAGE). A server that reads or rewrites that item itself
+# re-creates it under its own Developer ID, so every later reader through
+# `security`, and the server after the next rotation, raise a password dialog; a
+# dialog that outlasts the server's 3 s Keychain probe makes it fall back to an
+# empty token file and open a browser sign-in. Its temp files go to the lane
+# home, and uvx-started MCP servers use a uv cache only Agy lanes share
+# (ROOT/.cache/agy-uv), never the operator's.
 # Installed separately; XCHECK_AGY_ACP_DIR selects a local server directory.
 AGY_ACP_DIR = Path(os.environ.get("XCHECK_AGY_ACP_DIR") or Path.home() / ".local/lib/antigravity-acp")
 AGY_ACP_SERVER = AGY_ACP_DIR / "agy_acp_server.par"
-AGY_LOGIN = ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity-acp"]
+AGY_LOGIN = ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity-acp", "-w"]
+AGY_ENV = {"AGY_ACP_FORCE_FILE_STORAGE": "1"}
+# The server's file credential store: <GEMINI_HOME>/antigravity-acp/acp_token.json.
+AGY_TOKEN = Path("antigravity-acp") / "acp_token.json"
 ACPX_CONFIG = Path.home() / ".acpx" / "config.json"
 # Keys in acpx's own config that would change a lane: a timeout cancels quiet
 # reviewers, auth re-injects scrubbed credentials, MCP or agent entries change
@@ -770,6 +780,7 @@ def _agy_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> 
     from .files import ROOT  # files imports this module
     d = log.parent
     home = _agy_home(d / "gemini-home", web)
+    agy_login(home)
     uv = ROOT / ".cache" / "agy-uv"
     uv.mkdir(parents=True, exist_ok=True)
     profile = _agy_profile(d / "agy.sb", work, home, uv)
@@ -785,7 +796,47 @@ def _agy_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> 
     ]
     return Launch(argv, None, env_set={"GEMINI_HOME": str(home), "XCHECK_ROOT": str(ROOT),
                                        "TMPDIR": str(home / "tmp"), "UV_CACHE_DIR": str(uv),
-                                       "UV_TOOL_DIR": str(uv / "tools")})
+                                       "UV_TOOL_DIR": str(uv / "tools"), **AGY_ENV})
+
+
+def agy_login_blob() -> dict:
+    """The canonical ACP login, read through /usr/bin/security. A read that waits
+    on a Keychain dialog or finds no token raises before any spend."""
+    try:
+        p = subprocess.run(AGY_LOGIN, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise Unavailable("auth-required: reading the ACP login from the Keychain waited on a dialog; "
+                          "re-create the item with agy-rotate so /usr/bin/security owns it") from None
+    if p.returncode == 36:
+        raise Unavailable("auth-required: the login keychain is locked; unlock it interactively at the screen")
+    if p.returncode:
+        raise Unavailable("auth-required: no Antigravity ACP login in the Keychain (service gemini, account "
+                          "antigravity-acp); write one with agy-rotate <profile>")
+    try:
+        blob = json.loads(p.stdout)
+    except ValueError:
+        blob = None
+    if not (isinstance(blob, dict) and blob.get("refresh_token")):
+        raise Unavailable("auth-required: the Keychain item gemini/antigravity-acp holds no usable "
+                          "ACP login; write one with agy-rotate <profile>")
+    return blob
+
+
+def agy_login(home: Path) -> None:
+    """Copy the canonical ACP login into the lane's GEMINI_HOME as the server's
+    0600 token file, so the server never opens the Keychain or a browser sign-in."""
+    blob = agy_login_blob()
+    path = home / AGY_TOKEN
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(blob, f)
+
+
+def discard_agy_login(lane_dir: Path) -> None:
+    """Remove a settled lane's login copy; the Keychain item stays canonical."""
+    (lane_dir / "gemini-home" / AGY_TOKEN).unlink(missing_ok=True)
 
 
 def _acpx_quote(arg: str) -> str:
@@ -819,10 +870,9 @@ def _agy_home(home: Path, web: bool) -> Path:
 
 def _agy_profile(path: Path, work: Path, home: Path, uv: Path) -> Path:
     """Seatbelt: everything allowed except writes outside the workspace, the
-    lane home, the Agy uv cache, devices and the login Keychain (the server
-    rewrites its token there on every start)."""
-    allowed = [os.path.realpath(p) for p in (work, home, uv)] + [
-        "/dev", str(Path.home() / "Library" / "Keychains")]
+    lane home (which holds the login copy the server refreshes), the Agy uv
+    cache and devices."""
+    allowed = [os.path.realpath(p) for p in (work, home, uv)] + ["/dev"]
     path.write_text("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n"
                     # Seatbelt accepts UTF-8 paths, not JSON's \uXXXX escapes.
                     + "".join(f"  (subpath {json.dumps(p, ensure_ascii=False)})\n" for p in allowed) + ")\n")
@@ -859,13 +909,10 @@ def unavailable(lane: Lane) -> str | None:
             return ("auth-required: no Grok subscription login at ~/.grok/auth.json; "
                     "run `grok` once to sign in")
         return None
-    login = subprocess.run(AGY_LOGIN, capture_output=True).returncode
-    if login == 36:
-        return "auth-required: the login keychain is locked; unlock it interactively at the screen"
-    if login:
-        return ("auth-required: no Antigravity ACP login in the Keychain (service gemini, account "
-                "antigravity-acp); sign in once by running any acpx prompt against the server and "
-                "opening the link it prints")
+    try:
+        agy_login_blob()
+    except Unavailable as e:
+        return str(e)
     return None
 
 # Flags each adapter relies on, for `xcheck doctor` (help-text drift check).

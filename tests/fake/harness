@@ -63,9 +63,13 @@ def emit(obj):
     print(json.dumps(obj), flush=True)
 
 
-# The Keychain lookup for the Antigravity ACP login (FAKE_AGY_LOGIN=absent|locked).
+# The Keychain lookup for the Antigravity ACP login (FAKE_AGY_LOGIN=absent|locked|empty);
+# `-w` prints the stored token blob.
 if kind == "security":
-    sys.exit({"present": 0, "absent": 44, "locked": 36}[os.environ.get("FAKE_AGY_LOGIN", "present")])
+    login = os.environ.get("FAKE_AGY_LOGIN", "present")
+    if "-w" in argv and login in ("present", "empty"):
+        print(json.dumps({"refresh_token": "fake-refresh"} if login == "present" else {}))
+    sys.exit({"present": 0, "empty": 0, "absent": 44, "locked": 36}[login])
 
 
 UPSTREAM_LIMIT = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
@@ -342,6 +346,10 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
                     "holds_busy": held, "wrote_outside": wrote_outside,
                     "opencode_db": os.environ.get("OPENCODE_DB"),
                     "gemini_home": os.environ.get("GEMINI_HOME"),
+                    "agy_file_storage": os.environ.get("AGY_ACP_FORCE_FILE_STORAGE"),
+                    "agy_token": (lambda t: {"blob": json.loads(t.read_text()), "mode": oct(t.stat().st_mode & 0o777)}
+                                  if t.is_file() else None)(
+                        Path(os.environ.get("GEMINI_HOME") or "/nonexistent") / "antigravity-acp" / "acp_token.json"),
                     "grok_home": os.environ.get("GROK_HOME"),
                     "grok_auth_path": os.environ.get("GROK_AUTH_PATH"),
                     "grok_env": sorted(k for k in os.environ if k.startswith("GROK_")),

@@ -475,11 +475,16 @@ def agy_acp_models() -> list[str] | None:
         work, home = Path(tmp) / "work", adapters._agy_home(Path(tmp) / "home", web=False)
         work.mkdir()
         (home / "config" / "mcp_config.json").write_text('{"mcpServers": {}}')
+        try:  # without a staged login the server would open a browser sign-in
+            adapters.agy_login(home)
+        except adapters.Unavailable:
+            return None
         cmd = [shutil.which("acpx") or "acpx", "--agent", adapters._acpx_quote(str(adapters.AGY_ACP_SERVER)), "--cwd", str(work),
                "--model", AGY_PROBE_MODEL, "--approve-all", "--no-terminal", "--no-fs", "--format", "json",
                "exec", "x"]
         try:
-            spec = adapters.Launch(cmd, None, env_set={"GEMINI_HOME": str(home), "TMPDIR": str(home / "tmp")})
+            spec = adapters.Launch(cmd, None, env_set={"GEMINI_HOME": str(home), "TMPDIR": str(home / "tmp"),
+                                                       **adapters.AGY_ENV})
             out = subprocess.run(cmd, cwd=work, env=lane_env(spec, work),
                                  capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired):

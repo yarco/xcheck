@@ -194,6 +194,7 @@ def run_lane(base: Path, name: str) -> int:
                 "result_bytes": len(text.encode()), "diagnostics": saved.diagnostics}, indent=2))
         code = 1
     finally:
+        adapters.discard_agy_login(Run.load(base).lane_dir(name))
         _alive.close()
     signal.alarm(0)
     if Run.load(base).mode == "herdr":
