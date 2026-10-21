@@ -417,6 +417,11 @@ def _agy(lane: Lane) -> dict[str, float]:
     return agy_windows(report["command"]["data"], lane.model)
 
 
+def agy_buckets(model: str) -> tuple[str, ...]:
+    """The /usage buckets an Agy model draws on: Argon has its own weekly-only bucket."""
+    return ("gemini-argon-wtu-weekly",) if "argon" in model else ("gemini-5h", "gemini-weekly")
+
+
 def agy_windows(data: dict, model: str) -> dict[str, float]:
     """The standard Gemini pool has a 5 h and a weekly bucket; Argon models draw
     on a separate weekly-only bucket. A disabled bucket (its fraction is
@@ -425,9 +430,40 @@ def agy_windows(data: dict, model: str) -> dict[str, float]:
     if not model.startswith("gemini-"):
         raise ValueError("Agy's ACP server supports only Gemini selectors")
     buckets = {b["id"]: b for g in data["groups"] for b in g.get("buckets") or []}
-    names = ("gemini-argon-wtu-weekly",) if "argon" in model else ("gemini-5h", "gemini-weekly")
+    names = agy_buckets(model)
     return {name: 100.0 * float(buckets[name]["remaining_fraction"])
             for name in names if not buckets[name].get("disabled")}
+
+
+# Machine-local account rotator (settings key agy_rotate_command), None when not configured.
+# Called as `<cmd> auto --need B1,B2 --above PCT`: it keeps the current Antigravity login when
+# every needed bucket has more than PCT % left, else switches the whole account (ACP login and
+# the agy CLI login the meter reads) to one that does. Exit 0 = a qualifying login is current.
+AGY_ROTATE: Path | None = None
+ROTATE_TIMEOUT = 600.0
+
+
+def rotate_agy(lanes, forced=()) -> dict | None:
+    """Before any Agy lane is admitted: when a selected Agy lane is under its reserve, ask the
+    rotator once for one account covering every selected Agy lane's buckets above the run's Agy
+    reserve. Lane admission still reads its own pool afterwards and decides. Never raises."""
+    lanes = list(lanes)
+    agy = [l for l in lanes if l.kind == "agy" and l.name not in forced]
+    if AGY_ROTATE is None or not agy:
+        return None
+    low = {l.name: r.note for l in agy if (r := read(l, sharing(l, lanes))).status == "reserve-low"}
+    if not low:
+        return None
+    need = sorted({b for l in agy for b in agy_buckets(l.model)})
+    above = max(reserve_for(l, sharing(l, lanes)) for l in agy)
+    argv = [str(AGY_ROTATE), "auto", "--need", ",".join(need), "--above", f"{above:g}"]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=ROTATE_TIMEOUT, stdin=subprocess.DEVNULL)
+        code, out = p.returncode, p.stdout + p.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        code, out = None, f"rotator did not finish: {type(e).__name__}"
+    return {"trigger": low, "need": need, "above": above, "exit": code,
+            "output": [line for line in out.strip().splitlines() if line.strip()][-5:]}
 
 
 # ------------------------------------------------------------------ shared

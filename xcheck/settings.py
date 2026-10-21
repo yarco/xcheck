@@ -21,7 +21,7 @@ def load() -> dict:
     except (OSError, ValueError) as error:
         # Config contents and OS error strings can contain private data.
         raise ValueError("cannot read xcheck local configuration as JSON") from error
-    keys = {"default_lanes", "caller_context_helper", "free_roster"}
+    keys = {"default_lanes", "caller_context_helper", "free_roster", "agy_rotate_command"}
     if not isinstance(data, dict) or data.keys() - keys:
         raise ValueError("xcheck local configuration has unknown keys or is not an object")
     for key in keys - {"default_lanes"}:
@@ -42,7 +42,7 @@ def load() -> dict:
 
 def apply() -> None:
     """Apply only explicit overrides; absent config keeps the existing setup."""
-    from . import adapters, herdr
+    from . import adapters, capacity, herdr
 
     data = load()
     if "default_lanes" in data:
@@ -55,6 +55,8 @@ def apply() -> None:
         adapters.DEFAULT_ROSTER = lanes
     if "caller_context_helper" in data:
         herdr.CONTEXT_HELPER = data["caller_context_helper"]
+    if "agy_rotate_command" in data:
+        capacity.AGY_ROTATE = data["agy_rotate_command"]
     if "free_roster" in data:
         adapters.FREE_ROSTER = data["free_roster"]
         adapters.OPT_IN = (adapters.Lane("devin", "swe-2-max"), *adapters.free_lanes(adapters.FREE_ROSTER))

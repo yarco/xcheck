@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test_xcheck as support
-from xcheck import adapters, herdr, install, settings
+from xcheck import adapters, capacity, herdr, install, settings
 
 
 class LocalConfiguration(unittest.TestCase):
@@ -28,7 +28,7 @@ class LocalConfiguration(unittest.TestCase):
             env = {**os.environ, "XCHECK_CONFIG": str(cfg), "XCHECK_ROOT": str(Path(tmp) / "runs")}
             cases = (None, "private-secret-not-json", '{"credential":"private-secret"}',
                      '{"default_lanes":[]}', '{"free_roster":"relative.json"}',
-                     '{"caller_context_helper":null}',
+                     '{"caller_context_helper":null}', '{"agy_rotate_command":"private-secret-relative"}',
                      '{"default_lanes":["private-secret"]}',
                      '{"default_lanes":["codex:x:high","codex:x:high"]}')
             for contents in cases:
@@ -51,12 +51,15 @@ class LocalConfiguration(unittest.TestCase):
             helper.chmod(0o755)
             cfg = root / "config.json"
             cfg.write_text(json.dumps({"default_lanes": ["codex:example:high"],
-                                       "caller_context_helper": str(helper), "free_roster": str(roster)}))
+                                       "caller_context_helper": str(helper), "free_roster": str(roster),
+                                       "agy_rotate_command": str(root / "rotator")}))
             with patch.dict(os.environ, {"XCHECK_CONFIG": str(cfg)}), \
                  patch.multiple(adapters, DEFAULT_ROSTER=adapters.DEFAULT_ROSTER,
                                 OPT_IN=adapters.OPT_IN, FREE_ROSTER=adapters.FREE_ROSTER), \
-                 patch.object(herdr, "CONTEXT_HELPER", herdr.CONTEXT_HELPER):
+                 patch.object(herdr, "CONTEXT_HELPER", herdr.CONTEXT_HELPER), \
+                 patch.object(capacity, "AGY_ROTATE", None):
                 settings.apply()
+                self.assertEqual(capacity.AGY_ROTATE, root / "rotator")
                 self.assertEqual(adapters.DEFAULT_ROSTER, (adapters.Lane("codex", "example", "high"),))
                 self.assertIn(adapters.Lane("opencode", "demo-free"), adapters.OPT_IN)
                 self.assertEqual(herdr.resolve_caller(), (None, "caller-context state unconfirmed"))

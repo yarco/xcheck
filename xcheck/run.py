@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import adapters, herdr, validate
+from . import adapters, capacity, herdr, validate
 from .files import ROOT, Run, atomic_write, end_group, hold_life, is_alive, now, workspace
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 STILL_RUNNING = 3
@@ -133,6 +133,14 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     atomic_write(base / "supervisor.pid", str(os.getpid()))  # for operators; liveness is the lock
     _alive = hold_life(base / "supervisor.alive")
     print(f"xcheck: {len(run.lanes)} lanes ({mode}) → {', '.join(run.lanes)}", flush=True)
+    if run.capacity:
+        # Before any lane holds a pool: an Agy account short on quota is rotated to one that covers
+        # every selected Agy lane. Each lane still reads its own pool at admission.
+        rotation = capacity.rotate_agy(run.lanes.values(), set(run.forced))
+        if rotation:
+            atomic_write(base / "agy-rotation.json", json.dumps(rotation, indent=2))
+            print(f"xcheck: Agy below reserve ({'; '.join(rotation['trigger'].values())}); rotator exit "
+                  f"{rotation['exit']}: {(rotation['output'] or ['no output'])[-1]}", flush=True)
 
     children: dict[str, subprocess.Popen] = {}
     if mode == "headless":
