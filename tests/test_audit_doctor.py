@@ -9,7 +9,9 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-from xcheck import adapters, install, models, run
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_xcheck as support  # noqa: E402
+from xcheck import adapters, install, lane, models, run
 
 class ExactListedModels(unittest.TestCase):
 
@@ -22,7 +24,7 @@ class ExactListedModels(unittest.TestCase):
             if tuple(cmd) in helps:
                 return subprocess.CompletedProcess(cmd, 0, helps[tuple(cmd)], '')
             if cmd[-2:] == ['version', '--json']:
-                return subprocess.CompletedProcess(cmd, 0, json.dumps({'currentVersion': adapters.GROK_VERIFIED_VERSION}), '')
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({'currentVersion': '9.9.9-test'}), '')
             if cmd[:2] == ['grok', 'models']:
                 return subprocess.CompletedProcess(cmd, 1 if failed_listing else 0, grok_text, '')
             if cmd[:2] == ['devin', 'models']:
@@ -31,7 +33,16 @@ class ExactListedModels(unittest.TestCase):
                 data = [{"providerID": p.model.split("/", 1)[0], "id": p.model.split("/", 1)[1]} for p in adapters.OPT_IN if p.kind == "opencode"]
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": data}), "")
             return subprocess.CompletedProcess(cmd, 0, '\n'.join((p.model for p in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))), '')
-        with patch.object(install, 'source_root', return_value=REPO), patch.object(install, 'installed_digest', return_value=install.digest(REPO)), patch.object(run.subprocess, 'run', side_effect=fake), patch.object(adapters, 'unavailable', return_value=None), patch.object(models, 'discover', return_value={"providers": {}, "models": []}), patch.object(run, 'agy_acp_models', return_value=['gemini-3.8-flash', 'gemini-4-argon']), redirect_stdout(io.StringIO()) as output:
+        with tempfile.TemporaryDirectory() as probe_tmp, \
+                patch.object(install, 'source_root', return_value=REPO), \
+                patch.object(install, 'installed_digest', return_value=install.digest(REPO)), \
+                patch.object(run.subprocess, 'run', side_effect=fake), \
+                patch.object(adapters, 'unavailable', return_value=None), \
+                patch.object(lane, '_grok_probe_session',
+                             return_value=support.grok_probe_ok(Path(probe_tmp))), \
+                patch.object(models, 'discover', return_value={"providers": {}, "models": []}), \
+                patch.object(run, 'agy_acp_models', return_value=['gemini-3.8-flash', 'gemini-4-argon']), \
+                redirect_stdout(io.StringIO()) as output:
             code = run.doctor()
         return (code, output.getvalue())
 

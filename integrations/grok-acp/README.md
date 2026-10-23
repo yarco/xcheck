@@ -193,27 +193,45 @@ resolves which side sent it, or until acpx exits without completion. Grok
 additionally surfaces `_x.ai/mcp/server_status` notifications as
 `mcp_startup` diagnostics when a server is not `ready`.
 
-`xcheck doctor` keeps the native startup probe —
-`grok --sandbox off --cwd <tmp> version --json` (zero inference, sandbox
-applied) — plus flag drift checks for `grok agent --help` and `acpx`.
+`xcheck doctor` runs the same admission as a lane: the native startup probe
+— `grok --sandbox off --cwd <tmp> version --json` (zero inference, sandbox
+applied) — then the resolved-toolset contract below, plus flag drift checks
+for `grok agent --help` and `acpx`.
 
 ## Maintenance
 
-- **Version admission gate**: `GROK_VERIFIED_VERSION` in `adapters.py` pins
-  the native version this adapter was verified against (currently
-  `1.0.62 (1474f9cbdd91)`). `run_lane` probes `grok --sandbox off --cwd <work> version
-  --json` (zero inference, same call doctor makes) before spawning and
-  **skips** the lane with `native-unverified: grok <actual> is not the
-  adapter-verified <pin>…` on any mismatch — the comparison is an exact
-  string compare on the parsed JSON value, not a substring match. This
-  exists because a renamed tool id makes the profile allowlist fail open
-  to the full toolset, and nothing else would notice. **After any Grok
-  upgrade**: run the zero-turn `tools allowlist applied` probe on the new
-  version, re-verify the ACP event shape and config keys, then bump
-  `GROK_VERIFIED_VERSION` deliberately.
+- **Behavior admission gate**: `lane.grok_admission_check` replaces the old
+  `GROK_VERIFIED_VERSION` pin — Grok revs too fast for an exact-version gate.
+  Before a lane spends anything, the adapter extracts the inner `grok agent
+  … stdio` argv from the real `--agent` payload (`adapters.grok_probe_command`),
+  repoints `--debug-file` at a sibling `grok-admission.log`, and drives the
+  process through ACP `initialize` + `session/new` — **never
+  `session/prompt`**, so the check is zero-inference. It then asserts the
+  contract the run actually depends on, from the profile, the session/new
+  result and the debug log (`lane._grok_contract`):
+  - the profile's declared `tools:` list is exactly a review toolset
+    (`GROK_REVIEW_TOOLS`, plus `GROK_WEB_TOOLS` only when web is enabled);
+  - the debug log's `tools allowlist applied agent=xcheck-review` resolves
+    to the same set — a renamed tool id makes the allowlist fail OPEN to
+    the full toolset, so resolved must equal declared, not just contain it;
+  - `total_hooks=0`;
+  - every `config_names` MCP entry is inside `GROK_MCP_ALLOWED`;
+  - the selected model equals the lane's `-m` pin and
+    `reasoning_effort` equals its `--reasoning-effort` pin.
+  Any drift skips the lane with `native-unverified: grok <version> contract:
+  <what drifted>` — the report names the drift, never the version. An
+  unobservable contract (no allowlist line, no hook count, no MCP line in
+  the log) fails closed rather than admitting an unknown toolset. Routine
+  upgrades pass automatically while the behavior holds; the version string
+  is diagnostic only.
 - If Grok renames tool ids, `_grok_profile`'s allowlist fails open — the
-  profile test pins the exact list; re-probe `tools allowlist applied` in
-  `grok-agent.log` after any Grok upgrade.
+  profile test pins the exact list, and the admission gate catches the
+  drift per-lane anyway. If Grok stops logging `tools allowlist applied`
+  or `total_hooks`, the gate fails closed with an "unobservable" diagnosis
+  — re-verify against the new build before relaxing the check.
+- If the `grok agent … stdio` command shape inside `--agent` changes,
+  `grok_probe_command` returns `None` and the lane reports
+  `native-unverified`; update the extraction and re-validate.
 - If acpx gains a session-metadata feature, nothing here needs it: the
   profile reaches Grok through the native `--agent-profile` flag inside the
   `--agent` command.

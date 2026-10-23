@@ -10,6 +10,7 @@ see `review_turn` (ACP) and `native_turn` for the modes.
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -229,6 +230,35 @@ ERRORS = {"opencode": UPSTREAM_LIMIT, "codex": "usage limit reached", "claude": 
           "grok": "HTTP 402 Grok Build usage balance exhausted"}
 
 
+def grok_agent_log():
+    """What a real `grok agent` build records at session/new: the resolved
+    allowlist, the hook count and the configured MCP set — the lane
+    admission contract reads exactly these lines from --debug-file."""
+    if "--debug-file" not in argv:
+        return
+    declared = []
+    if "--agent-profile" in argv:
+        profile = Path(argv[argv.index("--agent-profile") + 1])
+        if profile.is_file():
+            match = re.search(r"(?m)^tools: \[([^\]]*)\]", profile.read_text())
+            declared = [t.strip() for t in match.group(1).split(",")] if match else []
+    override = os.environ.get("FAKE_GROK_RESOLVED_TOOLS")
+    tools = json.loads(override) if override else declared
+    config = Path(os.environ.get("GROK_HOME") or "/nonexistent") / "config.toml"
+    names = os.environ.get("FAKE_GROK_MCP")
+    servers = (json.loads(names) if names else
+               [n.strip('"') for n in
+                re.findall(r'(?m)^\[mcp_servers\.([^\]]+)\]',
+                           config.read_text() if config.is_file() else "")])
+    with Path(argv[argv.index("--debug-file") + 1]).open("a") as f:
+        f.write(f"INFO xai_grok_hooks::discovery: hooks: discovery complete "
+                f"total_hooks={os.environ.get('FAKE_GROK_HOOKS', '0')} session_start=0\n")
+        f.write(f"DEBUG xai_grok_agent::builder: tools allowlist applied agent=xcheck-review "
+                f"allowed={json.dumps(tools)}\n")
+        f.write(f"INFO xai_grok_shell::session::acp_session::mcp: ensure_mcp_tools_initialized: "
+                f"starting MCP init config_count={len(servers)} config_names={json.dumps(servers)}\n")
+
+
 def review_turn(pid, server):
     """One session/prompt. Modes:
     ok | invalid | declined | echo402 | echo-upstream-limit | mcp-fail   answer text variants
@@ -316,11 +346,23 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
                 emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "configOptions": [
                     {"id": "model", "type": "select", "currentValue": offered[0], "options": [{"value": m} for m in offered]}]}})
                 continue
-            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "models": {
+            result = {"sessionId": "s", "models": {
                 "currentModelId": selected if kind in ("devin", "grok") else "gemini-3.8-flash-high", "availableModels":
                     [{"modelId": selected}] if kind in ("devin", "grok") else [] if mode == "models-unavailable" else [
                     {"modelId": "gemini-3.8-flash-high"}, {"modelId": "gemini-3.8-flash-medium"},
-                    {"modelId": "gemini-3.8-flash-low"}]}}})
+                    {"modelId": "gemini-3.8-flash-low"}]}}
+            if kind == "grok":
+                effort = argv[argv.index("--reasoning-effort") + 1] if "--reasoning-effort" in argv else ""
+                current = os.environ.get("FAKE_GROK_MODEL", selected)
+                effort = os.environ.get("FAKE_GROK_EFFORT", effort)
+                result["models"]["currentModelId"] = current
+                result["configOptions"] = [
+                    {"id": "model", "type": "select", "currentValue": current,
+                     "options": [{"value": current}]},
+                    {"id": "reasoning_effort", "type": "select", "currentValue": effort,
+                     "options": [{"value": effort}]}]
+                grok_agent_log()
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": result})
         elif msg.get("method") == "session/set_config_option":
             configured[msg["params"]["configId"]] = msg["params"]["value"]
             emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"configOptions": []}})

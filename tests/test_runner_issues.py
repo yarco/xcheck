@@ -76,35 +76,75 @@ class ReportStartup(unittest.TestCase):
             with self.assertRaises(lane._Stop):
                 lane.grok_startup_check(Path('/tmp'))
 
-    def admission(self, result):
-        with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(lane.subprocess, 'run', return_value=result):
-            return lane.grok_admission_check(Path(tmp))
+    def admission(self, result, log=None, session=None, probe_problem=None):
+        """result: the `version --json` CompletedProcess. The session probe is
+        canned: the healthy contract unless log/session/probe_problem drift it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root, work = Path(tmp), Path(tmp) / "work"
+            work.mkdir()
+            spec = adapters._grok_launch(adapters.Lane("grok", "grok-4.7", "xhigh"), work,
+                                         root / "message.txt", root / "harness.log", True)
+            probe = ((None, None, None, probe_problem) if probe_problem else
+                     support.grok_probe_ok(root, log=log, session=session))
+            with patch.object(lane.subprocess, 'run', return_value=result), \
+                    patch.object(lane, '_grok_probe_session', return_value=probe):
+                return lane.grok_admission_check(work, spec)
 
-    def test_admission_accepts_only_the_verified_native_version(self):
-        stdout = json.dumps({"currentVersion": adapters.GROK_VERIFIED_VERSION, "channel": "stable"})
-        problem = self.admission(subprocess.CompletedProcess([], 0, stdout, ''))
-        self.assertIsNone(problem)
-
-    def test_admission_skips_an_unverified_native_version_loudly(self):
-        problem = self.admission(subprocess.CompletedProcess([], 0, '{"currentVersion":"1.0.51"}', ''))
-        self.assertIn('native-unverified', problem)
-        self.assertIn('1.0.51', problem)
-        self.assertIn(adapters.GROK_VERIFIED_VERSION, problem)
-        self.assertIn('GROK_VERIFIED_VERSION', problem)
-
-    def test_admission_compares_the_parsed_version_not_a_substring(self):
-        for version in ('1.0.500', '1.0.50-beta', '10.0.50', 'v1.0.50'):
+    def test_admission_accepts_any_native_version_when_the_contract_holds(self):
+        for version in ('1.0.51', '9.9.9', '1.0.67 (2fe064390d07)'):
             with self.subTest(version=version):
-                problem = self.admission(subprocess.CompletedProcess([], 0, f'{{"currentVersion":"{version}"}}', ''))
+                stdout = json.dumps({"currentVersion": version, "channel": "stable"})
+                self.assertIsNone(self.admission(subprocess.CompletedProcess([], 0, stdout, '')))
+
+    def test_admission_names_a_renamed_tools_fail_open_not_a_version(self):
+        # The allowlist fails OPEN on a renamed id: the resolved set grows past
+        # the declared profile, so the drift must be named in the diagnosis.
+        log = support.grok_probe_log(tools=("read_file", "grep", "list_dir", "run_terminal_cmd",
+                                            "web_search", "web_fetch", "edit_file", "write_file"))
+        problem = self.admission(subprocess.CompletedProcess([], 0, '{"currentVersion":"9.9.9"}', ''),
+                                 log=log)
+        self.assertIn('native-unverified', problem)
+        self.assertIn('fails the xcheck-review allowlist', problem)
+        self.assertIn('edit_file', problem)
+
+    def test_admission_fails_closed_when_the_contract_is_unobservable(self):
+        problem = self.admission(subprocess.CompletedProcess([], 0, '{"currentVersion":"9.9.9"}', ''),
+                                 log='')
+        self.assertIn('native-unverified', problem)
+        self.assertIn('no resolved toolset', problem)
+        self.assertIn('hook count unobservable', problem)
+        self.assertIn('MCP set is unobservable', problem)
+
+    def test_admission_names_hooks_mcp_and_selection_drift(self):
+        for log, session, expect in (
+                (support.grok_probe_log(hooks=2), None, '2 hooks loaded'),
+                (support.grok_probe_log(mcps='["qmd", "keenable-free"]'), None,
+                 'outside the keyless review set'),
+                (None, {**support.GROK_PROBE_SESSION,
+                        "models": {"currentModelId": "grok-4.6", "availableModels": []}},
+                 'not the pinned grok-4.7'),
+                (None, {**support.GROK_PROBE_SESSION,
+                        "configOptions": [{"id": "model", "currentValue": "grok-4.7"},
+                                          {"id": "reasoning_effort", "currentValue": "low"}]},
+                 'not the pinned xhigh')):
+            with self.subTest(expect=expect):
+                problem = self.admission(
+                    subprocess.CompletedProcess([], 0, '{"currentVersion":"9.9.9"}', ''),
+                    log=log, session=session)
                 self.assertIn('native-unverified', problem)
+                self.assertIn(expect, problem)
+
+    def test_admission_surfaces_a_probe_refusal(self):
+        problem = self.admission(subprocess.CompletedProcess([], 0, '{"currentVersion":"9.9.9"}', ''),
+                                 probe_problem='native-unverified: session/new refused: {"code":-32601}')
+        self.assertIn('session/new refused', problem)
 
     def test_admission_still_blocks_on_probe_failure(self):
         problem = self.admission(subprocess.CompletedProcess([], 1, '', 'boom'))
         self.assertIn('startup-unavailable', problem)
 
     def doctor(self, probe, listing_failure=False, suffix=False, acp_models=None, report=None,
-               fetch=None):
+               fetch=None, session_probe=None):
         helps = {tuple(cmd): (support.FIX / 'cli-help' / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
         self.calls = []
@@ -126,10 +166,13 @@ class ReportStartup(unittest.TestCase):
         # `report` stubs the discovery result entirely.
         discovery_or_fetch = (patch.object(models, 'discover', **discovery) if fetch is None
                               else patch.object(models, 'fetch', side_effect=fetch))
-        with patch.object(install, 'source_root', return_value=support.REPO), \
+        with tempfile.TemporaryDirectory() as probe_tmp, \
+                patch.object(install, 'source_root', return_value=support.REPO), \
                 patch.object(install, 'installed_digest', return_value=install.digest(support.REPO)), \
                 patch.object(run.subprocess, 'run', side_effect=fake_run), \
                 patch.object(adapters, 'unavailable', return_value=None), \
+                patch.object(lane, '_grok_probe_session',
+                             return_value=session_probe or support.grok_probe_ok(Path(probe_tmp))), \
                 discovery_or_fetch, \
                 patch.object(run, 'agy_acp_models', return_value=acp_models if acp_models is not None else
                              [peer.model for peer in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN) if peer.kind == 'agy']), \
@@ -138,7 +181,7 @@ class ReportStartup(unittest.TestCase):
         return code, out.getvalue()
 
     def _version_json(self):
-        return json.dumps({"currentVersion": adapters.GROK_VERIFIED_VERSION, "channel": "stable"})
+        return json.dumps({"currentVersion": "9.9.9-test", "channel": "stable"})
 
     def test_doctor_fails_an_agy_pin_the_acp_server_does_not_advertise(self):
         code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''),
@@ -156,14 +199,16 @@ class ReportStartup(unittest.TestCase):
     def test_doctor_accepts_native_startup_and_current_pins(self):
         code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''))
         self.assertEqual(code, 0, text)
-        self.assertIn('startup with --sandbox off (zero inference)', text)
+        self.assertIn('--sandbox off startup and resolved-toolset contract', text)
         self.assertNotIn('qwen3.8-27b:free', text)
 
-    def test_doctor_rejects_an_unverified_native_version(self):
-        code, text = self.doctor(subprocess.CompletedProcess([], 0, '{"currentVersion":"9.9.9"}', ''))
+    def test_doctor_names_the_contract_drift_not_the_version(self):
+        code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''),
+                                 session_probe=(None, None, None,
+                                                'native-unverified: session/new refused: {}'))
         self.assertEqual(code, 1, text)
         self.assertIn('native-unverified', text)
-        self.assertIn('9.9.9', text)
+        self.assertIn('session/new refused', text)
 
     def test_doctor_rejects_failed_listing_and_model_prefix_collision(self):
         for kwargs in ({'listing_failure': True}, {'suffix': True}):

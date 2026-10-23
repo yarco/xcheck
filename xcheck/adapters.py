@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -395,12 +396,13 @@ GROK_REQUIREMENTS = GROK_DIR / "requirements.toml"
 GROK_MCP_ALLOWED = ("qmd", "semble", "deepwiki")
 GROK_REVIEW_TOOLS = ("read_file", "grep", "list_dir", "run_terminal_cmd")
 GROK_WEB_TOOLS = ("web_search", "web_fetch")
-# The native version this adapter's tool ids, config keys and ACP shape were
-# verified against (see integrations/grok-acp/README.md). An unknown tool id
-# makes the profile allowlist fail OPEN to the full toolset, so lanes refuse
-# to start on any other version until it is revalidated — a string compare
-# on the parsed `version --json` value, never a substring match.
-GROK_VERIFIED_VERSION = "1.0.62 (1474f9cbdd91)"
+# Admission is a behavior check, not a version pin: lane.grok_admission_check
+# drives the lane's own `grok agent … stdio` through initialize + session/new
+# (zero inference) and asserts the resolved toolset — an unknown tool id makes
+# the profile allowlist fail OPEN to the full toolset — plus zero hooks, only
+# keyless MCP servers and the pinned model/effort. Routine upgrades pass while
+# that contract holds; a break reports the drift by name (see
+# integrations/grok-acp/README.md).
 GROK_ENV = {
     # A subscription session, never a paid API-key fallback (XAI_API_KEY is
     # scrubbed anyway; this refuses to use it if one ever leaked in).
@@ -579,6 +581,25 @@ def _grok_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) ->
     return Launch(argv, None, env_set={**GROK_ENV, "GROK_HOME": str(home),
                                        "GROK_AUTH_PATH": str(GROK_AUTH_FILE), "XCHECK_ROOT": str(ROOT)},
                   kind="grok")
+
+
+GROK_PROBE_LOG = "grok-admission.log"
+
+
+def grok_probe_command(spec: Launch) -> tuple[list[str], Path] | None:
+    """The lane's inner `grok agent … stdio` command for the zero-inference
+    admission probe, its --debug-file repointed to the probe log so the real
+    run's grok-agent.log stays its own. None when the --agent payload no
+    longer carries that shape — itself a contract change to revalidate."""
+    try:
+        agent = shlex.split(spec.argv[spec.argv.index("--agent") + 1])
+        agent = agent[agent.index("--") + 1:]
+        dbg = agent.index("--debug-file") + 1
+        probe_log = Path(agent[dbg]).with_name(GROK_PROBE_LOG)
+        agent[dbg] = str(probe_log)
+        return agent, probe_log
+    except (ValueError, IndexError):
+        return None
 
 
 # Native accept-edits keeps the app path's workspace-edit permissions. Rules
@@ -771,7 +792,8 @@ ACPX_FORBIDDEN = ("timeout", "auth", "authPolicy", "mcpServers", "agents", "defa
 # Review MCP servers the ACP server cannot start: fff rejects the `server/discover`
 # probe the server sends before `initialize`, which fails the whole turn; qmd
 # over HTTP never finishes connecting, and the server waits for every server.
-AGY_MCP_EXCLUDED = {"fff", "qmd"}
+# Keenable's startup 429 also aborts the whole turn; keep You Free for retrieval.
+AGY_MCP_EXCLUDED = {"fff", "qmd", "keenable-free"}
 AGY_LANE_ENV = {"TMPDIR", "UV_CACHE_DIR", "UV_TOOL_DIR"}  # set by the lane; never a server's own
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 

@@ -300,6 +300,15 @@ class Lanes(unittest.TestCase):
         servers = json.loads((home / "config" / "mcp_config.json").read_text())["mcpServers"]
         self.assertEqual(servers["semble"]["env"], {"KEEP": "1"})
 
+    def test_keenable_startup_throttling_cannot_abort_an_agy_review(self):
+        review = {name: {"type": "http", "url": url}
+                  for name, url in adapters.REVIEW_FREE_MCP.items()}
+        with patch.object(adapters, "_claude_review_servers", return_value=review):
+            home = adapters._agy_home(self.root / "home", web=True)
+        servers = json.loads((home / "config" / "mcp_config.json").read_text())["mcpServers"]
+        self.assertNotIn("keenable-free", servers)
+        self.assertEqual(servers["you-free"], {"url": adapters.REVIEW_FREE_MCP["you-free"]})
+
     def test_native_failures_end_the_lane_with_their_reason(self):
         for mode, status, reason in (("error", "failed", "Individual quota reached"),
                                      ("mcp-fail", "failed", "The MCP server 'semble' failed to initialize"),

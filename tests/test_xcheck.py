@@ -39,6 +39,37 @@ def read_fixture(kind: str, name: str) -> adapters.Reader:
     return r
 
 
+GROK_PROBE_SESSION = {"models": {"currentModelId": "grok-4.7",
+                                 "availableModels": [{"modelId": "grok-4.7"}]},
+                      "configOptions": [{"id": "model", "currentValue": "grok-4.7"},
+                                        {"id": "reasoning_effort", "currentValue": "xhigh"}]}
+
+
+def grok_probe_log(tools=("read_file", "grep", "list_dir", "run_terminal_cmd",
+                          "web_search", "web_fetch"), hooks=0,
+                   mcps='["deepwiki", "qmd", "semble"]') -> str:
+    """The debug-log lines a healthy `grok agent` build records at session/new."""
+    return ("INFO xai_grok_hooks::discovery: hooks: discovery complete "
+            f"total_hooks={hooks} session_start=0 pre_tool=0\n"
+            "DEBUG xai_grok_agent::builder: tools allowlist applied agent=xcheck-review "
+            f"allowed={json.dumps(list(tools))}\n"
+            "INFO xai_grok_shell::session::acp_session::mcp: starting MCP init "
+            f"config_count=3 config_names={mcps}\n")
+
+
+def grok_probe_ok(root: Path, log=None, session=None) -> tuple:
+    """A canned _grok_probe_session return: a real spec's argv, the session/new
+    result and a probe log. Defaults are the healthy contract."""
+    work = root / "grok-probe" / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    spec = adapters._grok_launch(Lane("grok", "grok-4.7", "xhigh"), work,
+                                 root / "grok-probe" / "message.txt",
+                                 root / "grok-probe" / "harness.log", True)
+    argv, log_path = adapters.grok_probe_command(spec)
+    log_path.write_text(log if log is not None else grok_probe_log())
+    return argv, session if session is not None else GROK_PROBE_SESSION, log_path, None
+
+
 class LaneNames(unittest.TestCase):
     def test_provenance_names(self):
         self.assertEqual(Lane("codex", "gpt-6.1-sol", "high").name, "codex-gpt-6.1-sol-high")
@@ -1249,7 +1280,7 @@ class Installation(unittest.TestCase):
         self.assertIn("FAIL opencode acp: help command exited 1", output.getvalue())
 
     def test_doctor_detects_stale_installed_copy_from_captured_help(self):
-        from xcheck import install, models, run
+        from xcheck import install, lane, models, run
         helps = {tuple(cmd): (FIX / "cli-help" / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
         listed = "\n".join(l.model for l in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))
@@ -1258,36 +1289,45 @@ class Installation(unittest.TestCase):
             if tuple(cmd) in helps:
                 return subprocess.CompletedProcess(cmd, 0, helps[tuple(cmd)], "")
             if cmd[-2:] == ["version", "--json"]:
-                return subprocess.CompletedProcess(cmd, 0, json.dumps({"currentVersion": adapters.GROK_VERIFIED_VERSION}), "")
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"currentVersion": "9.9.9-test"}), "")
             if cmd[:2] == ["opencode", "api"]:
                 data = [{"providerID": m.split("/", 1)[0], "id": m.split("/", 1)[1]} for m in listed.splitlines() if "/" in m]
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": data}), "")
             return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), listed), "")
 
-        with patch.object(install, "source_root", return_value=REPO), \
+        with tempfile.TemporaryDirectory() as probe_tmp, \
+             patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value="stale"), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
+             patch.object(lane, "_grok_probe_session",
+                          return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(run.doctor(), 1)
         self.assertIn("FAIL installed copy stale != source", output.getvalue())
 
-        with patch.object(install, "source_root", return_value=REPO), \
+        with tempfile.TemporaryDirectory() as probe_tmp, \
+             patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
+             patch.object(lane, "_grok_probe_session",
+                          return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(run.doctor(), 0)
 
         helps[tuple(adapters.HELP_COMMANDS["grok"][0])] = helps[tuple(adapters.HELP_COMMANDS["grok"][0])].replace("--sandbox", "")
-        with patch.object(install, "source_root", return_value=REPO), \
+        with tempfile.TemporaryDirectory() as probe_tmp, \
+             patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
+             patch.object(lane, "_grok_probe_session",
+                          return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()) as output:
@@ -1537,16 +1577,29 @@ class EndToEnd(unittest.TestCase):
                 self.assertFalse((base / ".launched").exists())
                 self.assertFalse((base / "lanes").exists())
 
-    def test_an_unverified_native_version_skips_the_grok_lane(self):
+    def test_a_newer_native_version_runs_the_grok_lane(self):
+        # The version is diagnostic, not a gate: an upgrade passes while the
+        # resolved-toolset contract holds (fake writes its healthy markers).
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
                         "--skip-capacity", "--lanes", "grok:grok-4.7:xhigh",
                         env_extra={"FAKE_GROK_VERSION": "1.0.99"})
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
+        self.assertEqual(row["status"], "done", row)
+
+    def test_a_renamed_tool_fails_open_and_skips_the_grok_lane(self):
+        # A renamed tool id makes Grok's allowlist fail OPEN to the full
+        # toolset: the resolved set grows past the profile and the lane skips.
+        drift = ["read_file", "grep", "list_dir", "run_terminal_cmd",
+                 "web_search", "web_fetch", "edit_file", "write_file"]
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
+                        "--skip-capacity", "--lanes", "grok:grok-4.7:xhigh",
+                        env_extra={"FAKE_GROK_RESOLVED_TOOLS": json.dumps(drift)})
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "skipped", row)
         self.assertIn("native-unverified", row["reason"])
-        self.assertIn("1.0.99", row["reason"])
-        self.assertIn(adapters.GROK_VERIFIED_VERSION, row["reason"])
+        self.assertIn("edit_file", row["reason"])
 
     def test_a_zai_lane_without_its_key_is_skipped_by_name_before_spending(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",

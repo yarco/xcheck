@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import selectors
 import signal
 import subprocess
@@ -118,18 +119,175 @@ def grok_startup_check(work: Path) -> str | None:
     return _grok_version_probe(work)[1]
 
 
-def grok_admission_check(work: Path) -> str | None:
-    """Zero-inference admission guard: only the adapter-verified native
-    version may launch a Grok lane. Any other version is skipped, loudly —
-    the tool-id allowlist fails open on rename, so an upgraded native could
-    otherwise run the review with the full toolset."""
+GROK_PROBE_TIMEOUT = 45  # initialize + session/new, MCP handshakes included
+
+
+def _grok_agent_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
+    """(model, effort, profile path) off the probe's `grok agent` command."""
+    def flag(name: str) -> str | None:
+        return argv[argv.index(name) + 1] if name in argv else None
+    return flag("-m"), flag("--reasoning-effort"), flag("--agent-profile")
+
+
+def _grok_probe_session(work: Path, spec: adapters.Launch) -> tuple[list[str] | None, dict | None, Path | None, str | None]:
+    """Drive initialize + session/new on the lane's own `grok agent … stdio`
+    — never session/prompt, so the probe spends zero inference. Returns
+    (agent argv, session/new result, probe log path, problem)."""
+    command = adapters.grok_probe_command(spec)
+    if command is None:
+        return None, None, None, ("native-unverified: the --agent payload no longer "
+                                  "carries `grok agent … stdio`; revalidate the adapter")
+    argv, log_path = command
+    try:
+        err = log_path.with_suffix(".stderr").open("w")
+    except OSError as exc:
+        return argv, None, log_path, f"startup-unavailable: probe log: {exc}"
+    try:
+        proc = subprocess.Popen(argv, cwd=work, env=lane_env(spec, work),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=err, text=True, start_new_session=True, bufsize=1)
+    except OSError as exc:
+        err.close()
+        return argv, None, log_path, (f"startup-unavailable: Grok contract probe: {exc}; "
+                                      "repair startup and recheck xcheck doctor")
+    try:
+        sel = selectors.DefaultSelector()
+        sel.register(proc.stdout, selectors.EVENT_READ)
+
+        def send(obj: dict):
+            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": 1, "clientCapabilities": {},
+                         "clientInfo": {"name": "xcheck-admission", "version": "1"}}})
+        deadline = time.monotonic() + GROK_PROBE_TIMEOUT
+        while proc.poll() is None and time.monotonic() < deadline:
+            for key, _ in sel.select(0.3):
+                line = key.fileobj.readline()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                try:
+                    if msg.get("method") and "id" in msg:
+                        # A request of us (e.g. a permission): refuse like acpx
+                        # does for anything it does not handle.
+                        send({"jsonrpc": "2.0", "id": msg["id"],
+                              "error": {"code": -32601, "message": "Method not found"}})
+                    elif msg.get("id") == 1 and "result" in msg:
+                        send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                              "params": {"cwd": str(work), "mcpServers": []}})
+                    elif msg.get("id") == 2:
+                        if "result" in msg and isinstance(msg["result"], dict):
+                            return argv, msg["result"], log_path, None
+                        return argv, None, log_path, (
+                            f"native-unverified: session/new refused: "
+                            f"{json.dumps(msg.get('error'))[:400]}")
+                except OSError:  # stdin broke: the agent is gone
+                    return argv, None, log_path, "startup-unavailable: Grok contract probe disconnected"
+        if proc.poll() is None:
+            return argv, None, log_path, (f"native-unverified: no session/new result "
+                                          f"within {GROK_PROBE_TIMEOUT}s")
+        return argv, None, log_path, (f"startup-unavailable: Grok agent exited "
+                                      f"{proc.returncode} before session/new")
+    finally:
+        sel.close()
+        end_group(proc.pid)
+        proc.wait()
+        err.close()
+
+
+def _grok_contract(argv: list[str], session: dict, log_path: Path | None) -> str | None:
+    """The admission contract observed at session/new. Each drift is named —
+    a renamed tool id fails the profile allowlist OPEN to the full toolset,
+    so the resolved set must equal the declared one exactly; an unobservable
+    contract fails closed."""
+    problems = []
+    model, effort, profile = _grok_agent_args(argv)
+    declared = None
+    if profile:
+        try:
+            match = re.search(r"(?m)^tools: \[([^\]]*)\]",
+                              Path(profile).read_text(encoding="utf-8"))
+            if match:
+                declared = {t.strip() for t in match.group(1).split(",") if t.strip()}
+        except OSError:
+            pass
+    legal = ({*adapters.GROK_REVIEW_TOOLS},
+             {*adapters.GROK_REVIEW_TOOLS, *adapters.GROK_WEB_TOOLS})
+    if declared is None:
+        problems.append("the agent profile's tools list is unreadable")
+    elif declared not in legal:
+        problems.append(f"the declared allowlist is not a review toolset: {sorted(declared)}")
+    log = ""
+    if log_path is not None:
+        try:
+            log = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    resolved = re.findall(r"tools allowlist applied agent=xcheck-review allowed=(\[[^\]]*\])", log)
+    if not resolved:
+        problems.append("no resolved toolset in the agent log")
+    else:
+        try:
+            tools = set(json.loads(resolved[-1]))
+        except ValueError:
+            problems.append("the resolved allowlist is not a JSON list")
+        else:
+            if declared is not None and tools != declared:
+                problems.append(
+                    "resolved toolset fails the xcheck-review allowlist "
+                    f"(extra {sorted(tools - declared)}, missing {sorted(declared - tools)})")
+    hooks = re.findall(r"total_hooks=(\d+)", log)
+    if not hooks:
+        problems.append("hook count unobservable in the agent log")
+    elif int(hooks[-1]) != 0:
+        problems.append(f"{hooks[-1]} hooks loaded")
+    mcps = re.findall(r"config_names=(\[[^\]]*\])", log)
+    if not mcps:
+        problems.append("the configured MCP set is unobservable")
+    else:
+        try:
+            outside = sorted(set(json.loads(mcps[-1])) - set(adapters.GROK_MCP_ALLOWED))
+        except ValueError:
+            problems.append("the configured MCP set is not a JSON list")
+        else:
+            if outside:
+                problems.append(f"MCP servers outside the keyless review set: {outside}")
+    options = {o.get("id"): o.get("currentValue")
+               for o in session.get("configOptions") or [] if isinstance(o, dict)}
+    current = (session.get("models") or {}).get("currentModelId") or options.get("model")
+    if model is None:
+        problems.append("the launch carries no -m pin")
+    elif current != model:
+        problems.append(f"session selects {current or 'nothing'}, not the pinned {model}")
+    if effort is None:
+        problems.append("the launch carries no --reasoning-effort pin")
+    elif options.get("reasoning_effort") != effort:
+        problems.append(f"session effort is {options.get('reasoning_effort')}, not the pinned {effort}")
+    return "; ".join(problems) or None
+
+
+def grok_admission_check(work: Path, spec: adapters.Launch) -> str | None:
+    """Zero-inference admission for a Grok lane: the native startup probe,
+    then the lane's own `grok agent … stdio` driven through initialize +
+    session/new (never session/prompt). The resolved toolset must equal the
+    profile's declared allowlist — an id Grok renamed fails the allowlist
+    OPEN to the full toolset — with zero hooks loaded, only keyless MCP
+    servers configured, and the pinned model/effort selected. Upgrades pass
+    while that contract holds; a break names the drift, not a version."""
     version, problem = _grok_version_probe(work)
     if problem:
         return problem
-    if version != adapters.GROK_VERIFIED_VERSION:
-        return (f"native-unverified: grok {version} is not the adapter-verified "
-                f"{adapters.GROK_VERIFIED_VERSION}; revalidate the resolved toolset and "
-                f"ACP shape on this version, then bump GROK_VERIFIED_VERSION")
+    argv, session, log_path, problem = _grok_probe_session(work, spec)
+    if problem:
+        return problem
+    contract = _grok_contract(argv, session, log_path)
+    if contract:
+        return f"native-unverified: grok {version or 'unknown'} contract: {contract}"
     return None
 
 
@@ -277,9 +435,10 @@ def _run_lane(base: Path, name: str) -> int:
             return _finish(run, name, started, "skipped", str(e), None, reader, err_path)
         env = lane_env(spec, work)
         if spec.kind == "grok":
-            # Zero-inference admission gate: an unverified native version may
-            # have renamed tool ids, and the profile allowlist fails open.
-            problem = grok_admission_check(work)
+            # Zero-inference admission gate: the resolved toolset, hooks, MCP
+            # set and pinned model/effort must match the declared contract —
+            # the profile allowlist fails open on a renamed tool id.
+            problem = grok_admission_check(work, spec)
             if problem:
                 return _finish(run, name, started, "skipped", problem, None, reader, err_path)
         status, reason, code = None, "", None

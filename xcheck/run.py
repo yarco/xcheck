@@ -529,8 +529,17 @@ def doctor() -> int:
         print(f"{'FAIL' if missing else 'ok  '} {kind}: " + (f"missing {missing}" if missing else f"{len(flags)} flags present"))
         bad += bool(missing)
     with tempfile.TemporaryDirectory(prefix="xcheck-grok-doctor-") as tmp:
-        problem = grok_admission_check(Path(tmp))
-    print(f"FAIL grok: {problem}" if problem else "ok   grok: startup with --sandbox off (zero inference)")
+        # The full admission contract on the web placement: zero inference.
+        scratch = Path(tmp)
+        work = scratch / "work"
+        work.mkdir()
+        problem = adapters.unavailable(adapters.Lane("grok", "grok-4.7", "xhigh"))
+        if problem is None:
+            spec = adapters.launch(adapters.Lane("grok", "grok-4.7", "xhigh"), work,
+                                   scratch / "message.txt", scratch / "harness.log", True)
+            problem = grok_admission_check(work, spec)
+    print(f"FAIL grok: {problem}" if problem else
+          "ok   grok: --sandbox off startup and resolved-toolset contract (zero inference)")
     bad += bool(problem)
     # These are kind-scoped readiness checks, not positions in the optional
     # local roster (which may contain one lane or a different order).
