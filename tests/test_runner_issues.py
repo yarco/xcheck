@@ -11,7 +11,9 @@ import io
 import os
 import struct
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from contextlib import redirect_stdout
@@ -141,6 +143,38 @@ class ReportStartup(unittest.TestCase):
 
     def test_admission_still_blocks_on_probe_failure(self):
         problem = self.admission(subprocess.CompletedProcess([], 1, '', 'boom'))
+        self.assertIn('startup-unavailable', problem)
+
+    def probe_session(self, script):
+        """Run _grok_probe_session against `python -c script` as the agent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            command = ([sys.executable, '-c', script], work / adapters.GROK_PROBE_LOG)
+            with patch.object(adapters, 'grok_probe_command', return_value=command), \
+                    patch.object(lane, 'lane_env', return_value=dict(os.environ)), \
+                    patch.object(lane, 'GROK_PROBE_TIMEOUT', 10):
+                started = time.monotonic()
+                result = lane._grok_probe_session(work, None)
+                return result, time.monotonic() - started
+
+    def test_probe_reads_every_line_of_one_write(self):
+        # A notification and the response in one write: the response must not
+        # wait in a read buffer that select cannot see.
+        script = (
+            'import sys, time\n'
+            'sys.stdin.readline()\n'
+            'sys.stdout.write(\'{"method":"note"}\\n{"id":1,"result":{}}\\n\'); sys.stdout.flush()\n'
+            'sys.stdin.readline()\n'
+            'sys.stdout.write(\'{"method":"session/update"}\\n{"id":2,"result":{"sessionId":"s"}}\\n\')\n'
+            'sys.stdout.flush(); time.sleep(60)\n')
+        (_, session, _, problem), elapsed = self.probe_session(script)
+        self.assertIsNone(problem)
+        self.assertEqual(session, {"sessionId": "s"})
+        self.assertLess(elapsed, 5)
+
+    def test_probe_reports_an_agent_that_exits_at_once_as_startup_unavailable(self):
+        (_, session, _, problem), _ = self.probe_session('raise SystemExit(3)')
+        self.assertIsNone(session)
         self.assertIn('startup-unavailable', problem)
 
     def doctor(self, probe, listing_failure=False, suffix=False, acp_models=None, report=None,

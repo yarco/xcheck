@@ -145,33 +145,40 @@ def _grok_probe_session(work: Path, spec: adapters.Launch) -> tuple[list[str] | 
     try:
         proc = subprocess.Popen(argv, cwd=work, env=lane_env(spec, work),
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=err, text=True, start_new_session=True, bufsize=1)
+                                stderr=err, start_new_session=True)
     except OSError as exc:
         err.close()
         return argv, None, log_path, (f"startup-unavailable: Grok contract probe: {exc}; "
                                       "repair startup and recheck xcheck doctor")
+    sel = selectors.DefaultSelector()
     try:
-        sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
 
         def send(obj: dict):
-            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.write(json.dumps(obj).encode() + b"\n")
             proc.stdin.flush()
 
         send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
               "params": {"protocolVersion": 1, "clientCapabilities": {},
                          "clientInfo": {"name": "xcheck-admission", "version": "1"}}})
         deadline = time.monotonic() + GROK_PROBE_TIMEOUT
-        while proc.poll() is None and time.monotonic() < deadline:
+        # Raw reads split into lines, as the lane loop does: a buffered
+        # readline leaves a second line of one write unseen by select.
+        pending, eof = b"", False
+        while not eof and time.monotonic() < deadline:
             for key, _ in sel.select(0.3):
-                line = key.fileobj.readline()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except ValueError:
-                    continue
-                try:
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    eof = True
+                    break
+                *lines, pending = (pending + chunk).split(b"\n")
+                for raw in lines:
+                    try:
+                        msg = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if not isinstance(msg, dict):
+                        continue
                     if msg.get("method") and "id" in msg:
                         # A request of us (e.g. a permission): refuse like acpx
                         # does for anything it does not handle.
@@ -186,13 +193,18 @@ def _grok_probe_session(work: Path, spec: adapters.Launch) -> tuple[list[str] | 
                         return argv, None, log_path, (
                             f"native-unverified: session/new refused: "
                             f"{json.dumps(msg.get('error'))[:400]}")
-                except OSError:  # stdin broke: the agent is gone
-                    return argv, None, log_path, "startup-unavailable: Grok contract probe disconnected"
-        if proc.poll() is None:
+        if not eof:
             return argv, None, log_path, (f"native-unverified: no session/new result "
                                           f"within {GROK_PROBE_TIMEOUT}s")
-        return argv, None, log_path, (f"startup-unavailable: Grok agent exited "
-                                      f"{proc.returncode} before session/new")
+        try:
+            code = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            code = None
+        return argv, None, log_path, (f"startup-unavailable: Grok agent "
+                                      f"{'closed its output' if code is None else f'exited {code}'} "
+                                      "before session/new")
+    except OSError:  # stdin broke: the agent is gone
+        return argv, None, log_path, "startup-unavailable: Grok contract probe disconnected"
     finally:
         sel.close()
         end_group(proc.pid)
