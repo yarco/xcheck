@@ -96,7 +96,9 @@ def _native_times(value):
 def _opencode_messages(run, name, session):
     """Read only a session created for this run's exact lane workspace."""
     path = run.store(name) or Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
-    with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1)) as db:
+    if run.lane(name).model.split('/', 1)[0] in ('kilo', 'anyrouter'):
+        path = run.lane_dir(name) / 'opencode.db'
+    with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
         owner = db.execute('SELECT directory, time_created FROM session_v2 WHERE id=?', (session,)).fetchone()
         if not owner or Path(owner[0]).resolve() != workspace(run.lane(name)).resolve() or owner[1] < run.epoch * 1000:
             raise ValueError('native session ownership could not be verified')
@@ -122,9 +124,9 @@ def opencode_failure(run, name):
         if f"{model.get('providerID')}/{model.get('id')}" != expected:
             return None
         error = message.get('error') or {}
-        if error.get('type') != 'provider.auth' or not isinstance(error.get('message'), str):
+        if (error.get('type') not in ('provider.auth', 'provider.quota') and error.get('status') != 429) or not isinstance(error.get('message'), str):
             return None
-        result = dict(kind='native_error', type='provider.auth', message=' '.join(error['message'].split())[:500])
+        result = dict(kind='native_error', type=error.get('type', 'provider.rate_limit'), message=' '.join(error['message'].split())[:500])
         if isinstance(error.get('status'), int) and not isinstance(error['status'], bool):
             result['status'] = error['status']
         return result

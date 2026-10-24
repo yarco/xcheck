@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin")
+NATIVE_FREE_PROVIDERS = ("kilo", "anyrouter")
 
 @dataclass(frozen=True)
 class Lane:
@@ -315,6 +316,8 @@ def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path, store: Pa
             "--config-option", "mode=build"]
     spec = Launch(argv, None, env_set={**_opencode_env(lane), "XCHECK_ROOT": str(ROOT),
                                        **({"OPENCODE_DB": str(store)} if store else {})})
+    if lane.model.split("/", 1)[0] in NATIVE_FREE_PROVIDERS:
+        spec.env_set["OPENCODE_DB"] = str(log.parent / "opencode.db")
     effort = lane.effort
     if not effort:
         # Unset, ACP selects the model's first (lowest) variant; `default`
@@ -351,6 +354,12 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
     Stored opencode auth.json covers OpenRouter; Z.ai Coding Plan needs
     ZAI_API_KEY and ZHIPU_API_KEY (stripping the latter yields a server error)."""
     import os
+    if lane.model.split("/", 1)[0] in NATIVE_FREE_PROVIDERS:
+        from .models import native_env
+        try:
+            return native_env(lane.model)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise Unavailable(f"inventory-unknown: free-provider admission failed ({_clip(str(error), 200)})") from error
     env = {}
     if "/" not in lane.model:
         return env

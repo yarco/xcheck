@@ -6,7 +6,9 @@ metadata supplies client support and Zen capabilities/release dates only.
 from __future__ import annotations
 
 import fcntl
+import getpass
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -18,12 +20,14 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .adapters import parse_lane
+from .adapters import NATIVE_FREE_PROVIDERS, parse_lane
 
 # Zen's live model list and deployed documentation. No source-branch prices.
 ZEN = "https://opencode.ai/inference/v1/models"
 ZEN_DOCS = "https://opencode.ai/v2/docs/console/models/"
 OPENROUTER = "https://openrouter.ai/api/v1/models"
+KILO = "https://api.kilo.ai/api/gateway/models"
+ANYROUTER = "https://anyrouter.dev/api/v1/models"
 SOURCES = {
     "opencode": {"format": "zen", "models_url": ZEN, "docs_url": ZEN_DOCS,
                  "auth_env": ["OPENCODE_API_KEY"]},
@@ -34,6 +38,10 @@ SOURCES = {
                  "models_url": "https://api.cerebras.ai/public/v1/models?format=openrouter",
                  "docs_url": "https://inference-docs.cerebras.ai/support/rate-limits",
                  "auth_env": ["CEREBRAS_API_KEY"]},
+    "kilo": {"format": "kilo", "models_url": KILO,
+             "docs_url": "https://kilo.ai/docs/gateway/models-and-providers", "auth_env": []},
+    "anyrouter": {"format": "anyrouter", "models_url": ANYROUTER,
+                  "docs_url": "https://docs.anyrouter.dev/features/free-tier", "auth_env": ["ANYROUTER_API_KEY"]},
 }
 
 
@@ -175,7 +183,8 @@ def zen_join(payload: dict, docs: str) -> list[dict]:
 def zen_offer(row: dict) -> dict:
     """One joined read row as an offer, before the client capability check."""
     return {"model": row["model"], "name": row["name"], "release_date": "",
-            "date_source": "", "tool_call": None, "pricing_source": ZEN_DOCS}
+            "date_source": "", "tool_call": None, "pricing_source": ZEN_DOCS,
+            "model_key": "catalog-id/" + row["model"].removesuffix("-free")}
 
 
 def zen_candidates(payload: dict, docs: str) -> list[dict]:
@@ -194,6 +203,8 @@ def priced_candidates(payload: dict, source_url: str) -> list[dict]:
     result = []
     for item in payload["data"]:
         architecture = item.get("architecture", {})
+        if not isinstance(architecture, dict):
+            raise ValueError("model architecture is not an object")
         inputs = architecture.get("input_modalities", item.get("input_modalities", []))
         outputs = architecture.get("output_modalities", item.get("output_modalities", []))
         features = item.get("supported_parameters", item.get("supported_features", []))
@@ -206,7 +217,7 @@ def priced_candidates(payload: dict, source_url: str) -> list[dict]:
             continue
         created = item.get("created")
         released = ""
-        if isinstance(created, (int, float)) and not isinstance(created, bool):
+        if isinstance(created, (int, float)) and not isinstance(created, bool) and created > 0:
             try:
                 released = datetime.fromtimestamp(created, timezone.utc).date().isoformat()
             except (ValueError, OverflowError, OSError):
@@ -215,6 +226,132 @@ def priced_candidates(payload: dict, source_url: str) -> list[dict]:
                        "release_date": released, "date_source": source_url if released else "",
                        "tool_call": True, "pricing_source": source_url})
     return result
+
+
+def kilo_rows(payload: dict) -> list[dict]:
+    """Anonymous access requires both isFree and known zero charges."""
+    rows = []
+    for item in data_rows(payload):
+        state = price_state(item.get("pricing"), ("prompt", "completion"))
+        access = item.get("isFree")
+        rows.append({"model": item["id"], "price": state,
+                     "free": access is True and state == "zero", "free_access": access})
+    return rows
+
+
+def kilo_candidates(payload: dict) -> list[dict]:
+    allowed = {r["model"] for r in kilo_rows(payload) if r["free"]}
+    filtered = {"data": [item for item in payload["data"] if item["id"] in allowed
+                         and "autoRouting" not in item]}
+    return [{**row, "model_key": f"kilo/{row['model']}"} for row in priced_candidates(filtered, KILO)]
+
+
+def provider_key(provider: str) -> str:
+    """The machine's existing shell.env convention; no secret in argv or config."""
+    name = {"anyrouter": "ANYROUTER_API_KEY"}[provider]
+    if directory := os.environ.get("CREDENTIALS_DIRECTORY"):
+        try:
+            value = (Path(directory) / f"{provider}-api-key").read_text().strip()
+        except OSError:
+            value = ""
+        if not value:
+            raise ValueError(f"auth-required: systemd credential {provider}-api-key unavailable")
+        return value
+    result = subprocess.run(["/usr/bin/security", "find-generic-password", "-a", getpass.getuser(),
+                             "-s", f"shell.env.{name}", "-w"], capture_output=True, text=True, timeout=15)
+    if result.returncode or not result.stdout.strip():
+        raise ValueError(f"auth-required: Keychain shell.env.{name} unavailable (exit {result.returncode})")
+    return result.stdout.strip()
+
+
+def anyrouter_payload(payload: dict) -> dict:
+    """Keep billable/BYOK metadata out of prices, and pin one free upstream."""
+    normalized = []
+    for item in data_rows(payload):
+        price = item.get("pricing") or {}
+        if not isinstance(price, dict):
+            raise ValueError("AnyRouter pricing is not an object")
+        charges = {k: v for k, v in price.items() if k not in ("billing", "list_pricing")}
+        routes = [r for r in item.get("per_upstream", []) if isinstance(r, dict)
+                  and isinstance(r.get("backend"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", r["backend"])
+                  and not r["backend"].endswith("-byok")
+                  and zero_cost(r.get("pricing"), ("input_per_1m", "output_per_1m"))]
+        # A named upstream is a hard pin. Prefer another upstream when Kilo is
+        # also available directly, but never walk to a fallback after failure.
+        routes.sort(key=lambda r: r["backend"] == "kilo")
+        key = item["id"]
+        aliases = [f"{r['backend']}/{r['model_name']}" for r in routes
+                   if r["backend"] in ("kilo", "openrouter") and isinstance(r.get("model_name"), str)]
+        normalized.append({**item, "id": key if key.endswith(":free") else key + ":free",
+                           "pricing": charges, "router": bool(item.get("members")) or key.startswith("anyrouter/"),
+                           "free_access": (True if routes else None) if price.get("billing") == "free"
+                                          else False if price.get("billing") in ("credits", "byok") else None,
+                           "upstream": routes[0]["backend"] if routes else None,
+                           "model_key": aliases[0] if aliases else f"anyrouter/{key}",
+                           "equivalents": aliases})
+    return {"data": normalized}
+
+
+def native_payload(provider: str, payload: dict) -> dict:
+    return anyrouter_payload(payload) if provider == "anyrouter" else payload
+
+
+def native_candidates(provider: str, payload: dict) -> list[dict]:
+    if provider == "kilo":
+        return kilo_candidates(payload)
+    eligible = {"data": [i for i in payload["data"] if i.get("free_access") is True]}
+    by_id = {i["id"]: i for i in eligible["data"]}
+    return [{**row, "model_key": by_id[row["model"]]["model_key"],
+             "equivalents": by_id[row["model"]].get("equivalents", [])}
+            for row in priced_candidates(eligible, SOURCES[provider]["models_url"])]
+
+
+def native_config(provider: str, payload: dict) -> dict:
+    """Native V2 configuration, generated only from this live free inventory."""
+    items = {item["id"]: item for item in data_rows(payload)}
+    definitions = {}
+    for offer in native_candidates(provider, payload):
+        ident = offer["model"]
+        # Invalid selectors must not enter either the client config or roster.
+        try:
+            lane = parse_lane(f"opencode:{provider}/{ident}")
+        except ValueError:
+            continue
+        if lane.model != f"{provider}/{ident}" or lane.effort:
+            continue
+        item = items[ident]
+        architecture = item.get("architecture") or {}
+        model = {"modelID": ident, "name": offer["name"],
+                 "capabilities": {"tools": True,
+                                  "input": architecture.get("input_modalities", item.get("input_modalities")),
+                                  "output": ["text"]}, "cost": {"input": 0, "output": 0}}
+        limits = {"context": item.get("context_length"),
+                  "output": (item.get("top_provider") or {}).get("max_completion_tokens")}
+        limits = {k: v for k, v in limits.items() if type(v) is int and v > 0}
+        if limits:
+            model["limit"] = limits
+        if provider == "anyrouter":
+            model["headers"] = {"X-AnyRouter-Provider": item["upstream"]}
+            model["body"] = {"provider": {"only": [item["upstream"]], "allow_fallbacks": False,
+                                           "max_price": {"prompt": 0, "completion": 0}}}
+        definitions[ident] = model
+    base = {"kilo": KILO.removesuffix("/models"), "anyrouter": ANYROUTER.removesuffix("/models")}[provider]
+    return {"providers": {provider: {"name": f"{provider} verified free", "env": SOURCES[provider]["auth_env"],
+            "package": "@opencode/ai/providers/openai-compatible",
+            "settings": {"baseURL": base, **({"apiKey": ""} if provider == "kilo" else {})},
+            "models": definitions}}}
+
+
+def native_env(model: str) -> dict[str, str]:
+    provider, ident = model.split("/", 1)
+    payload = native_payload(provider, fetch(SOURCES[provider]["models_url"]))
+    config = native_config(provider, payload)
+    if ident not in config["providers"][provider]["models"]:
+        raise ValueError(f"{model} is not currently an eligible zero-price {provider} offer")
+    selection = {"providerID": provider, "model": ident}
+    config.update(model=selection, agents={"title": {"model": selection}})
+    return {"OPENCODE_CONFIG_CONTENT": json.dumps(config),
+            **({SOURCES[provider]["auth_env"][0]: provider_key(provider)} if provider != "kilo" else {})}
 
 
 def fetch(url: str, *, as_json: bool = True):
@@ -259,14 +396,19 @@ def client_metadata(*, env: dict | None = None, cwd: Path | None = None) -> dict
         raise ValueError("OpenCode model API format changed") from error
 
 
-def review_metadata(provider: str) -> dict:
+def review_metadata(provider: str, config: dict | None = None) -> dict:
     """The catalog in a neutral directory under the selected lane's environment."""
     from .adapters import Launch, _opencode_env
     from .lane import lane_env
     lane = parse_lane(f"opencode:{provider}/model")
     with tempfile.TemporaryDirectory(prefix="xcheck-opencode-models-") as tmp:
         work = Path(tmp).resolve()
-        spec = Launch([], None, env_set=_opencode_env(lane), kind="opencode")
+        if provider in NATIVE_FREE_PROVIDERS:
+            config = config if config is not None else native_config(provider, native_payload(provider, fetch(SOURCES[provider]["models_url"])))
+            env = {"OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENCODE_DB": str(work / "opencode.db")}
+        else:
+            env = _opencode_env(lane)
+        spec = Launch([], None, env_set=env, kind="opencode")
         return client_metadata(env=lane_env(spec, work), cwd=work)
 
 
@@ -280,8 +422,10 @@ def sources(path: Path | None = None) -> dict:
     for provider, source in result.items():
         if parse_lane(f"opencode:{provider}/model").model != f"{provider}/model" or "/" in provider:
             raise ValueError("invalid source provider ID")
-        if source["format"] not in ("zen", "priced-json"):
-            raise ValueError("source format must be zen or priced-json")
+        if source["format"] not in ("zen", "priced-json", *NATIVE_FREE_PROVIDERS):
+            raise ValueError("unsupported discovery source format")
+        if source["format"] in NATIVE_FREE_PROVIDERS and (provider != source["format"] or source["models_url"] != SOURCES[provider]["models_url"]):
+            raise ValueError("native free providers require their canonical primary source")
         for field in ("models_url", "docs_url"):
             url = urlsplit(source[field])
             if url.scheme != "https" or not url.hostname or url.username or url.password:
@@ -313,6 +457,14 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
                 read["served_ids"] = [item["id"] for item in payload["data"]]
                 rows = [zen_offer(row) for row in joined if row["free"]
                         and row["endpoint"].endswith(("/chat/completions", "/responses", "/messages"))]
+            elif source["format"] in NATIVE_FREE_PROVIDERS:
+                payload = native_payload(provider, payload)
+                joined = (kilo_rows(payload) if provider == "kilo" else
+                          [{"model": i["id"], "price": price_state(i.get("pricing"), ("prompt", "completion")),
+                            "free": i.get("free_access") is True and zero_cost(i.get("pricing"), ("prompt", "completion")),
+                            "free_access": i.get("free_access")} for i in payload["data"]])
+                rows = native_candidates(provider, payload)
+                read["client_config"] = native_config(provider, payload)
             else:
                 joined = []
                 for item in data_rows(payload):
@@ -327,7 +479,8 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
             if not rows:
                 continue
             try:
-                metadata = review_metadata(provider)
+                metadata = (review_metadata(provider, read["client_config"]) if source["format"] in NATIVE_FREE_PROVIDERS
+                            else review_metadata(provider))
                 if not isinstance(metadata, dict):
                     raise ValueError("model API returned a non-mapping catalog")
             except (OSError, subprocess.SubprocessError, ValueError) as error:
@@ -420,6 +573,8 @@ def pin_status(report: dict, pins) -> dict:
                 verdict = "unknown" if ident in read.get("served_ids", []) else "gone"
             elif "price" in row:
                 verdict = {"zero": "free", "nonzero": "gone"}.get(row["price"], "unknown")
+                if "free_access" in row:
+                    verdict = "gone" if row["free_access"] is False else verdict if row["free_access"] is True else "unknown"
             else:
                 verdict = "free" if row.get("free") else "gone"
         verdicts[f"opencode:{lane.model}"] = verdict

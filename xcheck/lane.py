@@ -56,7 +56,7 @@ SCRUB_PREFIXES = ("HERDR_", "CLAUDE", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "ANTHROPIC_", "AGENT_PROXY_", "CCR_")
 SCRUB_KIND = {"grok": ("GROK_",)}
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
-SCRUB_NAMES = {"OLDPWD",
+SCRUB_NAMES = {"OLDPWD", "CREDENTIALS_DIRECTORY",
                # Claude effort and permission overrides read outside the CLAUDE prefix.
                "MAX_THINKING_TOKENS", "IS_SANDBOX", "CODEX_PATH", "CODEX_CONFIG", "INITIAL_AGENT_MODE",
                "DEFAULT_AUTH_REQUEST", "MODEL_PROVIDER", "APP_SERVER_LOGS", "NO_BROWSER",
