@@ -7,7 +7,7 @@ xcheck sends an immutable packet to other coding-agent CLIs, collects their nati
 ```mermaid
 flowchart LR
     A[Operator + orchestrator] --> B[Immutable packet]
-    B --> C[Codex / Claude native streams]
+    B --> C[Codex / Claude / Cline native streams]
     B --> D[Grok / Agy / Devin / OpenCode via ACP]
     C --> E[Validated results + lane status]
     D --> E
@@ -67,7 +67,7 @@ A real run consumes the selected native subscription or provider allowance. A ze
 
 ## Boundaries
 
-Supported scope is one operator on one macOS machine, with attended runs. Codex and Claude use first-party headless streams; Grok, Agy, Devin and OpenCode use stock acpx and their native ACP servers. Optional Herdr placement needs a verified caller-context adapter; otherwise auto mode is headless.
+Supported scope is one operator on one macOS machine, with attended runs. Codex, Claude and Cline use first-party headless streams; Grok, Agy, Devin and OpenCode use stock acpx and their native ACP servers. Optional Herdr placement needs a verified caller-context adapter; otherwise auto mode is headless.
 
 This is not an isolation boundary for hostile evidence. Some peers retain shell, network or local-tool access beyond the packet; `--web packet` disables supported built-in web tools and requests no retrieval, but cannot enforce general network isolation. Review your configured tools and native account terms before sharing private material. Machine-local adapters, configuration, logs and transcripts belong outside version control.
 

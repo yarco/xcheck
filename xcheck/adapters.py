@@ -1,15 +1,14 @@
 """Per-harness knowledge: how to start a lane, and how to read what it streams.
 
-Codex and Claude run their first-party headless streams (`codex exec --json`,
-`claude -p --output-format stream-json`); every other lane is an acpx (ACP
-client) exec against the harness's ACP server. The
+Codex, Claude and Cline run their first-party headless JSON streams; every
+other lane is an acpx (ACP client) exec against the harness's ACP server. The
 vendor-specific part is the command, its environment and its native policy. Every flag here was checked against CLI help and smoke runs, and
 `xcheck doctor` re-checks flags against installed help.
 
 Lanes print their answer as their final message; the one Reader below
-extracts it from the lane's stream (native for Codex and Claude, ACP for the
+extracts it from the lane's stream (native for Codex, Claude and Cline, ACP for the
 rest) and decides native completion. Grok,
-OpenCode and Devin may write scratch files in their workspace while reviewing.
+OpenCode, Cline and Devin may write scratch files in their workspace while reviewing.
 """
 
 from __future__ import annotations
@@ -114,7 +113,7 @@ def parse_lane(spec: str) -> Lane:
 
 
 
-# Free OpenCode lanes are not hand-pinned. An optional external refresh writes this file
+# Free OpenCode and Cline lanes are not hand-pinned. An external refresh writes this file
 # atomically: every zero-price offer whose lane ended done in that day's real
 # xcheck run. A failed refresh leaves the last good file in place. Missing or
 # unreadable means no free lanes, never a guessed list.
