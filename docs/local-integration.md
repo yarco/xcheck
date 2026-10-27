@@ -75,3 +75,9 @@ A clone and `examples/offline_demo.py` do not switch the real installed runtime.
 4. Qualify changed native adapters with a small complete packet and actual tools in each supported placement. Do not infer live tool compatibility from fixtures alone.
 
 If another session owns uncommitted source changes, leave its installation/source record alone until those changes can be integrated deliberately. Source digest mismatch is a readiness gap, not permission to overwrite them.
+
+### Cline account for free reviewers
+
+Install `cline` through npm and run `cline auth cline` for a native OAuth login. The adapter uses `~/.cline/data/settings/providers.json` for authentication and native refresh, with lane-local sessions/configuration. Custom API keys/base URLs are refused. Cline's free feed is public; no login is needed to discover offers. Discovery does not enable billing. The optional free-roster producer also discovers Cline offers and requires each route's own native file-read/proof check.
+
+On Oracle, use a separate attended native login as `xcheckfree`; do not share the Mac refresh token. `deploy/lh/provision-cline.py` in the companion refresh project encrypts that login and changes its data path to service tmpfs. Native refreshes are re-encrypted at stop. The Mac consumer checks its own CLI/login inventory separately from Oracle proof.

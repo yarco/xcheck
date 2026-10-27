@@ -28,7 +28,10 @@ ZEN_DOCS = "https://opencode.ai/v2/docs/console/models/"
 OPENROUTER = "https://openrouter.ai/api/v1/models"
 KILO = "https://api.kilo.ai/api/gateway/models"
 ANYROUTER = "https://anyrouter.dev/api/v1/models"
+CLINE = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
 SOURCES = {
+    "cline": {"format": "cline", "models_url": CLINE,
+              "docs_url": "https://docs.cline.bot/getting-started/free-models", "auth_env": []},
     "opencode": {"format": "zen", "models_url": ZEN, "docs_url": ZEN_DOCS,
                  "auth_env": ["OPENCODE_API_KEY"]},
     "openrouter": {"format": "priced-json", "models_url": OPENROUTER,
@@ -422,8 +425,10 @@ def sources(path: Path | None = None) -> dict:
     for provider, source in result.items():
         if parse_lane(f"opencode:{provider}/model").model != f"{provider}/model" or "/" in provider:
             raise ValueError("invalid source provider ID")
-        if source["format"] not in ("zen", "priced-json", *NATIVE_FREE_PROVIDERS):
+        if source["format"] not in ("zen", "priced-json", "cline", *NATIVE_FREE_PROVIDERS):
             raise ValueError("unsupported discovery source format")
+        if source["format"] == "cline" and (provider != "cline" or source["models_url"] != CLINE):
+            raise ValueError("Cline requires its canonical primary source")
         if source["format"] in NATIVE_FREE_PROVIDERS and (provider != source["format"] or source["models_url"] != SOURCES[provider]["models_url"]):
             raise ValueError("native free providers require their canonical primary source")
         for field in ("models_url", "docs_url"):
@@ -450,6 +455,14 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
         read = reads[provider] = {"status": "failed", "rows": []}
         try:
             payload = fetch(source["models_url"])
+            if source["format"] == "cline":
+                from . import cline
+                offers, observation = cline.discover(payload)
+                read.update(observation)
+                result.extend(offers)
+                if read.get("client_error"):
+                    warnings.append(f"cline native catalog unavailable: {read['client_error']}")
+                continue
             if source["format"] == "zen":
                 joined = zen_join(payload, fetch(source["docs_url"], as_json=False))
                 # Absence from the documentation join is not absence from the
@@ -562,9 +575,9 @@ def pin_status(report: dict, pins) -> dict:
     reads = report.get("providers") or {}
     verdicts = {}
     for lane in pins:
-        if lane.kind != "opencode":
+        if lane.kind not in ("opencode", "cline"):
             continue
-        provider, _, ident = lane.model.partition("/")
+        provider, _, ident = lane.model.partition("/") if lane.kind == "opencode" else ("cline", "", lane.model)
         read = reads.get(provider) or {}
         verdict = "unknown"
         if read.get("status") == "ok":
@@ -577,7 +590,7 @@ def pin_status(report: dict, pins) -> dict:
                     verdict = "gone" if row["free_access"] is False else verdict if row["free_access"] is True else "unknown"
             else:
                 verdict = "free" if row.get("free") else "gone"
-        verdicts[f"opencode:{lane.model}"] = verdict
+        verdicts[f"{lane.kind}:{lane.model}"] = verdict
     return verdicts
 
 
@@ -591,8 +604,8 @@ def classify_roster(report: dict, pins, deferred) -> dict:
     `unknown` and prints no missing line; neither may delete a pin. The
     `verdicts` map is the `pin_status` result callers print per pin.
     """
-    pin_set = {f"opencode:{lane.model}" for lane in pins if lane.kind == "opencode"}
-    deferred_set = {f"opencode:{lane.model}" for lane in deferred if lane.kind == "opencode"}
+    pin_set = {f"{lane.kind}:{lane.model}" for lane in pins if lane.kind in ("opencode", "cline")}
+    deferred_set = {f"{lane.kind}:{lane.model}" for lane in deferred if lane.kind in ("opencode", "cline")}
     marks = {}
     for row in report.get("models") or []:
         selector = row["selector"]

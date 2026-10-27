@@ -111,11 +111,32 @@ class Pane:
             self._acp(event)
             return
         kind = event.get("type")
+        if kind in ("agent_event", "run_result", "run_aborted"):
+            self._cline(event)
+            return
         if kind in ("assistant", "user", "result", "system", "stream_event", "rate_limit_event"):
             self._claude(event)
             return
         if isinstance(kind, str):
             self._codex(event)
+
+    def _cline(self, event: dict) -> None:
+        if event.get("type") == "run_result":
+            self._flush_text()
+            self._say(f"· end {event.get('finishReason')}")
+            return
+        native = event.get("event") or {}
+        kind = native.get("type")
+        content = native.get("contentType")
+        if content == "tool" and kind in ("content_start", "content_end"):
+            self._flush_text()
+            self._acp_tool({"toolCallId": native.get("toolCallId"), "title": native.get("toolName"),
+                            "rawInput": native.get("input"),
+                            "status": "pending" if kind == "content_start" else "failed" if native.get("error") else "completed"})
+        elif kind == "content_start" and content in ("text", "reasoning"):
+            self._push("thought" if content == "reasoning" else "message", native.get("text") or "")
+        elif kind == "error":
+            self._say("! " + _error_message(native.get("error")))
 
     def _acp(self, event: dict) -> None:
         if "method" in event:

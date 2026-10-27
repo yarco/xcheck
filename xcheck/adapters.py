@@ -25,7 +25,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin")
+KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin", "cline")
 NATIVE_FREE_PROVIDERS = ("kilo", "anyrouter")
 
 @dataclass(frozen=True)
@@ -88,7 +88,7 @@ def parse_lane(spec: str) -> Lane:
     parts = spec.split(":")
     # OpenRouter's :free is part of the model, never an effort. Preserve it
     # before interpreting the optional final variant (including :free:high).
-    if parts[0] == "opencode" and len(parts) >= 3 and parts[2] == "free":
+    if parts[0] in ("opencode", "cline") and len(parts) >= 3 and parts[2] == "free":
         parts = [parts[0], parts[1] + ":free", *parts[3:]]
     if len(parts) not in (2, 3) or parts[0] not in KINDS or not parts[1]:
         raise ValueError(f"lane spec must be kind:model[:effort], kind in {KINDS}: {spec!r}")
@@ -98,7 +98,7 @@ def parse_lane(spec: str) -> Lane:
     if kind == "agy" and "pro" in model.split("-"):
         raise ValueError("Gemini Pro is never a cross-check lane (operator rule); use a Flash or Argon selector")
     effort = parts[2] if len(parts) == 3 else ""
-    ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind == "opencode" else r"[A-Za-z0-9][A-Za-z0-9._-]*"
+    ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind in ("opencode", "cline") else r"[A-Za-z0-9][A-Za-z0-9._-]*"
     for part in (model, effort):
         if part and not re.fullmatch(ident if part is model else r"[A-Za-z0-9][A-Za-z0-9._-]*", part):
             raise ValueError(f"model and effort must be plain identifiers: {part!r}")
@@ -106,7 +106,9 @@ def parse_lane(spec: str) -> Lane:
         raise ValueError("model must not contain empty or traversal path segments")
     if kind in ("agy", "devin") and effort:
         raise ValueError(f"{kind} selectors carry their own effort; drop ':{effort}'")
-    if kind not in ("agy", "opencode", "devin") and not effort:
+    if kind == "cline" and effort and effort not in ("none", "low", "medium", "high", "xhigh"):
+        raise ValueError("Cline thinking must be none, low, medium, high or xhigh")
+    if kind not in ("agy", "opencode", "devin", "cline") and not effort:
         raise ValueError(f"{kind} lane needs an explicit effort: {spec!r}")
     return Lane(kind, model, effort)
 
@@ -130,7 +132,7 @@ def free_lanes(path: Path = FREE_ROSTER) -> tuple[Lane, ...]:
             lane = parse_lane(selector)
         except (TypeError, ValueError, AttributeError):
             continue
-        if lane.kind == "opencode" and lane not in lanes:
+        if lane.kind in ("opencode", "cline") and lane not in lanes:
             lanes.append(lane)
     return tuple(lanes)
 
@@ -225,6 +227,9 @@ def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool,
         return _devin_launch(lane, work, message, log, web)
     if lane.kind == "opencode":
         return _opencode_launch(lane, work, message, log, store)
+    if lane.kind == "cline":
+        from .cline import launch as cline_launch
+        return cline_launch(lane, work, message, log)
     raise ValueError(f"unknown kind {lane.kind}")
 
 
@@ -916,6 +921,18 @@ def unavailable(lane: Lane) -> str | None:
         return None if shutil.which("codex") else "startup-unavailable: codex is not on PATH"
     if lane.kind == "claude":
         return claude_problem()
+    if lane.kind == "cline":
+        from . import cline
+        try:
+            _, binary = cline.installation()
+            from .lane import lane_env
+            out = subprocess.run([str(binary), "--help"], capture_output=True, text=True, timeout=15,
+                                 env=lane_env(Launch([], None, kind="cline"), Path.cwd()))
+            if out.returncode or any(flag not in out.stdout for flag in cline.FLAGS):
+                return "startup-unavailable: Cline native help no longer exposes the required flags"
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            return "startup-unavailable: Cline native npm installation could not be verified"
+        return cline.auth_problem()
     if not shutil.which("acpx"):
         # An npm -g update stopped mid-reify leaves the link renamed to a hidden .acpx-* file,
         # and an agent shell's plain npm is Homebrew's, which installs into another prefix.
@@ -1018,6 +1035,7 @@ class Reader:
     error: str | None = None
     completed: bool = False
     diagnostics: list[dict] = field(default_factory=list)
+    expected_model: str = ""
     _buf: list[str] = field(default_factory=list)
     _mcp_calls: dict[str, dict] = field(default_factory=dict)  # Claude: tool_use id → policy diagnostic
     _prompt_id: object = None
@@ -1026,10 +1044,10 @@ class Reader:
     _failure: str | None = None  # the reason to report if the turn never completes
 
     @classmethod
-    def replay(cls, kind: str, stream: Path, web: bool) -> "Reader":
+    def replay(cls, kind: str, stream: Path, web: bool, model: str = "") -> "Reader":
         """Rebuild a lane's reader from its saved stream (recovery after a
         runner died). Completion stays exactly what the live reader requires."""
-        reader = cls(kind, web)
+        reader = cls(kind, web, expected_model=model)
         try:
             lines = stream.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -1041,6 +1059,9 @@ class Reader:
                 continue
             if isinstance(event, dict):
                 reader.feed(event)
+        if kind == "cline":
+            from .cline import stderr_errors
+            stderr_errors(reader, stream.parent / "stderr.log")
         reader.finish()
         return reader
 
@@ -1051,6 +1072,8 @@ class Reader:
                 notes.append(f"MCP startup {d['server']}: {d['status']}")
             elif d["kind"] == "auth":
                 notes.append(f"auth source: {d['label']}")
+            elif d["kind"] == "native_error":
+                notes.append(f"native error: {d['type']}")
             else:
                 outcome = d["outcome"]
                 label = "POLICY VIOLATION" if outcome == "succeeded" else "MCP policy warning"
@@ -1169,6 +1192,30 @@ class Reader:
     # the last one is the answer; turn.completed ends the turn and turn.failed
     # fails it. A top-level `error` (a reconnect notice) can recover, so it is
     # only the reason if the turn never completes.
+    def _cline(self, o: dict) -> str | None:
+        if o.get("type") == "run_result":
+            model = o.get("model") if isinstance(o.get("model"), dict) else {}
+            if o.get("finishReason") != "completed":
+                self.error = _clip(f"Cline stopped: {o.get('finishReason')}", 300)
+            elif model.get("provider") != "cline" or (self.expected_model and model.get("id") != self.expected_model):
+                self.error = "Cline completed with a different model than the requested free selector"
+            elif not self.error:
+                self.completed = True
+                self.text = o.get("text") if isinstance(o.get("text"), str) else ""
+            return "· end turn" if self.completed else f"! {self.error}"
+        if o.get("type") in ("error", "run_aborted"):
+            self.error = _clip(str(o.get("message") or o.get("reason") or "Cline error"), 300)
+            return f"! {self.error}"
+        if o.get("type") == "agent_event":
+            event = o.get("event") or {}
+            if event.get("type") == "error" and not event.get("recoverable"):
+                error = event.get("error")
+                if isinstance(error, dict) and error.get("name") == "ClineOAuthTokenError":
+                    self.diagnostics.append({"kind": "native_error", "type": "provider.auth"})
+                self.error = _clip(str(error or "Cline agent error"), 300)
+                return f"! {self.error}"
+        return None
+
     def _codex(self, o: dict) -> str | None:
         t = o.get("type")
         item = o.get("item") if isinstance(o.get("item"), dict) else {}

@@ -45,6 +45,7 @@ TAIL_LINES = 40
 # CLAUDE_MODEL_CONFIG (model routing) and CLAUDE_AGENT_* (adapter switches),
 # and the CLI reads CLAUDE_CONFIG_DIR as its settings and auth home.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE", "CODEX_COMPANION_", "CODEX_SANDBOX",
+                  "CLINE_",  # native routing, binary, config and account overrides
                   "OPENCODE",  # orchestrator session and config overrides; env_set puts OPENCODE_DB back for an assigned Zen store
                   "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_",  # adapter and client overrides must not reach a peer
                   # Provider routing overrides: an ANTHROPIC_AUTH_TOKEN or
@@ -352,7 +353,7 @@ def run_lane(base: Path, name: str) -> int:
             status, reason, text = "failed", f"lane runner error: {e!r} (runner-error.log)", ""
             # Never lose a natively completed answer to a runner bug; never
             # promote one that did not complete.
-            saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web)
+            saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web, run.lane(name).model)
             if saved.completed and not saved.error and saved.text.strip():
                 text = saved.text
                 status, problems = validate.check(text, run.contract)
@@ -388,7 +389,7 @@ def _run_lane(base: Path, name: str) -> int:
     signal.alarm(bound(run.cap))
 
     started = time.time()
-    reader = adapters.Reader(lane.kind, run.web)
+    reader = adapters.Reader(lane.kind, run.web, expected_model=lane.model)
     # Recorded before any spend, so a crashed supervisor's successor sees this
     # lane as live from its first instant.
     atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": None}))
@@ -525,6 +526,9 @@ def _run_lane(base: Path, name: str) -> int:
                         code = proc.wait()
                         _reap_group(proc.pid)
                         proc.stdout.close()
+        if lane.kind == "cline":
+            from .cline import stderr_errors
+            stderr_errors(reader, err_path)
         reader.finish()
         if status is None:
             if reader.error:

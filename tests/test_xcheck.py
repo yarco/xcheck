@@ -1730,7 +1730,7 @@ class EndToEnd(unittest.TestCase):
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
                            env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr)
-        for kind in adapters.KINDS:
+        for kind in (l.split(":", 1)[0] for l in lanes.split(",")):
             lane = next(l for l in lanes.split(",") if l.startswith(kind + ":"))
             work = self.root / ".lanes" / adapters.parse_lane(lane).pool / adapters.parse_lane(lane).name
             # The Agy server may write only inside its lane: it dumps into its workspace.

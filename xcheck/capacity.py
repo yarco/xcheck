@@ -75,7 +75,7 @@ def reserve_for(lane: Lane, same_pool: int) -> float:
 
 def read(lane: Lane, same_pool: int = 1) -> Reading:
     """The lane's pool reading against its reserve. Never raises."""
-    if lane.kind in ("opencode", "devin"):
+    if lane.kind in ("opencode", "devin", "cline"):
         return Reading("eligible", f"{lane.kind} opt-in: no protocol meter; a quota error is the lane's error")
     reserve = reserve_for(lane, same_pool)
     try:

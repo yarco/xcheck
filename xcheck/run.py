@@ -182,7 +182,7 @@ def settle_placement_failure(run, exc: herdr.HerdrError) -> None:
 
 
 def _message(web: bool, kind: str) -> str:
-    shell = kind in ("grok", "opencode", "devin")
+    shell = kind in ("grok", "opencode", "devin", "cline")
     scope = SHELL_SCOPE if shell else (
         "use only tools that read (files, commands that change nothing"
         + (", web search" if web else "") + ").")
@@ -356,7 +356,7 @@ def _settle_dead_runner(run: Run, name: str) -> None:
     result = run.base / f"RESULT-{name}.md"
     # Only a natively completed turn in the saved stream is an answer; a
     # complete-looking RESULT file or draft is not.
-    reader = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web)
+    reader = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web, run.lane(name).model)
     diagnostics = reader.diagnostics
     if reader.notes():
         note += "; " + "; ".join(reader.notes())
@@ -582,7 +582,7 @@ def doctor() -> int:
     # `unknown` and `new` do not fail.
     pins = (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)
     pin_providers = {"opencode"} | {l.model.split("/", 1)[0]
-                                    for l in pins if l.kind == "opencode"}
+                                    for l in pins if l.kind == "opencode"} | ({"cline"} if any(l.kind == "cline" for l in pins) else set())
     try:
         report = models.discover(pin_providers)
     except Exception as error:
@@ -599,6 +599,12 @@ def doctor() -> int:
                   + ("advertised by the ACP server" if ok else
                      "NOT advertised by the ACP server" if acp_models is not None else "unchecked: no ACP model list"))
             bad += not ok
+            continue
+        if lane.kind == "cline":
+            problem = adapters.unavailable(lane)
+            verdict = verdicts.get(f"cline:{lane.model}", "unknown")
+            print(f"{'FAIL' if problem or verdict == 'gone' else 'ok  '} cline pin {lane.model}: {problem or verdict}")
+            bad += bool(problem) or verdict == "gone"
             continue
         cmd = MODEL_LISTS.get(lane.kind)
         if lane.kind == "opencode":

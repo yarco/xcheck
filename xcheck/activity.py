@@ -37,6 +37,11 @@ class Activity:
         elif event == 'user' and any(isinstance(b, dict) and b.get('type') == 'tool_result' and not b.get('is_error')
                                      for b in (obj.get('message') or {}).get('content') or []):
             tool = 'tool_result'  # Claude
+        elif event == 'agent_event':
+            native = obj.get('event') or {}
+            self.data['last_event'] = native.get('type') or event
+            if native.get('type') == 'content_end' and native.get('contentType') == 'tool' and not native.get('error'):
+                tool = native.get('toolName') or 'tool'
         if tool:
             self.data['completed_tools'] += 1
             self.data['last_completed_tool'] = dict(kind=tool, observed_at=at)
