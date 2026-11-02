@@ -22,6 +22,14 @@ def item(ident="vendor/model:free", **changes):
 
 
 class Catalog(unittest.TestCase):
+    def test_retired_provider_cannot_be_discovered_or_selected(self):
+        with patch.object(models, "fetch") as fetch:
+            with self.assertRaisesRegex(ValueError, "no primary discovery source"):
+                models.discover({"anyrouter"})
+            with self.assertRaisesRegex(ValueError, "AnyRouter was removed"):
+                adapters.parse_lane("opencode:anyrouter/vendor/model:free")
+            fetch.assert_not_called()
+
     def setUp(self):
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
@@ -125,63 +133,3 @@ class Catalog(unittest.TestCase):
         result = activity.opencode_failure(Run(), peer.name)
         self.assertEqual((result["type"], result["status"]), ("provider.quota", 402))
         self.assertNotIn("SECRET", json.dumps(result))
-
-
-class OtherFreeProviders(unittest.TestCase):
-    def any_item(self, **changes):
-        return item("vendor/model", pricing={"prompt": "0", "completion": "0", "billing": "free"},
-                    per_upstream=[{"backend": "kilo", "model_name": "vendor/model:free",
-                                   "pricing": {"input_per_1m": 0, "output_per_1m": 0}},
-                                  {"backend": "other", "model_name": "vendor/model",
-                                   "pricing": {"input_per_1m": 0, "output_per_1m": 0}}], **changes)
-
-    def test_anyrouter_requires_free_billing_and_pins_one_zero_price_upstream(self):
-        payload = models.anyrouter_payload({"data": [self.any_item()]})
-        self.assertEqual(models.native_candidates("anyrouter", payload)[0]["model_key"], "kilo/vendor/model:free")
-        cfg = models.native_config("anyrouter", payload)["providers"]["anyrouter"]
-        model = cfg["models"]["vendor/model:free"]
-        self.assertEqual(model["headers"]["X-AnyRouter-Provider"], "other")
-        self.assertEqual(model["body"]["provider"], {"only": ["other"], "allow_fallbacks": False,
-                                                     "max_price": {"prompt": 0, "completion": 0}})
-        self.assertEqual(cfg["env"], ["ANYROUTER_API_KEY"])
-        self.assertNotIn("apiKey", cfg["settings"])
-        for billing in (None, "byok", "credits"):
-            bad = self.any_item()
-            bad["pricing"]["billing"] = billing
-            self.assertEqual(models.native_candidates("anyrouter", models.anyrouter_payload({"data": [bad]})), [])
-
-    def test_anyrouter_virtual_routes_and_paid_upstreams_cannot_qualify(self):
-        for change in ({"members": [{"id": "different-model"}]},
-                       {"per_upstream": [{"backend": "paid", "pricing": {"input_per_1m": 1, "output_per_1m": 1}}]}):
-            bad = self.any_item()
-            bad.update(change)
-            self.assertEqual(models.native_candidates("anyrouter", models.anyrouter_payload({"data": [bad]})), [])
-
-    def test_keychain_uses_stdin_free_lookup_and_never_includes_secret_in_failure(self):
-        import subprocess
-        ok = subprocess.CompletedProcess([], 0, "secret\n", "")
-        with patch.object(models.subprocess, "run", return_value=ok) as call:
-            self.assertEqual(models.provider_key("anyrouter"), "secret")
-        self.assertNotIn("secret", repr(call.call_args))
-        self.assertIn("shell.env.ANYROUTER_API_KEY", call.call_args.args[0])
-        bad = subprocess.CompletedProcess([], 44, "secret", "secret")
-        with patch.object(models.subprocess, "run", return_value=bad):
-            with self.assertRaisesRegex(ValueError, "auth-required") as error:
-                models.provider_key("anyrouter")
-        self.assertNotIn("secret", str(error.exception))
-
-    def test_systemd_credential_is_selected_without_keychain_fallback(self):
-        import tempfile
-        from pathlib import Path
-        from xcheck.lane import lane_env
-        from xcheck.adapters import Launch
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, CREDENTIALS_DIRECTORY=tmp), \
-                patch.object(models.subprocess, 'run') as call:
-            path = Path(tmp) / 'anyrouter-api-key'
-            path.write_text('private-key\n')
-            self.assertEqual(models.provider_key('anyrouter'), 'private-key')
-            self.assertNotIn('CREDENTIALS_DIRECTORY', lane_env(Launch([], None), Path(tmp)))
-            path.unlink()
-            with self.assertRaisesRegex(ValueError, 'auth-required'):
-                models.provider_key('anyrouter')
-            call.assert_not_called()

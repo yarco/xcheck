@@ -33,6 +33,10 @@ The helper path and optional roster path preserve the existing default locations
 
 `opencode_accounts` maps account names to OpenCode store paths. Each path is absolute or starts with `~/`. Insertion order is the round-robin order for that machine's Zen lanes (a bare model or `opencode/…`). OpenRouter and Z.ai lanes are not assigned. `opencode_lanes_per_account` is an optional positive integer (default 5) capping how many Zen lanes of one run share an account. Omit `opencode_accounts` to keep the native default store and apply no cap. An empty object is refused, as are two paths that resolve to the same file. A run that needs more Zen lanes than the accounts allow, or whose assigned store file is missing, exits 2 before anything starts: a missing file would be created empty and the lane would run anonymously. The assignment is fixed in `run.json` and shown on that lane's status row. Sign each store in once with `OPENCODE_DB=<store> opencode auth login opencode --standalone --method device`. `opencode auth switch` is machine-global and does not pin a lane. These values are store paths, not tokens. Do not put credentials in this file. `doctor` prints one line per configured account.
 
+## Dedicated free API provider
+
+Kilo is keyless. `xcheck models --provider kilo --json` discovers current eligibility without credentials. Its native configuration and isolated database are generated for each invocation; it does not consume a configured Zen account-store slot. The qualification job alone writes the free roster. AnyRouter was removed on 2026-11-02 because access after its trial requires a paid plan or donated key.
+
 ## Herdr caller-context adapter
 
 The helper takes no arguments and writes one JSON object. An unverified result may be as small as:

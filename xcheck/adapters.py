@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin", "cline")
-NATIVE_FREE_PROVIDERS = ("kilo", "anyrouter")
+NATIVE_FREE_PROVIDERS = ("kilo",)
 
 @dataclass(frozen=True)
 class Lane:
@@ -92,6 +92,8 @@ def parse_lane(spec: str) -> Lane:
     if len(parts) not in (2, 3) or parts[0] not in KINDS or not parts[1]:
         raise ValueError(f"lane spec must be kind:model[:effort], kind in {KINDS}: {spec!r}")
     kind, model = parts[0], parts[1]
+    if kind == "opencode" and model.startswith("anyrouter/"):
+        raise ValueError("AnyRouter was removed: its exhausted trial requires paid or donated-key access")
     if kind == "agy" and not model.startswith("gemini-"):
         raise ValueError("Agy's ACP server supports only Gemini selectors")
     if kind == "agy" and "pro" in model.split("-"):

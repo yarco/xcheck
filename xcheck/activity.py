@@ -101,7 +101,7 @@ def _native_times(value):
 def _opencode_messages(run, name, session):
     """Read only a session created for this run's exact lane workspace."""
     path = run.store(name) or Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
-    if run.lane(name).model.split('/', 1)[0] in ('kilo', 'anyrouter'):
+    if run.lane(name).model.split('/', 1)[0] == 'kilo':
         path = run.lane_dir(name) / 'opencode.db'
     with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
         owner = db.execute('SELECT directory, time_created FROM session_v2 WHERE id=?', (session,)).fetchone()
