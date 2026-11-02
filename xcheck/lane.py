@@ -400,11 +400,14 @@ def _run_lane(base: Path, name: str) -> int:
         return _finish(run, name, started, "skipped",
                        f"auth-required: {', '.join(missing)} is empty in the environment xcheck ran in",
                        None, reader, err_path)
-    blocked = adapters.unavailable(lane)
+    blocked = (adapters.claude_problem(allow_missing=True)
+               if lane.kind == "claude" and run.capacity and name not in run.forced
+               else adapters.unavailable(lane))
     if blocked:
         return _finish(run, name, started, "skipped", blocked, None, reader, err_path)
     # One run at a time spends from a pool; wait here (no orchestrator turns).
-    held = pools.acquire(ROOT, lane.pool, str(run.base), time.monotonic() + run.cap if run.cap is not None else None,
+    admission_deadline = time.monotonic() + run.cap if run.cap is not None else None
+    held = pools.acquire(ROOT, lane.pool, str(run.base), admission_deadline,
                          on_wait=lambda owner: print(
                              f"xcheck lane {name}: waiting for pool {lane.pool} "
                              f"(held by {Path(owner).name or 'another run'})", flush=True))
@@ -436,11 +439,30 @@ def _run_lane(base: Path, name: str) -> int:
         # orchestrator sandbox when the runner lives in a Herdr pane.
         if run.capacity and name not in run.forced:
             atomic_write(d / "phase.json", json.dumps(dict(phase="checking_capacity")))
-            reading = capacity.read(lane, capacity.sharing(lane, run.lanes.values()))
+            same_pool = capacity.sharing(lane, run.lanes.values())
+            from . import claude_auth
+            try:
+                with claude_auth.bounded(admission_deadline if lane.kind == "claude" else None):
+                    reading = capacity.read(lane, same_pool)
+                    reading = claude_auth.admit(
+                        lane, reading, same_pool,
+                        lambda phase: atomic_write(d / "phase.json", json.dumps(dict(phase=phase))),
+                        pool_fd=held.fileno(), deadline=admission_deadline)
+                    if lane.kind == "claude" and reading.ok:
+                        blocked = adapters.claude_problem()
+                        if blocked:
+                            return _finish(run, name, started, "skipped", blocked, None, reader, err_path)
+            except claude_auth.DeadlineExpired:
+                return _finish(run, name, started, "timeout",
+                               f"Claude authentication exceeded the {run.cap}s admission cap", None, reader, err_path)
             note = f"{reading.status}: {reading.note}"
             print(f"xcheck lane {name}: capacity {note}", flush=True)
             if not reading.ok:
                 return _finish(run, name, started, "skipped", note, None, reader, err_path)
+        if lane.kind == "claude" and (not run.capacity or name in run.forced):
+            blocked = adapters.claude_problem()
+            if blocked:
+                return _finish(run, name, started, "skipped", blocked, None, reader, err_path)
         atomic_write(d / "phase.json", json.dumps(dict(phase="starting")))
         try:
             spec = adapters.launch(lane, work, message, log, run.web, run.store(name))

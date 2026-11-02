@@ -742,7 +742,7 @@ def _claude_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) 
     return Launch(argv, message, env_set={"DISABLE_AUTOUPDATER": "1"})
 
 
-def claude_problem() -> str | None:
+def claude_problem(*, allow_missing: bool = False) -> str | None:
     """A subscription lane must prove the claude.ai login in the scrubbed lane
     environment, and the installed CLI must still list the flags it relies on."""
     from .lane import lane_env
@@ -753,11 +753,14 @@ def claude_problem() -> str | None:
     try:
         out = subprocess.run([claude, "auth", "status", "--json"],
                              env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
-        auth = json.loads(out.stdout) if out.returncode == 0 else {}
+        auth = json.loads(out.stdout) if out.returncode in (0, 1) else {}
     except (OSError, subprocess.SubprocessError, ValueError):
         auth = {}
-    if not (isinstance(auth, dict) and auth.get("loggedIn") and auth.get("authMethod") == "claude.ai"
-            and auth.get("apiProvider") == "firstParty"):
+    missing = (allow_missing and isinstance(auth, dict) and auth.get("loggedIn") is False
+               and auth.get("authMethod") in (None, "none", "claude.ai")
+               and auth.get("apiProvider") in (None, "firstParty"))
+    if not (missing or (isinstance(auth, dict) and auth.get("loggedIn") and out.returncode == 0
+                        and auth.get("authMethod") == "claude.ai" and auth.get("apiProvider") == "firstParty")):
         return ("auth-required: `claude auth status` is not a first-party claude.ai subscription login "
                 "(scrubbed routing overrides expose a different source, or the Keychain login is missing); "
                 "run claude once to refresh it")
@@ -1075,6 +1078,11 @@ class Reader:
                 notes.append(f"auth source: {d['label']}")
             elif d["kind"] == "native_error":
                 notes.append(f"native error: {d['type']}")
+            elif d["kind"] == "provider_error":
+                detail = f" [{d['detail']}]" if "detail" in d else ""
+                correlation = "; ".join(f"{key.replace('_', ' ')}: {d[key]}"
+                                        for key in ("request_id", "message_id") if key in d)
+                notes.append(f"Claude provider error{detail}" + (f"; {correlation}" if correlation else ""))
             else:
                 outcome = d["outcome"]
                 label = "POLICY VIOLATION" if outcome == "succeeded" else "MCP policy warning"
@@ -1283,7 +1291,21 @@ class Reader:
             return None
         if t == "result":
             if o.get("is_error"):
-                self.error = _clip(str(o.get("result") or json.dumps(o.get("errors")) or "is_error"), 300)
+                result = str(o.get("result") or json.dumps(o.get("errors")) or "is_error")
+                self.error = _clip(result, 300)
+                self.completed, self.text = False, ""
+                # Keep only bounded native support fields, never arbitrary
+                # result text or a URL in the compact diagnostic record.
+                diagnostic = {"kind": "provider_error", "provider": "claude"}
+                for key, pattern in (
+                    ("detail", r"(?m)^Details:\s*`?\[([A-Za-z0-9_.-]{1,80})\]`?\s*$"),
+                    ("request_id", r"(?m)^Request ID:\s*(req_[A-Za-z0-9_-]{1,120})\s*$"),
+                    ("message_id", r"(?m)^Message ID:\s*(msg_[A-Za-z0-9_-]{1,120})\s*$"),
+                ):
+                    if match := re.search(pattern, result):
+                        diagnostic[key] = match.group(1)
+                if len(diagnostic) > 2:
+                    self.diagnostics.append(diagnostic)
                 return f"! {self.error}"
             self.completed = True
             self.text = o.get("result") if isinstance(o.get("result"), str) else ""

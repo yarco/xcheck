@@ -21,7 +21,7 @@ def load() -> dict:
     except (OSError, ValueError) as error:
         # Config contents and OS error strings can contain private data.
         raise ValueError("cannot read xcheck local configuration as JSON") from error
-    paths = {"caller_context_helper", "free_roster", "agy_rotate_command"}
+    paths = {"caller_context_helper", "free_roster", "agy_rotate_command", "claude_login_command"}
     keys = paths | {"default_lanes", "opencode_accounts", "opencode_lanes_per_account"}
     if not isinstance(data, dict) or data.keys() - keys:
         raise ValueError("xcheck local configuration has unknown keys or is not an object")
@@ -33,6 +33,8 @@ def load() -> dict:
             path = Path(value).expanduser()
             if not path.is_absolute():
                 raise ValueError(f"{key} must be an absolute path or start with ~/")
+            if key == "claude_login_command" and (not path.is_file() or not os.access(path, os.X_OK)):
+                raise ValueError("claude_login_command must name an existing executable file")
             data[key] = path
     if "opencode_accounts" in data:
         accounts = data["opencode_accounts"]
@@ -66,7 +68,7 @@ def load() -> dict:
 
 def apply() -> None:
     """Apply only explicit overrides; absent config keeps the existing setup."""
-    from . import adapters, capacity, herdr
+    from . import adapters, capacity, claude_auth, herdr
 
     data = load()
     if "default_lanes" in data:
@@ -85,6 +87,8 @@ def apply() -> None:
         adapters.OPENCODE_LANES_PER_ACCOUNT = data["opencode_lanes_per_account"]
     if "agy_rotate_command" in data:
         capacity.AGY_ROTATE = data["agy_rotate_command"]
+    if "claude_login_command" in data:
+        claude_auth.LOGIN_COMMAND = data["claude_login_command"]
     if "free_roster" in data:
         adapters.FREE_ROSTER = data["free_roster"]
         adapters.OPT_IN = (adapters.Lane("devin", "swe-2-max"), *adapters.free_lanes(adapters.FREE_ROSTER))
