@@ -16,7 +16,7 @@ flowchart LR
 
 The runner owns process control, quota admission, pool locks, snapshots, completion parsing and validation. The orchestrator owns scope, evidence, reviewer selection and judgment. There is no reviewer vote and no automatic retry of a review turn.
 
-[Start here](docs/adoption.md) · [Full protocol](Multi-Agent%20Cross-Check%20Protocol.md) · [Local integration](docs/local-integration.md) · [Examples](examples/README.md)
+[Start here](docs/adoption.md) · [Full protocol](Multi-Agent%20Cross-Check%20Protocol.md) · [Runtime architecture](docs/architecture.md) · [Local integration](docs/local-integration.md) · [Examples](examples/README.md)
 
 ## Try it without accounts
 

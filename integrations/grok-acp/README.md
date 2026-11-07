@@ -4,7 +4,25 @@ xcheck's Grok lane runs Grok's own documented ACP stdio server under acpx's
 generic custom-agent transport. There is no built-in Grok adapter in acpx and
 no private ACP client, wrapper, or protocol workaround anywhere in the path.
 
-Verified with **grok 1.0.62 (1474f9cbdd91)**. Installed acpx is 0.19.6; `xcheck doctor` accepts its flags. The 2026-10-17 probe spoke to `grok agent stdio` directly.
+Historical qualification: **grok 1.0.62 (1474f9cbdd91)** with acpx 0.19.6. The 2026-10-17 probe spoke to `grok agent stdio` directly. These versions date the observations below; they are not current runtime admission pins.
+
+## Current admission contract
+
+`xcheck/grok.py` serves both lane admission and `doctor`. It first runs the
+configured `version --json` startup, then drives the lane's own agent command
+through `initialize` and `session/new`, never `session/prompt`. It verifies the
+resolved tool allowlist, zero loaded hooks, approved MCP names and selected
+model/effort from the probe log and native session result. Unknown or mismatched
+evidence refuses inference; a version change alone does not. The probe reads raw
+chunks so multiple JSON lines written together cannot stall in a buffered
+`readline` invisible to `select`.
+
+The rationale is native fail-open behavior: an unknown tool ID expands the
+toolset. Keep this behavior gate until the native allowlist fails closed and an
+equally observable replacement is verified. Regression evidence lives in
+`tests/test_runner_issues.py`; live tool qualification remains necessary after
+changes to transport or permissions. Launch construction stays in
+`adapters._grok_launch`; admission does not own reviewer execution or completion.
 
 This is a version-specific verification record. Runtime pins and argv live in `xcheck/adapters.py`; this launch sketch does not replace them. Recheck native startup, tools and event shapes after upgrades. Current admission comes from the installed `xcheck doctor` and lane preflight, not this recorded result. The [protocol](../../Multi-Agent%20Cross-Check%20Protocol.md) owns shared preconditions, interaction paths and invariants.
 

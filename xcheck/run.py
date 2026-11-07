@@ -14,11 +14,10 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
-from . import adapters, capacity, herdr, validate
+from . import adapters, capacity, herdr, settlement, validate
 from .files import ROOT, Run, atomic_write, end_group, hold_life, is_alive, now, workspace
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 STILL_RUNNING = 3
@@ -152,9 +151,15 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     children: dict[str, subprocess.Popen] = {}
     if mode == "headless":
         for name in run.lanes:
-            with open(run.lane_dir(name) / "view.log", "ab") as out:
-                children[name] = subprocess.Popen(_runner_argv(base, name), stdout=out,
-                                                  stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                with open(run.lane_dir(name) / "view.log", "ab") as out:
+                    children[name] = subprocess.Popen(_runner_argv(base, name), stdout=out,
+                                                      stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError as error:
+                # No child was created. This is known failure, unlike an
+                # uncertain Herdr delivery; independent peers still launch.
+                with hold_life(run.lane_dir(name) / "alive"):
+                    _write_exit(run, name, "failed", f"could not start lane runner: {error}")
     else:
         def created(lane: str, pane: str) -> None:  # durable as soon as it exists
             run.panes[lane] = pane
@@ -166,7 +171,8 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
             settle_placement_failure(run, e)
         for name in run.lanes:
             if name not in run.panes:
-                _write_exit(run, name, "failed", "Herdr placement failed before this lane started")
+                with hold_life(run.lane_dir(name) / "alive"):
+                    _write_exit(run, name, "failed", "Herdr placement failed before this lane started")
     return _wait(run, children)
 
 
@@ -177,8 +183,9 @@ def settle_placement_failure(run, exc: herdr.HerdrError) -> None:
     in run.panes for diagnosis either way."""
     print(f"herdr placement failed: {exc}", flush=True)
     if isinstance(exc, herdr.HerdrPlacementError) and exc.launched is False:
-        _write_exit(run, exc.lane, "failed",
-                    f"Herdr placement failed before this lane started: {exc}")
+        with hold_life(run.lane_dir(exc.lane) / "alive"):
+            _write_exit(run, exc.lane, "failed",
+                        f"Herdr placement failed before this lane started: {exc}")
 
 
 def _message(web: bool, kind: str) -> str:
@@ -243,7 +250,7 @@ def wait(base: Path, timeout: int | None) -> int:
     until = time.time() + timeout if timeout else None
     while True:
         if (base / ".done").exists():
-            print((base / "STATUS.md").read_text(), flush=True)
+            print(render_status(run), flush=True)
             return 0
         if not is_alive(base / "supervisor.alive"):
             try:  # the supervisor is gone without finishing: become it
@@ -291,7 +298,8 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
             alive = _runner_alive(run, name, children)
             if alive is False:
                 _settle_dead_runner(run, name)
-                pending.discard(name)
+                if _exit_path(run, name).exists():
+                    pending.discard(name)
             # Unknown startup remains pending; elapsed time cannot prove a failed launch.
         if pending:
             if not warned and warn_at is not None and time.time() >= warn_at:
@@ -304,7 +312,7 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
                     except Exception as error:
                         print(f"{name}: progress diagnostics unavailable ({type(error).__name__})", flush=True)
             time.sleep(POLL)
-    status = render_status(run)
+    status = publish_status(run)
     if interrupted:
         print(status + f"xcheck: supervisor interrupted ({interrupted[0]}); "
               f"reattach with: xcheck wait --base {run.base}", flush=True)
@@ -340,6 +348,17 @@ def _settle_dead_runner(run: Run, name: str) -> None:
     """The runner died without exit.json. Stop its orphaned harness, then keep
     whatever answer it had already published."""
     d = run.lane_dir(name)
+    try:
+        lock = hold_life(d / "alive")
+    except BlockingIOError:
+        return  # a runner or another recovery owns settlement
+    with lock:
+        _recover(run, name)
+
+
+def _recover(run: Run, name: str) -> None:
+    """The lane life lock protects recovery through terminal publication."""
+    d = run.lane_dir(name)
     if _exit_path(run, name).exists():
         return  # the runner may have published between the liveness probes
     try:
@@ -353,22 +372,10 @@ def _settle_dead_runner(run: Run, name: str) -> None:
             note += "; its harness was still running and was stopped"
     elif harness:
         note += "; harness identity unverified (exited or process table unreadable)"
-    result = run.base / f"RESULT-{name}.md"
     # Only a natively completed turn in the saved stream is an answer; a
     # complete-looking RESULT file or draft is not.
     reader = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web, run.lane(name).model)
-    diagnostics = reader.diagnostics
-    if reader.notes():
-        note += "; " + "; ".join(reader.notes())
-    salvaged = reader.text if reader.completed and not reader.error and reader.text.strip() else None
-    if salvaged:
-        atomic_write(result, salvaged)
-        status, problems = validate.check(salvaged, run.contract)
-        _write_exit(run, name, status, f"{note}; natively completed answer: {'; '.join(problems) or 'valid'}", diagnostics)
-    else:
-        if result.exists():
-            note += "; retained output is diagnostic; native completion unverified"
-        _write_exit(run, name, "failed", note, diagnostics)
+    settlement.publish(run, name, reader, settlement.recorded_stop(d), context=note)
 
 
 def cancel(run: Run, name: str | None, reason: str) -> int:
@@ -426,16 +433,14 @@ def _signal(pid, sig: int) -> None:
 
 
 def _write_exit(run: Run, name: str, status: str, reason: str, diagnostics: list | None = None) -> None:
-    atomic_write(_exit_path(run, name), json.dumps({
-        "lane": name, "status": status, "reason": reason, "exit_code": None, "error": None,
-        "ended": now(), "stderr_tail": [], "diagnostics": diagnostics or [],
-    }, indent=2))
+    settlement.publish(run, name, adapters.Reader(run.lane(name).kind, run.web),
+                       settlement.Outcome(status=status, reason=reason, diagnostics=diagnostics or []))
 
 
 # ------------------------------------------------------------------ status
 
 
-def render_status(run: Run) -> str:
+def status_rows(run: Run) -> list[dict]:
     rows = []
     for name in run.lanes:
         try:
@@ -444,9 +449,12 @@ def render_status(run: Run) -> str:
             e = {"status": "running", "reason": "no exit.json yet"}
         account = (run.accounts or {}).get(name)
         rows.append({"lane": name, **({"account": account["name"]} if account else {}), **e})
-    atomic_write(run.base / "STATUS.json", json.dumps(
-        {"base": str(run.base), "mode": run.mode, "orch": run.orch, "started": run.started,
-         "contract": vars(run.contract), "lanes": rows}, indent=2))
+    return rows
+
+
+def render_status(run: Run, rows: list[dict] | None = None) -> str:
+    """Read-only projection. Observers never publish stale shared snapshots."""
+    rows = status_rows(run) if rows is None else rows
     lines = [f"# xcheck status — {run.base}", "",
              f"- mode `{run.mode}` · orchestrator `{run.orch}` · started {run.started}", "",
              "| lane | status | seconds | note |", "|---|---|---|---|"]
@@ -455,195 +463,15 @@ def render_status(run: Run) -> str:
         lane = f"{r['lane']} ({r['account']})" if r.get("account") else r["lane"]
         lines.append(f"| {lane} | {r['status']} | {r.get('seconds', '')} | {note} |")
     text = "\n".join(lines) + "\n"
-    atomic_write(run.base / "STATUS.md", text)
     return text
 
 
-# ------------------------------------------------------------------ doctor
-
-
-# Native human catalogs for kinds without a structured metadata API.
-MODEL_LISTS = {"grok": ["grok", "models"], "devin": ["devin", "models", "list"]}
-AGY_PROBE_MODEL = "xcheck-doctor-no-such-model"
-
-
-def agy_acp_models() -> list[str] | None:
-    """The model ids Antigravity's ACP server advertises, without a turn: an
-    unknown --model makes acpx stop after session/new and list them."""
-    from .lane import lane_env
-    with tempfile.TemporaryDirectory(prefix="xcheck-agy-doctor-") as tmp:
-        work, home = Path(tmp) / "work", adapters._agy_home(Path(tmp) / "home", web=False)
-        work.mkdir()
-        (home / "config" / "mcp_config.json").write_text('{"mcpServers": {}}')
-        try:  # without a staged login the server would open a browser sign-in
-            adapters.agy_login(home)
-        except adapters.Unavailable:
-            return None
-        cmd = [shutil.which("acpx") or "acpx", "--agent", adapters._acpx_quote(str(adapters.AGY_ACP_SERVER)), "--cwd", str(work),
-               "--model", AGY_PROBE_MODEL, "--approve-all", "--no-terminal", "--no-fs", "--format", "json",
-               "exec", "x"]
-        try:
-            spec = adapters.Launch(cmd, None, env_set={"GEMINI_HOME": str(home), "TMPDIR": str(home / "tmp"),
-                                                       **adapters.AGY_ENV})
-            out = subprocess.run(cmd, cwd=work, env=lane_env(spec, work),
-                                 capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-    found = re.search(r"Available models: ([^\"\n]+)", out.stdout + out.stderr)
-    if not found:
-        return None
-    # A terminal period plus whitespace starts prose, never part of an id.
-    sentence = re.split(r"\.\s", found.group(1).strip(), maxsplit=1)[0].rstrip(".")
-    models = [m.strip() for m in sentence.split(",")]
-    return models if all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", m) for m in models) else None
-
-
-def doctor() -> int:
-    """Check every adapter flag against the installed CLI's own help, and the
-    model pins against the CLIs' model lists. Config keys (including CODEX_CONFIG) and
-    argument values are pinned by unit tests and smoke runs. Grok additionally
-    probes the configured native startup without invoking a model."""
-    from . import install
-    from .lane import grok_admission_check
-    bad = 0
-    root, current = install.source_root(), install.installed_digest()
-    source = install.digest(root) if root and root.is_dir() else None
-    if source is not None and current == source:
-        print(f"ok   installed copy matches source {root} ({source})")
-    else:
-        print(f"FAIL installed copy {current or 'missing'} != source {source or 'missing'}: run bin/xcheck install")
-        bad += 1
-    for kind, (cmd, flags) in adapters.HELP_COMMANDS.items():
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            text = out.stdout + out.stderr  # agy prints its help on stderr
-        except (OSError, subprocess.TimeoutExpired) as e:
-            print(f"FAIL {kind}: {' '.join(cmd)}: {e}")
-            bad += 1
-            continue
-        if out.returncode != 0:
-            print(f"FAIL {kind}: help command exited {out.returncode}")
-            bad += 1
-            continue
-        missing = [f for f in flags if f not in text]
-        print(f"{'FAIL' if missing else 'ok  '} {kind}: " + (f"missing {missing}" if missing else f"{len(flags)} flags present"))
-        bad += bool(missing)
-    with tempfile.TemporaryDirectory(prefix="xcheck-grok-doctor-") as tmp:
-        # The full admission contract on the web placement: zero inference.
-        scratch = Path(tmp)
-        work = scratch / "work"
-        work.mkdir()
-        problem = adapters.unavailable(adapters.Lane("grok", "grok-4.7", "xhigh"))
-        if problem is None:
-            spec = adapters.launch(adapters.Lane("grok", "grok-4.7", "xhigh"), work,
-                                   scratch / "message.txt", scratch / "harness.log", True)
-            problem = grok_admission_check(work, spec)
-    print(f"FAIL grok: {problem}" if problem else
-          "ok   grok: --sandbox off startup and resolved-toolset contract (zero inference)")
-    bad += bool(problem)
-    # These are kind-scoped readiness checks, not positions in the optional
-    # local roster (which may contain one lane or a different order).
-    problem = adapters.unavailable(adapters.Lane("codex", ""))
-    print(f"FAIL codex: {problem}" if problem else "ok   codex: Codex CLI present")
-    bad += bool(problem)
-    problem = adapters.unavailable(adapters.Lane("claude", ""))
-    print(f"FAIL claude: {problem}" if problem else
-          "ok   claude: native limit flags and a first-party subscription login present")
-    bad += bool(problem)
-    # Read OpenCode through the same scoped API used at lane admission.
-    from . import models
-    opencode_listings = {}
-    listings: dict[tuple, tuple[str, str | None]] = {}
-
-    def listing(cmd: list[str]) -> tuple[str, str | None]:
-        if tuple(cmd) not in listings:
-            try:
-                out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                text = out.stdout + out.stderr
-                problem = (f"model listing exited {out.returncode}" if out.returncode else
-                           "model listing returned no output" if not text.strip() else None)
-                listings[tuple(cmd)] = (text, problem)
-            except (OSError, subprocess.TimeoutExpired) as error:
-                listings[tuple(cmd)] = ("", f"model listing failed: {type(error).__name__}")
-        return listings[tuple(cmd)]
-
-    agy = adapters.Lane("agy", "gemini-3.8-flash")
-    blocked = adapters.unavailable(agy)
-    stamp = adapters.AGY_ACP_DIR / "VERSION"
-    version = stamp.read_text().strip() if stamp.is_file() else "unknown (verify the installed ACP server)"
-    print(f"FAIL agy: {blocked}" if blocked else f"ok   agy: acpx, ACP server {version} and Keychain login present")
-    bad += bool(blocked)
-    acp_models = None if blocked else agy_acp_models()
-    # Provider reads decide each free pin's verdict; the client catalog check
-    # below stays a separate gate. When discovery fetched a provider's catalog
-    # the read carries its ids or the failure class, so the check reuses that
-    # instead of booting the model API again; it fetches only when discovery
-    # did not. `gone` fails until the next daily refresh drops the lane;
-    # `unknown` and `new` do not fail.
-    pins = (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)
-    pin_providers = {"opencode"} | {l.model.split("/", 1)[0]
-                                    for l in pins if l.kind == "opencode"} | ({"cline"} if any(l.kind == "cline" for l in pins) else set())
-    try:
-        report = models.discover(pin_providers)
-    except Exception as error:
-        print(f"unknown opencode discovery: {type(error).__name__}")
-        report = {}
-    roster = models.classify_roster(report, pins, adapters.DEFERRED)
-    verdicts = roster["verdicts"]
-    new_offers = sorted(s for s, m in roster["marks"].items()
-                        if m == "--add" and s.startswith("opencode:opencode/"))
-    for lane in pins:
-        if lane.kind == "agy":
-            ok = acp_models is not None and lane.model in acp_models
-            print(f"{'ok  ' if ok else 'FAIL'} agy model {lane.model} "
-                  + ("advertised by the ACP server" if ok else
-                     "NOT advertised by the ACP server" if acp_models is not None else "unchecked: no ACP model list"))
-            bad += not ok
-            continue
-        if lane.kind == "cline":
-            problem = adapters.unavailable(lane)
-            verdict = verdicts.get(f"cline:{lane.model}", "unknown")
-            print(f"{'FAIL' if problem or verdict == 'gone' else 'ok  '} cline pin {lane.model}: {problem or verdict}")
-            bad += bool(problem) or verdict == "gone"
-            continue
-        cmd = MODEL_LISTS.get(lane.kind)
-        if lane.kind == "opencode":
-            provider = lane.model.split("/", 1)[0]
-            if provider not in opencode_listings:
-                read = (report.get("providers") or {}).get(provider) or {}
-                if "client_ids" in read:
-                    opencode_listings[provider] = (set(read["client_ids"]), None)
-                elif "client_error" in read:
-                    opencode_listings[provider] = (set(), f"model API failed: {read['client_error']}")
-                else:
-                    try:
-                        opencode_listings[provider] = (set(models.review_metadata(provider)), None)
-                    except (OSError, subprocess.SubprocessError, ValueError) as error:
-                        opencode_listings[provider] = (set(), f"model API failed: {type(error).__name__}")
-            catalog, problem = opencode_listings[provider]
-            ok = problem is None and lane.model in catalog
-            verdict = verdicts.get(f"opencode:{lane.model}", "unknown")
-            print(f"{verdict:8}opencode pin {lane.model}: "
-                  + (f"unchecked: {problem}" if problem else
-                     "listed by model API" if ok else "NOT in opencode api model.list --standalone"))
-            bad += not ok or verdict == "gone"
-            continue
-        if cmd is None:
-            continue
-        text, problem = listing(cmd)
-        if problem:
-            print(f"FAIL {lane.kind} model {lane.model} unchecked: {problem}")
-            bad += 1
-            continue
-        ok = re.search(r"(?m)^[ \t]*(?:[-*][ \t]+)?" + re.escape(lane.model) + r"(?=[ \t]|$)", text) is not None
-        print(f"{'ok  ' if ok else 'FAIL'} {lane.kind} model {lane.model} {'listed' if ok else 'NOT in ' + ' '.join(cmd)}")
-        bad += not ok
-    for account, store in adapters.OPENCODE_ACCOUNTS.items():
-        problem = adapters.account_problem(store)
-        print(f"FAIL opencode account {account}: {problem}" if problem else
-              f"ok   opencode account {account}: Zen credential stored in {store}")
-        bad += bool(problem)
-    for selector in new_offers:
-        print(f"new     {selector}: ready Zen offer, not in the free roster yet; "
-              "the daily refresh adds it once its lane check ends done")
-    return 1 if bad else 0
+def publish_status(run: Run) -> str:
+    """Only the supervisor holding supervisor.alive publishes shared summaries."""
+    rows = status_rows(run)
+    text = render_status(run, rows)
+    atomic_write(run.base / "STATUS.json", json.dumps(
+        {"base": str(run.base), "mode": run.mode, "orch": run.orch, "started": run.started,
+         "contract": vars(run.contract), "lanes": rows}, indent=2))
+    atomic_write(run.base / "STATUS.md", text)
+    return text

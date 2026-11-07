@@ -133,3 +133,39 @@ class Catalog(unittest.TestCase):
         result = activity.opencode_failure(Run(), peer.name)
         self.assertEqual((result["type"], result["status"]), ("provider.quota", 402))
         self.assertNotIn("SECRET", json.dumps(result))
+
+    def test_wrapped_region_sentence_is_kept_without_the_response_body(self):
+        peer = adapters.parse_lane("opencode:kilo/stealth/crouton-alpha")
+        directory = self.work / "lane"
+        directory.mkdir(parents=True)
+        (directory / "activity.json").write_text('{"session_id":"session"}')
+        body = json.dumps({"error": {"message": "Provider returned error", "code": 403,
+                                      "metadata": {"raw": "This model is not available in your region.",
+                                                   "provider_name": "Stealth"}},
+                           "user_id": "org_secret"})
+        db = sqlite3.connect(directory / "opencode.db")
+        with db:
+            db.execute('CREATE TABLE session_v2 (id, directory, time_created)')
+            db.execute('CREATE TABLE session_message (session_id, type, data, time_updated, seq)')
+            db.execute('INSERT INTO session_v2 VALUES (?, ?, ?)', ('session', str(files.workspace(peer)), 101000))
+            message = {"model": {"providerID": "kilo", "id": "stealth/crouton-alpha"}, "error": {
+                "type": "provider.auth", "status": 403, "message": "Provider returned error",
+                "response": {"headers": {"authorization": "SECRET"}, "body": body}}}
+            db.execute('INSERT INTO session_message VALUES (?, ?, ?, ?, ?)',
+                       ('session', 'assistant', json.dumps(message), 102000, 0))
+        db.close()
+
+        class Run:
+            epoch = 100
+            def store(self, name): return None
+            def lane(self, name): return peer
+            def lane_dir(self, name): return directory
+
+        result = activity.opencode_failure(Run(), peer.name)
+        self.assertEqual(result["type"], "provider.auth")
+        self.assertEqual(result["status"], 403)
+        self.assertIn("This model is not available in your region.", result["message"])
+        encoded = json.dumps(result)
+        self.assertNotIn("SECRET", encoded)
+        self.assertNotIn("org_secret", encoded)
+        self.assertNotIn("provider_name", encoded)

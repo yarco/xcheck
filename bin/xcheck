@@ -137,7 +137,8 @@ def main() -> int:
                 print(f"{l.name:30} {r.status:17} {r.note}", flush=True)
             return 0
         if a.cmd == "doctor":
-            return run.doctor()
+            from xcheck import doctor
+            return doctor.check()
         if a.cmd == "models":
             import json
             from xcheck import models

@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .adapters import NATIVE_FREE_PROVIDERS, parse_lane
+from .environment import lane_env
 
 # Zen's live model list and deployed documentation. No source-branch prices.
 ZEN = "https://opencode.ai/inference/v1/models"
@@ -189,7 +190,11 @@ def zen_offer(row: dict) -> dict:
 
 def zen_candidates(payload: dict, docs: str) -> list[dict]:
     """Join documented free prices and chat endpoints to live IDs. No ID pins."""
-    return [zen_offer(row) for row in zen_join(payload, docs) if row["free"]
+    return zen_offers(zen_join(payload, docs))
+
+
+def zen_offers(rows: list[dict]) -> list[dict]:
+    return [zen_offer(row) for row in rows if row["free"]
             and row["endpoint"].endswith(("/chat/completions", "/responses", "/messages"))]
 
 
@@ -340,7 +345,6 @@ def client_metadata(*, env: dict | None = None, cwd: Path | None = None) -> dict
 def review_metadata(provider: str, config: dict | None = None) -> dict:
     """The catalog in a neutral directory under the selected lane's environment."""
     from .adapters import Launch, _opencode_env
-    from .lane import lane_env
     lane = parse_lane(f"opencode:{provider}/model")
     with tempfile.TemporaryDirectory(prefix="xcheck-opencode-models-") as tmp:
         work = Path(tmp).resolve()
@@ -406,8 +410,7 @@ def discover(providers: set[str] | None = None, source_file: Path | None = None)
                 # Absence from the documentation join is not absence from the
                 # live inventory. Keep that evidence even when prices lag.
                 read["served_ids"] = [item["id"] for item in payload["data"]]
-                rows = [zen_offer(row) for row in joined if row["free"]
-                        and row["endpoint"].endswith(("/chat/completions", "/responses", "/messages"))]
+                rows = zen_offers(joined)
             elif source["format"] in NATIVE_FREE_PROVIDERS:
                 joined = kilo_rows(payload)
                 rows = native_candidates(provider, payload)

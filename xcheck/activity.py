@@ -110,12 +110,50 @@ def _opencode_messages(run, name, session):
         return db.execute("SELECT data, time_updated FROM session_message WHERE session_id=? AND type='assistant' ORDER BY time_updated DESC, seq DESC LIMIT 20", (session,)).fetchall()
 
 
+def _wrapped_provider_text(response) -> str | None:
+    """The provider sentence Kilo nests under a generic wrapper.
+
+    OpenCode stores ``Provider returned error`` as the message and the real
+    refusal, such as a region block, at ``error.metadata.raw`` inside the JSON
+    response body. Copy only that short string. Never copy the body, headers,
+    or account ids.
+    """
+    if not isinstance(response, dict):
+        return None
+    body = response.get('body')
+    if not isinstance(body, str) or not body or len(body) > 4000:
+        return None
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return None
+    inner = parsed.get('error') if isinstance(parsed, dict) else None
+    meta = inner.get('metadata') if isinstance(inner, dict) else None
+    raw = meta.get('raw') if isinstance(meta, dict) else None
+    if not isinstance(raw, str):
+        return None
+    raw = ' '.join(raw.split())
+    if not raw or len(raw) > 300:
+        return None
+    return raw
+
+
+def _native_error_message(error: dict) -> str:
+    message = ' '.join(str(error.get('message') or '').split())
+    raw = _wrapped_provider_text(error.get('response'))
+    if raw and raw not in message:
+        message = f'{message}: {raw}' if message else raw
+    return message[:500]
+
+
 def opencode_failure(run, name):
     """Supplement a settled ACP auth failure, which V2 strips of its cause.
 
-    Never export the native response body, headers or credential data. This
-    is deliberately separate from progress snapshots, which stay text-free.
-    An unavailable/mismatched store leaves the authoritative ACP error intact.
+    Never export the native response body, headers or credential data. A
+    wrapped provider sentence is the one exception, and only that sentence.
+    This is deliberately separate from progress snapshots, which stay
+    text-free. An unavailable/mismatched store leaves the authoritative ACP
+    error intact.
     """
     try:
         session = json.loads((run.lane_dir(name) / 'activity.json').read_text())['session_id']
@@ -131,7 +169,7 @@ def opencode_failure(run, name):
         error = message.get('error') or {}
         if (error.get('type') not in ('provider.auth', 'provider.quota') and error.get('status') != 429) or not isinstance(error.get('message'), str):
             return None
-        result = dict(kind='native_error', type=error.get('type', 'provider.rate_limit'), message=' '.join(error['message'].split())[:500])
+        result = dict(kind='native_error', type=error.get('type', 'provider.rate_limit'), message=_native_error_message(error))
         if isinstance(error.get('status'), int) and not isinstance(error['status'], bool):
             result['status'] = error['status']
         return result

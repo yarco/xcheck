@@ -61,6 +61,7 @@ class NativeAuthFailure(unittest.TestCase):
     setUp = support.EndToEnd.setUp
 
     def test_settlement_recovers_typed_auth_error_without_response_payload(self):
+        from xcheck import settlement
         peer = adapters.Lane('opencode', 'opencode/big-pickle')
         name = peer.name
         current = files.Run(self.base, {name: peer}, support.CONTRACT, False, 0, None,
@@ -87,7 +88,7 @@ class NativeAuthFailure(unittest.TestCase):
         with patch.dict(os.environ, XDG_DATA_HOME=str(store)):
             # Progress remains metadata-only, even when the native record has an error.
             self.assertNotIn('expired', json.dumps(activity.opencode_native(current, name, 'ses_auth')))
-            runner._finish(current, name, time.time(), 'failed', reader.error, 1, reader, directory / 'stderr.log')
+            settlement.publish(current, name, reader, settlement.Outcome(started=time.time(), code=1))
             record = json.loads((directory / 'exit.json').read_text())
             self.assertEqual(record['status'], 'failed')
             self.assertEqual(record['error'], reader.error)
@@ -110,7 +111,8 @@ class NativeAuthFailure(unittest.TestCase):
                 db.execute('UPDATE session_message SET data=?', (json.dumps(message),))
             self.assertIsNone(activity.opencode_failure(current, name))
         with patch.object(activity, 'opencode_failure') as probe:
-            runner._finish(current, name, time.time(), 'timeout', 'operator cap', 1, reader, directory / 'stderr.log')
+            (directory / 'exit.json').unlink()
+            settlement.publish(current, name, reader, settlement.Outcome(status='timeout', reason='operator cap'))
             probe.assert_not_called()
 
     def test_assigned_account_store_is_the_native_record(self):

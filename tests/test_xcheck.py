@@ -232,6 +232,30 @@ class AcpCorrelation(unittest.TestCase):
                 self.assertEqual(r.error, "usage limit reached")
                 self.assertFalse(r.completed)
 
+    def test_acpx_error_codes_lead_the_reason(self):
+        # Captured from acpx 0.21.1 --format json: a spawn failure and a usage error.
+        spawn = {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message":
+                 "Failed to spawn agent command: /nonexistent/agent. The agent process could not start because a "
+                 "required executable, interpreter, working directory, or other launch path was not found. Check "
+                 "the command, effective PATH, and working directory, or verify the custom agent's configured argv.",
+                 "data": {"acpxCode": "RUNTIME", "detailCode": "AGENT_SPAWN_ENOENT", "origin": "cli",
+                          "sessionId": "unknown"}}}
+        usage = {"jsonrpc": "2.0", "id": None, "error": {"code": -32602, "message":
+                 "Invalid --agent command: unterminated quote",
+                 "data": {"acpxCode": "USAGE", "origin": "cli", "sessionId": "unknown"}}}
+        for kind in (k for k in adapters.KINDS if not adapters.Reader(k).native()):
+            with self.subTest(kind=kind):
+                r = self.feed(spawn, kind=kind)
+                r.finish()
+                self.assertTrue(r.error.startswith("RUNTIME/AGENT_SPAWN_ENOENT: Failed to spawn agent command"), r.error)
+                self.assertLessEqual(len(r.error), 300)
+                r = self.feed(usage, kind=kind)
+                r.finish()
+                self.assertEqual(r.error, "USAGE: Invalid --agent command: unterminated quote")
+        # An agent's own error data carries no acpx code and keeps its text.
+        r = self.feed(PROMPT_3, {"id": 3, "error": {"message": "rate limited", "data": {"service": "session"}}})
+        self.assertEqual(r.error, "rate limited")
+
     def test_a_later_session_prompt_request_does_not_take_the_prompt_id(self):
         r = self.feed(PROMPT_3, {"jsonrpc": "2.0", "id": 7, "method": "session/prompt", "params": {}},
                       _say("answer"), DONE_3)
@@ -1021,13 +1045,16 @@ class HerdrOwnership(unittest.TestCase):
         class FakeRun:
             panes = dict(recorded)
 
+            def lane_dir(self, name):
+                return Path(tmp)
+
             def save(self):
                 pass
 
         def fake_write(run, name, status, reason):
             written.update(name=name, status=status, reason=reason)
 
-        with patch.object(runmod, "_write_exit", side_effect=fake_write):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(runmod, "_write_exit", side_effect=fake_write):
             runmod.settle_placement_failure(FakeRun(), cm.exception)
         self.assertEqual(written["name"], "lane-a")
         self.assertEqual(written["status"], "failed")
@@ -1267,20 +1294,21 @@ class Installation(unittest.TestCase):
                             path.chmod(0o755)
 
     def test_doctor_rejects_failed_help_even_when_no_adapter_flags_are_needed(self):
-        from xcheck import install, models, run
+        from xcheck import agy, doctor, install, models, run
         with patch.object(install, "source_root", return_value=REPO), \
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(adapters, "HELP_COMMANDS", {"opencode acp": (["opencode", "acp", "--help"], [])}), \
              patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "unavailable")), \
              patch.object(adapters, "unavailable", return_value=None), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
-             patch.object(run, "agy_acp_models", return_value=[]), \
+             patch.object(agy, "registry_version", return_value=None), \
+             patch.object(agy, "inventory", return_value=[]), \
              redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(run.doctor(), 1)
+            self.assertEqual(doctor.check(), 1)
         self.assertIn("FAIL opencode acp: help command exited 1", output.getvalue())
 
     def test_doctor_detects_stale_installed_copy_from_captured_help(self):
-        from xcheck import install, lane, models, run
+        from xcheck import agy, doctor, grok, install, lane, models, run
         helps = {tuple(cmd): (FIX / "cli-help" / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
         listed = "\n".join(l.model for l in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))
@@ -1300,12 +1328,13 @@ class Installation(unittest.TestCase):
              patch.object(install, "installed_digest", return_value="stale"), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
-             patch.object(lane, "_grok_probe_session",
+             patch.object(grok, "probe_session",
                           return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
-             patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
+             patch.object(agy, "registry_version", return_value=None), \
+             patch.object(agy, "inventory", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(run.doctor(), 1)
+            self.assertEqual(doctor.check(), 1)
         self.assertIn("FAIL installed copy stale != source", output.getvalue())
 
         with tempfile.TemporaryDirectory() as probe_tmp, \
@@ -1313,12 +1342,13 @@ class Installation(unittest.TestCase):
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
-             patch.object(lane, "_grok_probe_session",
+             patch.object(grok, "probe_session",
                           return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
-             patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
+             patch.object(agy, "registry_version", return_value=None), \
+             patch.object(agy, "inventory", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()):
-            self.assertEqual(run.doctor(), 0)
+            self.assertEqual(doctor.check(), 0)
 
         helps[tuple(adapters.HELP_COMMANDS["grok"][0])] = helps[tuple(adapters.HELP_COMMANDS["grok"][0])].replace("--sandbox", "")
         with tempfile.TemporaryDirectory() as probe_tmp, \
@@ -1326,12 +1356,13 @@ class Installation(unittest.TestCase):
              patch.object(install, "installed_digest", return_value=install.digest(REPO)), \
              patch.object(run.subprocess, "run", side_effect=fake_run), \
              patch.object(adapters, "unavailable", return_value=None), \
-             patch.object(lane, "_grok_probe_session",
+             patch.object(grok, "probe_session",
                           return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
-             patch.object(run, "agy_acp_models", return_value=listed.splitlines()), \
+             patch.object(agy, "registry_version", return_value=None), \
+             patch.object(agy, "inventory", return_value=listed.splitlines()), \
              redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(run.doctor(), 1)
+            self.assertEqual(doctor.check(), 1)
         self.assertIn("grok: missing ['--sandbox']", output.getvalue())
 
 

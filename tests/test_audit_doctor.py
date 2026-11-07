@@ -11,7 +11,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_xcheck as support  # noqa: E402
-from xcheck import adapters, install, lane, models, run
+from xcheck import adapters, agy, doctor, grok, install, lane, models, run
 
 class ExactListedModels(unittest.TestCase):
 
@@ -38,12 +38,13 @@ class ExactListedModels(unittest.TestCase):
                 patch.object(install, 'installed_digest', return_value=install.digest(REPO)), \
                 patch.object(run.subprocess, 'run', side_effect=fake), \
                 patch.object(adapters, 'unavailable', return_value=None), \
-                patch.object(lane, '_grok_probe_session',
+                patch.object(grok, 'probe_session',
                              return_value=support.grok_probe_ok(Path(probe_tmp))), \
                 patch.object(models, 'discover', return_value={"providers": {}, "models": []}), \
-                patch.object(run, 'agy_acp_models', return_value=['gemini-3.8-flash', 'gemini-4-argon']), \
+                patch.object(agy, 'registry_version', return_value=None), \
+                patch.object(agy, 'inventory', return_value=['gemini-3.8-flash', 'gemini-4-argon']), \
                 redirect_stdout(io.StringIO()) as output:
-            code = run.doctor()
+            code = doctor.check()
         return (code, output.getvalue())
 
     def test_rejects_banner_and_other_model_prefix(self):

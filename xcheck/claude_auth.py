@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import capacity
 from .files import ROOT, defer_stop, end_group
+from .environment import lane_env
 
 LOGIN_COMMAND: Path | None = None
 REFRESH_TIMEOUT = 55
@@ -24,8 +25,7 @@ class DeadlineExpired(BaseException):
 
 
 def environment() -> dict[str, str]:
-    from .adapters import Launch
-    from .lane import lane_env
+    from .types import Launch
     return lane_env(Launch([], None, env_set={"DISABLE_AUTOUPDATER": "1"}), Path.cwd())
 
 

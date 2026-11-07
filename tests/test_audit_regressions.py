@@ -45,7 +45,7 @@ class ChildReaping(unittest.TestCase):
                 current = SimpleNamespace(base=base, lanes={'fast': None, 'slow': None}, lane_dir=lambda lane: base / 'lanes' / lane)
                 watcher = threading.Thread(target=observe_then_finish)
                 watcher.start()
-                with patch.object(run, 'render_status', return_value=''):
+                with patch.object(run, 'publish_status', return_value=''):
                     self.assertEqual(run._wait(current, {'fast': fast, 'slow': slow}), 0)
                 watcher.join()
                 self.assertEqual(observation, [0], 'A completed direct child remained unreaped while a peer was pending')
@@ -73,7 +73,7 @@ class LongReviewWarning(unittest.TestCase):
                 if len(pauses) == 2:
                     (directory / 'exit.json').write_text('{}')
             row = dict(lane='slow', live=True, phase=dict(phase='running'), stream=dict(events=42, completed_tools=3))
-            with patch.object(run.time, 'time', return_value=3602), patch.object(run.time, 'sleep', side_effect=pause), patch.object(run.signal, 'signal'), patch.object(run, '_runner_alive', return_value=True), patch.object(run, 'render_status', return_value=''), patch.object(activity, 'snapshot', return_value=row) as inspect, redirect_stdout(io.StringIO()) as output:
+            with patch.object(run.time, 'time', return_value=3602), patch.object(run.time, 'sleep', side_effect=pause), patch.object(run.signal, 'signal'), patch.object(run, '_runner_alive', return_value=True), patch.object(run, 'publish_status', return_value=''), patch.object(activity, 'snapshot', return_value=row) as inspect, redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(run._wait(current, {}), 0)
             self.assertEqual(inspect.call_count, 1)
             self.assertEqual(len(pauses), 2)

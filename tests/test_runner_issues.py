@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import test_xcheck as support
 import test_runtime_e2e as runtime
-from xcheck import adapters, capacity, install, lane, models, run
+from xcheck import adapters, agy, capacity, doctor, grok, install, lane, models, run
 
 # The fake OpenCode server's native upstream rate-limit error (tests/fake/harness).
 UPSTREAM_LIMIT = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
@@ -31,7 +31,7 @@ class ReportStartup(unittest.TestCase):
     def probe(self, result):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(lane.subprocess, 'run', return_value=result) as start:
-            problem = lane.grok_startup_check(Path(tmp))
+            problem = grok.version_probe(Path(tmp))[1]
             call = start.call_args
         self.assertEqual(call.args[0][-2:], ['version', '--json'])
         self.assertEqual(call.args[0][1:3], ['--sandbox', 'off'])
@@ -71,12 +71,12 @@ class ReportStartup(unittest.TestCase):
     def test_probe_error_or_timeout_is_not_readiness(self):
         for exc in (FileNotFoundError('grok unavailable'), subprocess.TimeoutExpired('grok', 30)):
             with self.subTest(exc=exc), patch.object(lane.subprocess, 'run', side_effect=exc):
-                self.assertIn('startup-unavailable', lane.grok_startup_check(Path('/tmp')))
+                self.assertIn('startup-unavailable', grok.version_probe(Path('/tmp'))[1])
 
     def test_probe_never_swallows_cancellation(self):
         with patch.object(lane.subprocess, 'run', side_effect=lane._Stop('SIGTERM')):
             with self.assertRaises(lane._Stop):
-                lane.grok_startup_check(Path('/tmp'))
+                grok.version_probe(Path('/tmp'))
 
     def admission(self, result, log=None, session=None, probe_problem=None):
         """result: the `version --json` CompletedProcess. The session probe is
@@ -89,8 +89,8 @@ class ReportStartup(unittest.TestCase):
             probe = ((None, None, None, probe_problem) if probe_problem else
                      support.grok_probe_ok(root, log=log, session=session))
             with patch.object(lane.subprocess, 'run', return_value=result), \
-                    patch.object(lane, '_grok_probe_session', return_value=probe):
-                return lane.grok_admission_check(work, spec)
+                    patch.object(grok, 'probe_session', return_value=probe):
+                return grok.admission(work, spec)
 
     def test_admission_accepts_any_native_version_when_the_contract_holds(self):
         for version in ('1.0.51', '9.9.9', '1.0.67 (2fe064390d07)'):
@@ -151,10 +151,10 @@ class ReportStartup(unittest.TestCase):
             work = Path(tmp)
             command = ([sys.executable, '-c', script], work / adapters.GROK_PROBE_LOG)
             with patch.object(adapters, 'grok_probe_command', return_value=command), \
-                    patch.object(lane, 'lane_env', return_value=dict(os.environ)), \
-                    patch.object(lane, 'GROK_PROBE_TIMEOUT', 10):
+                    patch.object(grok, 'lane_env', return_value=dict(os.environ)), \
+                    patch.object(grok, 'PROBE_TIMEOUT', 10):
                 started = time.monotonic()
-                result = lane._grok_probe_session(work, None)
+                result = grok.probe_session(work, None)
                 return result, time.monotonic() - started
 
     def test_probe_reads_every_line_of_one_write(self):
@@ -178,7 +178,7 @@ class ReportStartup(unittest.TestCase):
         self.assertIn('startup-unavailable', problem)
 
     def doctor(self, probe, listing_failure=False, suffix=False, acp_models=None, report=None,
-               fetch=None, session_probe=None):
+               fetch=None, session_probe=None, registry=None):
         helps = {tuple(cmd): (support.FIX / 'cli-help' / f'{kind.replace(" ", "-")}.txt').read_text()
                  for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
         self.calls = []
@@ -205,13 +205,14 @@ class ReportStartup(unittest.TestCase):
                 patch.object(install, 'installed_digest', return_value=install.digest(support.REPO)), \
                 patch.object(run.subprocess, 'run', side_effect=fake_run), \
                 patch.object(adapters, 'unavailable', return_value=None), \
-                patch.object(lane, '_grok_probe_session',
+                patch.object(grok, 'probe_session',
                              return_value=session_probe or support.grok_probe_ok(Path(probe_tmp))), \
                 discovery_or_fetch, \
-                patch.object(run, 'agy_acp_models', return_value=acp_models if acp_models is not None else
+                patch.object(agy, 'registry_version', return_value=registry), \
+                patch.object(agy, 'inventory', return_value=acp_models if acp_models is not None else
                              [peer.model for peer in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN) if peer.kind == 'agy']), \
                 redirect_stdout(io.StringIO()) as out:
-            code = run.doctor()
+            code = doctor.check()
         return code, out.getvalue()
 
     def _version_json(self):
@@ -222,6 +223,26 @@ class ReportStartup(unittest.TestCase):
                                  acp_models=['gemini-3.8-flash-low'])
         self.assertEqual(code, 1, text)
         self.assertIn('agy model gemini-3.8-flash NOT advertised by the ACP server', text)
+
+    def test_doctor_compares_the_agy_server_with_the_acp_registry_as_advice(self):
+        ok = subprocess.CompletedProcess([], 0, self._version_json(), '')
+        with tempfile.TemporaryDirectory() as acp, patch.object(adapters, 'AGY_ACP_DIR', Path(acp)):
+            (Path(acp) / 'VERSION').write_text('1.4.5\n')
+            for listed, line in (('1.4.5', 'ok   agy server: 1.4.5 matches the ACP registry'),
+                                 ('1.5.0', 'new     agy server: ACP registry lists 1.5.0, installed 1.4.5'),
+                                 (None, 'unknown agy server: ACP registry entry unreadable')):
+                with self.subTest(listed=listed):
+                    code, text = self.doctor(ok, registry=listed)
+                    self.assertEqual(code, 0, text)  # a stale or unreadable registry never fails doctor
+                    self.assertIn(line, text)
+
+    def test_registry_version_reads_only_a_version_string(self):
+        for listed, want in (({"id": "antigravity-acp", "version": "1.4.5"}, "1.4.5"),
+                             ({"version": "1.4.5\nFAIL"}, None), ({"version": 2}, None), ([], None)):
+            with self.subTest(listed=listed), patch.object(models, 'fetch', return_value=listed):
+                self.assertEqual(agy.registry_version(), want)
+        with patch.object(models, 'fetch', side_effect=OSError('offline')):
+            self.assertIsNone(agy.registry_version())
 
     def test_doctor_fails_live_startup_even_when_all_flags_and_pins_exist(self):
         code, text = self.doctor(subprocess.CompletedProcess([], 1, '',

@@ -33,7 +33,7 @@ from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from pathlib import Path
 
-from .adapters import Lane
+from .types import Lane
 
 RESERVE = 10.0
 TIMEOUT = 20.0     # per network call or local command

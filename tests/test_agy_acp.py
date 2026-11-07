@@ -346,14 +346,14 @@ class Lanes(unittest.TestCase):
                 self.assertIn("object", adapters.unavailable(adapters.Lane("agy", "gemini-flash-agent")))
 
     def test_doctor_quotes_its_agent_and_scrubs_the_lane_environment(self):
-        from xcheck import run
+        from xcheck import agy
         server = self.root / "server's quoted path" / "agy_acp_server.par"
         with patch.object(adapters, "AGY_ACP_SERVER", server), \
                 patch.dict(os.environ, {"ACPX_AUTH_TOKEN": "synthetic", "TEST_API_KEY": "synthetic"}), \
                 patch.object(adapters, "agy_login"), \
-                patch.object(run.subprocess, "run") as execute:
+                patch.object(agy.subprocess, "run") as execute:
             execute.return_value = subprocess.CompletedProcess([], 1, "Available models: gemini-flash-agent\n", "")
-            self.assertEqual(run.agy_acp_models(), ["gemini-flash-agent"])
+            self.assertEqual(agy.inventory(), ["gemini-flash-agent"])
         argv = execute.call_args.args[0]
         self.assertEqual(shlex.split(argv[argv.index("--agent") + 1]), [str(server)])
         env = execute.call_args.kwargs["env"]
@@ -362,10 +362,10 @@ class Lanes(unittest.TestCase):
         self.assertEqual(env["XCHECK_LANE"], "1")
 
     def test_doctor_reads_the_advertised_models_without_a_turn(self):
-        from xcheck import run
+        from xcheck import agy
         with patch.object(adapters, "AGY_ACP_SERVER", self.root / "agy-acp" / "agy_acp_server.par"), \
                 patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}"}):
-            self.assertEqual(run.agy_acp_models(), ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"])
+            self.assertEqual(agy.inventory(), ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"])
 
     def test_unknown_inventory_skips_without_claiming_model_disappearance(self):
         row = self.agy("models-unavailable")
@@ -390,20 +390,20 @@ class Lanes(unittest.TestCase):
         held.release()
 
     def test_advertised_model_sentence_ignores_trailing_prose_and_space(self):
-        from xcheck import run
+        from xcheck import agy
         for tail in [". Use --model to choose.", ".   "]:
             text = "Available models: gemini-3.8-flash-high, gemini-3.8-flash-low" + tail
             with self.subTest(tail=tail), patch.object(adapters, "agy_login"), \
-                    patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
-                self.assertEqual(run.agy_acp_models(), ["gemini-3.8-flash-high", "gemini-3.8-flash-low"])
+                    patch.object(agy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
+                self.assertEqual(agy.inventory(), ["gemini-3.8-flash-high", "gemini-3.8-flash-low"])
 
     def test_advertised_model_list_drops_the_sentence_period(self):
-        from xcheck import run
+        from xcheck import agy
         text = ('Cannot apply --model "x": the ACP agent did not advertise that model. '
                 'Available models: gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-3.8-flash-low.')
         with patch.object(adapters, "agy_login"), \
-                    patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
-            self.assertEqual(run.agy_acp_models(),
+                    patch.object(agy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
+            self.assertEqual(agy.inventory(),
                              ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"])
 
 

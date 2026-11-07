@@ -6,6 +6,7 @@ import platform
 import shutil
 import subprocess
 from pathlib import Path
+from .environment import lane_env
 
 CATALOG = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
 DOCS = "https://docs.cline.bot/getting-started/free-models"
@@ -88,7 +89,6 @@ def metadata(payload: dict) -> dict:
     Neither the SDK's cached models nor Models.dev establish free pricing.
     """
     from .adapters import Launch
-    from .lane import lane_env
     root, _ = installation()
     script = """
 import {pathToFileURL} from 'node:url';

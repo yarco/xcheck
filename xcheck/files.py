@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .adapters import Lane
+from .types import Lane
 from .validate import Contract
 
 # Runs, pool locks and liveness files live here; tests point it elsewhere so

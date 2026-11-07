@@ -23,49 +23,11 @@ import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from .environment import lane_env
+from .types import Lane, Launch
 
 KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin", "cline")
 NATIVE_FREE_PROVIDERS = ("kilo",)
-
-@dataclass(frozen=True)
-class Lane:
-    kind: str
-    model: str
-    effort: str = ""  # empty for agy/devin; optional OpenCode ACP effort
-
-    @property
-    def name(self) -> str:
-        """Provenance name: harness + exact model (+ effort when it is a flag)."""
-        model = self.model.replace("/", "-").replace(":", "-")
-        base = model if model.startswith(self.kind) else f"{self.kind}-{model}"
-        if self.effort and not base.endswith(f"-{self.effort}"):
-            base = f"{base}-{self.effort}"
-        return base
-
-    @property
-    def pool(self) -> str:
-        if self.kind == "agy":
-            return "agy-gemini"
-        if self.kind == "opencode":
-            # OpenCode has no quota meter, so a pool only serializes: one run per
-            # Zen model (different free models run side by side), and one run per
-            # other provider, whose models share that account's limits.
-            provider, _, model = self.model.partition("/") if "/" in self.model else ("opencode", "", self.model)
-            return f"opencode-zen-{model}" if provider == "opencode" else f"opencode-{provider}"
-        return self.kind
-
-    @property
-    def zen(self) -> bool:
-        """Spends an OpenCode Zen account (bare model or `opencode/…`)."""
-        return self.kind == "opencode" and self.pool.startswith("opencode-zen-")
-
-    def to_json(self) -> dict:
-        return {"kind": self.kind, "model": self.model, "effort": self.effort}
-
-    @classmethod
-    def from_json(cls, data: dict) -> "Lane":
-        return cls(data["kind"], data["model"], data.get("effort", ""))
-
 
 DEFAULT_ROSTER = (
     Lane("codex", "gpt-6.1-sol", "high"),
@@ -175,7 +137,6 @@ def assign_accounts(lanes) -> dict[str, str]:
 def account_problem(store: Path) -> str | None:
     """Zero-inference check that `store` holds a stored Zen credential. Reads
     only connection types from `auth list`; never prints or keeps a secret."""
-    from .lane import lane_env
     if not store.is_file():
         return f"store {store} is missing"
     spec = Launch(["opencode", "auth", "list", "--standalone", "--format", "json"], None,
@@ -202,14 +163,6 @@ def account_problem(store: Path) -> str | None:
 
 class Unavailable(Exception):
     """A lane cannot start here; found while building its command, before spend."""
-
-
-@dataclass
-class Launch:
-    argv: list[str]
-    stdin: Path | None  # file to feed on stdin, or None for /dev/null
-    env_set: dict[str, str] = field(default_factory=dict)
-    kind: str = ""  # lane kind, for kind-scoped env scrubbing
 
 
 def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool,
@@ -282,7 +235,6 @@ def _codex_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -
     The installed binary is the runner's direct child and holds the pool
     itself. The ACP form of this lane (codex-acp) is kept on the `acp/codex`
     branch."""
-    from .lane import lane_env
     features = [arg for f in CODEX_DISABLED_FEATURES for arg in ("--disable", f)]
     env = lane_env(Launch([], message), work)
     try:
@@ -329,7 +281,6 @@ def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path, store: Pa
         # Unset, ACP selects the model's first (lowest) variant; `default`
         # leaves the provider's own effort. Models without variants have no
         # effort option to set.
-        from .lane import lane_env
         from .models import client_metadata
         model = _opencode_model(lane)[1]
         try:
@@ -411,7 +362,7 @@ GROK_REQUIREMENTS = GROK_DIR / "requirements.toml"
 GROK_MCP_ALLOWED = ("qmd", "semble", "deepwiki")
 GROK_REVIEW_TOOLS = ("read_file", "grep", "list_dir", "run_terminal_cmd")
 GROK_WEB_TOOLS = ("web_search", "web_fetch")
-# Admission is a behavior check, not a version pin: lane.grok_admission_check
+# Admission is a behavior check, not a version pin: grok.admission
 # drives the lane's own `grok agent … stdio` through initialize + session/new
 # (zero inference) and asserts the resolved toolset — an unknown tool id makes
 # the profile allowlist fail OPEN to the full toolset — plus zero hooks, only
@@ -745,7 +696,6 @@ def _claude_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) 
 def claude_problem(*, allow_missing: bool = False) -> str | None:
     """A subscription lane must prove the claude.ai login in the scrubbed lane
     environment, and the installed CLI must still list the flags it relies on."""
-    from .lane import lane_env
     env = lane_env(Launch([], None), Path.cwd())
     claude = shutil.which("claude")
     if not claude:
@@ -929,7 +879,6 @@ def unavailable(lane: Lane) -> str | None:
         from . import cline
         try:
             _, binary = cline.installation()
-            from .lane import lane_env
             out = subprocess.run([str(binary), "--help"], capture_output=True, text=True, timeout=15,
                                  env=lane_env(Launch([], None, kind="cline"), Path.cwd()))
             if out.returncode or any(flag not in out.stdout for flag in cline.FLAGS):
@@ -1007,9 +956,15 @@ def _id_key(value) -> str:
 
 
 def _error_text(error: dict) -> str:
+    """An error's reason. acpx's own errors carry `data.acpxCode` (and often
+    `detailCode`); they lead the reason so it survives the clip and names the
+    cause without parsing prose."""
     detail = error.get("data")
-    return _clip(str((detail.get("message") if isinstance(detail, dict) else detail)
-                     or error.get("message") or error), 300)
+    text = str((detail.get("message") if isinstance(detail, dict) else detail)
+               or error.get("message") or error)
+    codes = [c for c in ((detail.get("acpxCode"), detail.get("detailCode")) if isinstance(detail, dict) else ())
+             if isinstance(c, str) and c]
+    return _clip(f"{'/'.join(codes)}: {text}" if codes else text, 300)
 
 
 @dataclass
@@ -1109,8 +1064,8 @@ class Reader:
         elif not self.completed and not self.error and (self._held or self._failure):
             self.error = self._held or self._failure
 
-    def feed(self, o: dict) -> str | None:
-        """Consume one stream object; return a short human line for the view."""
+    def feed(self, o: dict) -> None:
+        """Consume native evidence. Presentation belongs exclusively to view.py."""
         if native := self.native():
             return native(o)
         if "method" in o:
@@ -1134,7 +1089,7 @@ class Reader:
             return self._response(o)
         return None
 
-    def _response(self, o: dict) -> str | None:
+    def _response(self, o: dict) -> None:
         rid, result, error = o.get("id"), o.get("result"), o.get("error")
         if isinstance(result, dict) and "stopReason" in result:
             if self._prompt_id is None or rid != self._prompt_id:
@@ -1145,7 +1100,7 @@ class Reader:
                 self.completed = True
             else:
                 self.error = f"{self.kind.title()} ended without completing the review: {reason}"
-            return f"· end {reason}"
+            return
         key = _id_key(rid)
         is_prompt = self._prompt_id is not None and rid == self._prompt_id
         if not isinstance(error, dict):
@@ -1154,29 +1109,28 @@ class Reader:
                 if is_prompt and self._held:
                     # The other request at this id is answered: the held error was the prompt's.
                     self.error, self._held = self._held, None
-                    return f"! {self.error}"
+                    return
             return None
         message = _error_text(error)
         if is_prompt and self._open.get(key):
             if self._held is None:
                 self._held = message
-                return f"! {message}"
+                return
             # Both responses at this id are errors; one of them ended the prompt.
             self._open[key] -= 1
             self.error, self._held = f"{self._held}; {message}", None
-            return f"! {message}"
+            return
         if is_prompt:
             # The prompt's own failure: no result can legally follow it.
             self.error = self._failure = message
-            return f"! {message}"
+            return
         if self._open.get(key):
             self._open[key] -= 1
         # acpx's own id-null error (agent disconnected, --model refused) or an
         # error answering another request: the reason, unless the turn completes.
         self._failure = message
-        return f"! {message}"
 
-    def _notification(self, o: dict) -> str | None:
+    def _notification(self, o: dict) -> None:
         method, params = o.get("method"), o.get("params")
         params = params if isinstance(params, dict) else {}  # a malformed event is ignored, never fatal
         if (self.kind == "grok" and method == "_x.ai/mcp/server_status"
@@ -1194,14 +1148,13 @@ class Reader:
             return None
         if kind == "tool_call":
             self._buf.clear()
-            return f"> {_clip(update.get('title') or update.get('kind') or 'tool', 120)}"
         return None
 
     # -- codex: `codex exec --json`. Each agent_message is a whole message, so
     # the last one is the answer; turn.completed ends the turn and turn.failed
     # fails it. A top-level `error` (a reconnect notice) can recover, so it is
     # only the reason if the turn never completes.
-    def _cline(self, o: dict) -> str | None:
+    def _cline(self, o: dict) -> None:
         if o.get("type") == "run_result":
             model = o.get("model") if isinstance(o.get("model"), dict) else {}
             if o.get("finishReason") != "completed":
@@ -1211,10 +1164,10 @@ class Reader:
             elif not self.error:
                 self.completed = True
                 self.text = o.get("text") if isinstance(o.get("text"), str) else ""
-            return "· end turn" if self.completed else f"! {self.error}"
+            return
         if o.get("type") in ("error", "run_aborted"):
             self.error = _clip(str(o.get("message") or o.get("reason") or "Cline error"), 300)
-            return f"! {self.error}"
+            return
         if o.get("type") == "agent_event":
             event = o.get("event") or {}
             if event.get("type") == "error" and not event.get("recoverable"):
@@ -1222,35 +1175,31 @@ class Reader:
                 if isinstance(error, dict) and error.get("name") == "ClineOAuthTokenError":
                     self.diagnostics.append({"kind": "native_error", "type": "provider.auth"})
                 self.error = _clip(str(error or "Cline agent error"), 300)
-                return f"! {self.error}"
+                return
         return None
 
-    def _codex(self, o: dict) -> str | None:
+    def _codex(self, o: dict) -> None:
         t = o.get("type")
         item = o.get("item") if isinstance(o.get("item"), dict) else {}
         if t == "turn.completed":
             self.completed = True
-            return "· end turn"
+            return
         if t == "turn.failed":
             error = o.get("error")
             self.error = _clip(str((error.get("message") if isinstance(error, dict) else None)
                                    or self._failure or "turn.failed"), 300)
-            return f"! turn failed: {self.error}"
+            return
         if t == "error":
             self._failure = _clip(str(o.get("message") or "error"), 300)
-            return f"! {self._failure}"
+            return
         if item.get("type") == "mcp_tool_call" and t in ("item.started", "item.completed"):
             self._codex_mcp_policy(item, t)
         if t == "item.started" and item.get("type") not in (None, "agent_message", "reasoning"):
             self.text = ""  # narration before a tool call is not the answer
-            if item["type"] == "command_execution":
-                return f"$ {_clip(str(item.get('command', '')), 120)}"
-            return f"> {item['type']}"
+            return
         if t == "item.completed" and item.get("type") == "agent_message":
             self.text = item.get("text") if isinstance(item.get("text"), str) else ""
             return None
-        if t == "item.completed" and isinstance(item.get("type"), str):
-            return f"> {item['type']}"
         return None
 
     def _approved_mcp(self) -> set[str]:
@@ -1279,7 +1228,7 @@ class Reader:
     # status. Unapproved MCP calls are audited per tool_use id: a repeated id
     # is one call, a later call to the same server is another, and its
     # tool_result records whether it succeeded.
-    def _claude(self, o: dict) -> str | None:
+    def _claude(self, o: dict) -> None:
         t = o.get("type")
         message = o.get("message") if isinstance(o.get("message"), dict) else {}
         blocks = [b for b in (message.get("content") or []) if isinstance(b, dict)] \
@@ -1306,10 +1255,10 @@ class Reader:
                         diagnostic[key] = match.group(1)
                 if len(diagnostic) > 2:
                     self.diagnostics.append(diagnostic)
-                return f"! {self.error}"
+                return
             self.completed = True
             self.text = o.get("result") if isinstance(o.get("result"), str) else ""
-            return "· end turn"
+            return
         if t == "user":
             for block in blocks:
                 call = self._mcp_calls.get(block.get("tool_use_id")) if block.get("type") == "tool_result" else None
@@ -1317,14 +1266,9 @@ class Reader:
                     call["outcome"] = "error" if block.get("is_error") else "succeeded"
             return None
         if t == "assistant":
-            out = []
             for block in blocks:
                 if block.get("type") == "tool_use":
                     self._claude_mcp_policy(block)
-                    out.append(f"> {block.get('name')} {_clip(json.dumps(block.get('input')), 100)}")
-                elif block.get("type") == "text":
-                    out.append(_clip(str(block.get("text", ""))))
-            return "\n".join(out) or None
         return None
 
     def _claude_mcp_policy(self, block: dict) -> None:
