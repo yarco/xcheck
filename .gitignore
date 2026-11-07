@@ -1,0 +1,9 @@
+__pycache__/
+.DS_Store
+local/
+private/
+publication-policy.json
+*.bundle
+.env
+.env.*
+!.env.example

@@ -1,0 +1,258 @@
+{"jsonrpc": "2.0", "id": 4, "method": "session/prompt", "params": {"sessionId": "session-fixture", "prompt": [{"type": "text", "text": "Controlled tool smoke"}]}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "I"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "\u2019ll"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " read"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " the"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " packet"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " and"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " prompt"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ","}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " then"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " run"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " the"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " requested"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " checks"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " using"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " the"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " permitted"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " local"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " and"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " key"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "less"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " tools"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "."}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call", "toolCallId": "exec-283e13f6-f17e-50a7-a8a5-61d6667065b9", "kind": "read", "title": "Read file '/private/tmp/agent-offload/.lanes/codex-gpt-6.1-sol-high/PACKET.md'", "status": "in_progress"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-283e13f6-f17e-50a7-a8a5-61d6667065b9"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-283e13f6-f17e-50a7-a8a5-61d6667065b9", "status": "completed"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call", "toolCallId": "exec-9c25b9d5-e6de-531e-a4da-2de71ecf1f43", "kind": "read", "title": "Read file '/private/tmp/agent-offload/.lanes/codex-gpt-6.1-sol-high/PROMPT.md'", "status": "in_progress"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-9c25b9d5-e6de-531e-a4da-2de71ecf1f43"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-9c25b9d5-e6de-531e-a4da-2de71ecf1f43", "status": "completed"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call", "toolCallId": "exec-b5ff6e12-7b14-59b9-a9b3-0e57143ebe66", "kind": "execute", "title": "python3 -c 'import os; print(sum(name.endswith(\"_API_KEY\") for name in os.environ))'", "status": "in_progress"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call", "toolCallId": "exec-e4c2bed1-53c5-5dca-b13b-48c1e1807df1", "kind": "read", "title": "Read file '/private/tmp/agent-offload/.lanes/codex-gpt-6.1-sol-high/evidence/manifest-tail.txt'", "status": "in_progress"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call", "toolCallId": "exec-d30c7637-7f4c-5d9c-95f9-39fd033a9d3a", "kind": "execute", "title": "uname -s", "status": "in_progress"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-e4c2bed1-53c5-5dca-b13b-48c1e1807df1", "status": "completed"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-d30c7637-7f4c-5d9c-95f9-39fd033a9d3a", "status": "completed"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-b5ff6e12-7b14-59b9-a9b3-0e57143ebe66"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-b5ff6e12-7b14-59b9-a9b3-0e57143ebe66", "status": "completed"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call", "toolCallId": "exec-37c0d689-c181-53f9-8332-f452e06eae3d", "kind": "execute", "title": "mcp.you-free.you-search", "status": "in_progress"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-37c0d689-c181-53f9-8332-f452e06eae3d", "status": "completed"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call", "toolCallId": "exec-ea3e2cb3-ca49-517e-afa3-f6380354f7a7", "kind": "execute", "title": "mcp.keenable-free.fetch_page_content", "status": "in_progress"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-ea3e2cb3-ca49-517e-afa3-f6380354f7a7", "status": "completed"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call", "toolCallId": "exec-7dced816-0543-5097-8ffc-83666e29c7cb", "kind": "search", "title": "Web search", "status": "in_progress"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "exec-7dced816-0543-5097-8ffc-83666e29c7cb", "title": "Open page: https://example.com", "status": "completed"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "VER"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "DICT"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ":"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " PASS"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " \u2014"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " all"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " smoke"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " checks"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " completed"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ";"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " the"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " read"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-only"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " sandbox"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " refused"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " the"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " write"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " as"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " expected"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ".\n\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Proof"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " file"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " read"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " successfully"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ","}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " exit"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " code"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "0"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`.\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "uname"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " -"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "s"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`:"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Dar"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "win"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`,"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " exit"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " code"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "0"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`.\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Environment"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " names"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " ending"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `_"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "API"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "_KEY"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`:"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "0"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`."}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " No"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " values"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " printed"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ".\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "touch"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " /"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "tmp"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "/x"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "check"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-c"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "od"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ex"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-read"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "only"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-sm"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "oke"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-write"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`:"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " exit"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " code"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "1"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`,"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " exact"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " error"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ":"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "touch"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ":"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " /"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "tmp"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "/x"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "check"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-c"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "od"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ex"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-read"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "only"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-sm"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "oke"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-write"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ":"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Operation"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " not"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " permitted"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`."}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " No"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " escalation"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " requested"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ".\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Connected"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " You"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Free"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " MCP"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " search"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " for"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "I"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ANA"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " example"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " domains"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " succeeded"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "."}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " First"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " result"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ":"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " ["}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Example"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Domains"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " \u2014"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " I"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ANA"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "]("}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "https"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "://"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "www"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "."}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "iana"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ".org"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "/help"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "/example"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-dom"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ains"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ").\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Connected"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Ke"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "enable"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Free"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " fetch"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " and"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " built"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-in"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " web"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " read"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " of"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " ["}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "example"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ".com"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "]("}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "https"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "://"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "example"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ".com"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "/)"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " succeeded"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ";"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " reported"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " heading"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "/title"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ":"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " `"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Example"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Domain"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`.\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "-"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " Packet"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " unchanged"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ";"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " no"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " peers"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " launched"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ".\n\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "PRO"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "OF"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ":"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " MAN"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "IFEST"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "_T"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "AIL"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "_TOKEN"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ":"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " c"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "1"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ed"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ada"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "1"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "de"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "94"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "db"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "b"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "3"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "e"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "3"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "df"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "437"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "483"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "c"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "bd"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "49"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "e"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "\n\n"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "RESULT"}}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-fixture", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "_COMPLETE"}}}}
+{"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}}
