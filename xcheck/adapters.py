@@ -1,0 +1,1291 @@
+"""Per-harness knowledge: how to start a lane, and how to read what it streams.
+
+Codex, Claude and Cline run their first-party headless JSON streams; every
+other lane is an acpx (ACP client) exec against the harness's ACP server. The
+vendor-specific part is the command, its environment and its native policy. Every flag here was checked against CLI help and smoke runs, and
+`xcheck doctor` re-checks flags against installed help.
+
+Lanes print their answer as their final message; the one Reader below
+extracts it from the lane's stream (native for Codex, Claude and Cline, ACP for the
+rest) and decides native completion. Grok,
+OpenCode, Cline and Devin may write scratch files in their workspace while reviewing.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from .environment import lane_env
+from .types import Lane, Launch
+
+KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin", "cline")
+NATIVE_FREE_PROVIDERS = ("kilo",)
+
+DEFAULT_ROSTER = (
+    Lane("codex", "gpt-6.1-sol", "high"),
+    Lane("claude", "claude-opus-5-5", "high"),
+    Lane("grok", "grok-4.7", "xhigh"),
+    Lane("agy", "gemini-3.8-flash"),
+    Lane("agy", "gemini-4-argon"),
+)
+
+# Offers awaiting usable qualification, not excluded models. A deferral
+# records an observed run outcome, never an inferred permanent model defect.
+# Recheck current access and investigate the failure boundary before retesting.
+DEFERRED = ()
+
+
+def parse_lane(spec: str) -> Lane:
+    """`kind:model[:effort]` → Lane. Agy and Devin take no effort.
+    Opencode models may be `provider/model` (a slash is part of the model)."""
+    parts = spec.split(":")
+    # OpenRouter's :free is part of the model, never an effort. Preserve it
+    # before interpreting the optional final variant (including :free:high).
+    if parts[0] in ("opencode", "cline") and len(parts) >= 3 and parts[2] == "free":
+        parts = [parts[0], parts[1] + ":free", *parts[3:]]
+    if len(parts) not in (2, 3) or parts[0] not in KINDS or not parts[1]:
+        raise ValueError(f"lane spec must be kind:model[:effort], kind in {KINDS}: {spec!r}")
+    kind, model = parts[0], parts[1]
+    if kind == "opencode" and model.startswith("anyrouter/"):
+        raise ValueError("AnyRouter was removed: its exhausted trial requires paid or donated-key access")
+    if kind == "agy" and not model.startswith("gemini-"):
+        raise ValueError("Agy's ACP server supports only Gemini selectors")
+    if kind == "agy" and "pro" in model.split("-"):
+        raise ValueError("Gemini Pro is never a cross-check lane (operator rule); use a Flash or Argon selector")
+    effort = parts[2] if len(parts) == 3 else ""
+    ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind in ("opencode", "cline") else r"[A-Za-z0-9][A-Za-z0-9._-]*"
+    for part in (model, effort):
+        if part and not re.fullmatch(ident if part is model else r"[A-Za-z0-9][A-Za-z0-9._-]*", part):
+            raise ValueError(f"model and effort must be plain identifiers: {part!r}")
+    if any(segment in ("", ".", "..") for segment in model.split("/")):
+        raise ValueError("model must not contain empty or traversal path segments")
+    if kind in ("agy", "devin") and effort:
+        raise ValueError(f"{kind} selectors carry their own effort; drop ':{effort}'")
+    if kind == "cline" and effort and effort not in ("none", "low", "medium", "high", "xhigh"):
+        raise ValueError("Cline thinking must be none, low, medium, high or xhigh")
+    if kind not in ("agy", "opencode", "devin", "cline") and not effort:
+        raise ValueError(f"{kind} lane needs an explicit effort: {spec!r}")
+    return Lane(kind, model, effort)
+
+
+
+# Free OpenCode and Cline lanes are not hand-pinned. An external refresh writes this file
+# atomically: every zero-price offer whose lane ended done in that day's real
+# xcheck run. A failed refresh leaves the last good file in place. Missing or
+# unreadable means no free lanes, never a guessed list.
+FREE_ROSTER = Path.home() / ".local" / "state" / "xcheck" / "free-roster.json"
+
+
+def free_lanes(path: Path = FREE_ROSTER) -> tuple[Lane, ...]:
+    try:
+        selectors = json.loads(path.read_text(encoding="utf-8"))["lanes"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
+    lanes = []
+    for selector in selectors if isinstance(selectors, list) else ():
+        try:
+            lane = parse_lane(selector)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if lane.kind in ("opencode", "cline") and lane not in lanes:
+            lanes.append(lane)
+    return tuple(lanes)
+
+
+# Supported but never default (`run --add`): the operator's Devin default and
+# the free lanes the daily refresh verified. `xcheck models` marks a ready row
+# `pinned` when it is here, else `--add` until the next refresh adds it.
+OPT_IN = (Lane("devin", "swe-2-max"), *free_lanes())
+
+
+# Zen's free tier limits each account (FreeUsageLimitError, HTTP 429), across
+# its free models. Local config may name several accounts, each an OpenCode
+# store holding one signed-in Zen credential; a lane reaches its account
+# through OPENCODE_DB. Empty: every lane uses the native default store.
+OPENCODE_ACCOUNTS: dict[str, Path] = {}
+OPENCODE_LANES_PER_ACCOUNT = 5  # eyeballed from 2026-10-21: 9 lanes on one account hit the limit
+
+
+def assign_accounts(lanes) -> dict[str, str]:
+    """Zen lane name → account name, round-robin in roster order. Raises
+    ValueError when the run needs more Zen lanes than the accounts allow or a
+    store is missing (OpenCode would create it empty and run anonymously)."""
+    zen = [lane.name for lane in lanes if lane.zen]
+    if not OPENCODE_ACCOUNTS or not zen:
+        return {}
+    names = list(OPENCODE_ACCOUNTS)
+    fits = len(names) * OPENCODE_LANES_PER_ACCOUNT
+    if len(zen) > fits:
+        raise ValueError(f"{len(zen)} OpenCode Zen lanes exceed {len(names)} accounts × "
+                         f"{OPENCODE_LANES_PER_ACCOUNT} lanes; select at most {fits} or add an account")
+    used = names[:len(zen)]
+    missing = [n for n in used if not OPENCODE_ACCOUNTS[n].is_file()]
+    if missing:
+        raise ValueError(f"OpenCode account store missing for {', '.join(missing)}; sign it in with "
+                         "`OPENCODE_DB=<store> opencode auth login opencode --standalone --method device`")
+    return {name: names[i % len(names)] for i, name in enumerate(zen)}
+
+
+def account_problem(store: Path) -> str | None:
+    """Zero-inference check that `store` holds a stored Zen credential. Reads
+    only connection types from `auth list`; never prints or keeps a secret."""
+    if not store.is_file():
+        return f"store {store} is missing"
+    spec = Launch(["opencode", "auth", "list", "--standalone", "--format", "json"], None,
+                  env_set={"OPENCODE_DB": str(store)})
+    try:
+        out = subprocess.run(spec.argv, cwd=store.parent, env=lane_env(spec, store.parent), capture_output=True,
+                             text=True, timeout=60, stdin=subprocess.DEVNULL)
+        # `auth list --format json` prints a list of {id, name, connections}.
+        # A non-zero exit or any other body is a failed check, not "no credential".
+        # Stderr is dropped: it is not part of the type-only read.
+        if out.returncode != 0:
+            return "`opencode auth list` failed"
+        integrations = json.loads(out.stdout)
+        if not isinstance(integrations, list):
+            return "`opencode auth list` unreadable (format)"
+        zen = [c for i in integrations if isinstance(i, dict) and i.get("id") == "opencode"
+               for c in i.get("connections") or [] if isinstance(c, dict)]
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError) as e:
+        return f"`opencode auth list` unreadable ({type(e).__name__})"
+    if not any(c.get("type") == "credential" for c in zen):
+        return "no stored OpenCode Console credential; sign it in"
+    return None
+
+
+class Unavailable(Exception):
+    """A lane cannot start here; found while building its command, before spend."""
+
+
+def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool,
+           store: Path | None = None) -> Launch:
+    """The command for one lane. `work` is its workspace, `log` its forensic
+    log, `store` the OpenCode account store of a Zen lane (None: native default)."""
+    if lane.kind == "codex":
+        return _codex_launch(lane, work, message, log, web)
+    if lane.kind == "claude":
+        return _claude_launch(lane, work, message, log, web)
+    if lane.kind == "grok":
+        return _grok_launch(lane, work, message, log, web)
+    if lane.kind == "agy":
+        return _agy_launch(lane, work, message, log, web)
+    if lane.kind == "devin":
+        return _devin_launch(lane, work, message, log, web)
+    if lane.kind == "opencode":
+        return _opencode_launch(lane, work, message, log, store)
+    if lane.kind == "cline":
+        from .cline import launch as cline_launch
+        return cline_launch(lane, work, message, log)
+    raise ValueError(f"unknown kind {lane.kind}")
+
+
+# Codex features a review never needs: plugins bring their own MCP servers
+# (a computer-use REPL among them), hooks can block a lane, apps and browser
+# or computer use act outside the packet.
+CODEX_DISABLED_FEATURES = ("plugins", "hooks", "apps", "computer_use", "browser_use")
+
+
+def _codex_review_mcp(server: dict, web: bool) -> bool:
+    """One entry of `codex mcp list --json` that a review may keep: an approved
+    name in a keyless shape (the same rule as Claude's registrations) with no
+    stored login, which the shape cannot show (Codex keeps MCP OAuth tokens)."""
+    name, transport = server.get("name"), server.get("transport")
+    if not isinstance(name, str) or not isinstance(transport, dict) \
+            or server.get("auth_status") not in ("unsupported", "not_logged_in"):
+        return False
+    if transport.get("type") == "stdio":
+        env = transport.get("env") or {}
+        return (name in REVIEW_LOCAL_MCP and isinstance(env, dict) and set(env) <= LOCAL_MCP_ENV
+                and not transport.get("env_vars"))
+    if transport.get("type") != "streamable_http" or any(
+            transport.get(k) for k in ("bearer_token_env_var", "http_headers", "env_http_headers", "http_headers_helper")):
+        return False
+    url = transport.get("url")
+    return isinstance(url, str) and (
+        (name in REVIEW_LOCAL_MCP and LOOPBACK_URL.fullmatch(url) is not None)
+        or (web and url == REVIEW_FREE_MCP.get(name)))
+
+
+def _codex_mcp_enabled(features: list[str], overrides: list[str], env: dict, work: Path) -> list[dict]:
+    out = subprocess.run([shutil.which("codex") or "codex", *features, *overrides, "mcp", "list", "--json"],
+                         env=env, cwd=work, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    servers = json.loads(out.stdout) if out.returncode == 0 else None
+    if not isinstance(servers, list):
+        raise ValueError(f"`codex mcp list --json` failed (exit {out.returncode})")
+    # Anything not explicitly disabled counts as enabled, so a changed output
+    # shape makes the launch refuse servers instead of overlooking them.
+    return [s for s in servers if not (isinstance(s, dict) and s.get("enabled") is False)]
+
+
+def _codex_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    """Codex's own headless form: `codex exec --json`, the message on stdin.
+    `--ephemeral` keeps no session files and `--sandbox read-only` is the
+    native sandbox (exec never asks for approval). MCP follows the review
+    rule: Codex's effective server list is read zero-turn, every server that
+    is not an approved keyless one is disabled by name, and the list is read
+    again to prove it; a lane whose list cannot be proved does not start.
+    The installed binary is the runner's direct child and holds the pool
+    itself. The ACP form of this lane (codex-acp) is kept on the `acp/codex`
+    branch."""
+    features = [arg for f in CODEX_DISABLED_FEATURES for arg in ("--disable", f)]
+    env = lane_env(Launch([], message), work)
+    try:
+        enabled = _codex_mcp_enabled(features, [], env, work)
+        refused = sorted(str(s.get("name") if isinstance(s, dict) else s) for s in enabled
+                         if not _codex_review_mcp(s if isinstance(s, dict) else {}, web))
+        if bad := [n for n in refused if not re.fullmatch(r"[A-Za-z0-9_-]+", n)]:
+            raise ValueError(f"cannot disable MCP server(s) {bad} by name")
+        overrides = [arg for n in refused for arg in ("--config", f"mcp_servers.{n}.enabled=false")]
+        left = [s.get("name") if isinstance(s, dict) else s for s in _codex_mcp_enabled(features, overrides, env, work)
+                if not _codex_review_mcp(s if isinstance(s, dict) else {}, web)]
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        raise Unavailable(f"startup-unavailable: Codex MCP selection could not be proved ({_clip(str(e), 200)})") from e
+    if left:
+        raise Unavailable(f"startup-unavailable: Codex still enables unapproved MCP server(s) {left} after disabling them")
+    argv = [shutil.which("codex") or "codex", *features, "exec", "--skip-git-repo-check", "--ephemeral",
+            "--sandbox", "read-only", "--cd", str(work), "--model", lane.model,
+            "--config", f'model_reasoning_effort="{lane.effort}"',
+            "--config", f'web_search="{"live" if web else "disabled"}"',
+            "--config", "check_for_update_on_startup=false", *overrides, "--json", "-"]
+    return Launch(argv, message)
+
+
+def _opencode_model(lane: Lane) -> list[str]:
+    model = lane.model if "/" in lane.model else f"opencode/{lane.model}"
+    return ["--model", model]
+
+
+def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path, store: Path | None = None) -> Launch:
+    from .files import ROOT
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", str(log.parent.parent.parent), "--log", str(log), "--",
+             shutil.which("opencode") or "opencode", "acp"]
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), *_opencode_model(lane), "--approve-all", "--auth-policy", "skip",
+            "--no-terminal", "--no-fs", "--prompt-retries", "0", "--format", "json", "exec",
+            "--config-option", "mode=build"]
+    spec = Launch(argv, None, env_set={**_opencode_env(lane), "XCHECK_ROOT": str(ROOT),
+                                       **({"OPENCODE_DB": str(store)} if store else {})})
+    if lane.model.split("/", 1)[0] in NATIVE_FREE_PROVIDERS:
+        spec.env_set["OPENCODE_DB"] = str(log.parent / "opencode.db")
+    effort = lane.effort
+    if not effort:
+        # Unset, ACP selects the model's first (lowest) variant; `default`
+        # leaves the provider's own effort. Models without variants have no
+        # effort option to set.
+        from .models import client_metadata
+        model = _opencode_model(lane)[1]
+        try:
+            metadata = client_metadata(env=lane_env(spec, work), cwd=work)
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            raise Unavailable(f"startup-unavailable: `opencode api model.list --standalone` failed ({_clip(str(e), 200)})") from e
+        if model not in metadata:
+            raise Unavailable(f"startup-unavailable: {model} is not in `opencode api model.list --standalone`; "
+                              "connect its provider or pick a listed model")
+        if metadata[model].get("variants"):
+            effort = "default"
+    argv.extend([*(["--config-option", f"effort={effort}"] if effort else []), "--file", str(message)])
+    return spec
+
+
+def missing_keys(lane: Lane) -> list[str]:
+    """Provider keys this lane cannot run without that are empty here. Without
+    one the provider fails only at the first request with a bare server error;
+    a launchd session exports ZAI_API_KEY empty."""
+    import os
+    if lane.kind == "opencode" and lane.model.split("/", 1)[0].startswith("zai") and "/" in lane.model:
+        return [n for n in ("ZAI_API_KEY",) if not os.environ.get(n)]
+    return []
+
+
+def _opencode_env(lane: Lane) -> dict[str, str]:
+    """Provider-prefixed opencode models may need that provider's env key.
+    Stored opencode auth.json covers OpenRouter; Z.ai Coding Plan needs
+    ZAI_API_KEY and ZHIPU_API_KEY (stripping the latter yields a server error)."""
+    import os
+    if lane.model.split("/", 1)[0] in NATIVE_FREE_PROVIDERS:
+        from .models import native_env
+        try:
+            return native_env(lane.model)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise Unavailable(f"inventory-unknown: free-provider admission failed ({_clip(str(error), 200)})") from error
+    env = {}
+    if "/" not in lane.model:
+        return env
+    provider = lane.model.split("/", 1)[0]
+    names = []
+    if provider.startswith("zai"):
+        names.extend(["ZAI_API_KEY", "ZHIPU_API_KEY"])  # coding-plan talks Zhipu
+    if provider == "openrouter":
+        names.append("OPENROUTER_API_KEY")
+    for name in names:
+        v = os.environ.get(name)
+        if v:
+            env[name] = v
+    return env
+
+
+# Grok reviews run Grok's documented native ACP server (`grok agent … stdio`)
+# through acpx, in the same hold custody as the other ACP lanes:
+#   acpx --no-terminal --no-fs        transport only; no client-side fs or shell
+#   xcheck hold                     re-joins this run's pool (acpx passes only stdio)
+#   grok agent stdio                the vendor server; --always-approve resolves
+#                                   permissions in-agent, as the stream showed
+# The lane gets its own GROK_HOME beside the harness log: the operator's
+# config.toml registers paid-capable and credential-bearing MCP servers
+# (keenable and parallel-search carry auth headers) and session/new mcpServers
+# only adds to that set, so inheriting it would leak both. The lane config
+# pins the review contract and copies only the keyless MCP entries verbatim.
+# Auth stays in the operator's real ~/.grok/auth.json via GROK_AUTH_PATH, so
+# subscription custody and token refresh live in exactly one file; nothing
+# secret is copied into the run. Sessions persist under the lane home, which
+# keeps them out of the operator's session registry too.
+# The unrestricted sandbox is the operator-authorized policy: read-only
+# refuses OrbStack's symlinked Docker socket. Write/MCP limits are an
+# instruction, not an OS boundary — the same honest claim the native path made.
+# Kept current by the operator's own login; XCHECK_GROK_HOME points tests at a fake.
+GROK_DIR = Path(os.environ.get("XCHECK_GROK_HOME") or Path.home() / ".grok")
+GROK_AUTH_FILE = GROK_DIR / "auth.json"
+GROK_CONFIG_FILE = GROK_DIR / "config.toml"
+GROK_REQUIREMENTS = GROK_DIR / "requirements.toml"
+# Operator-config MCP names a review may use: local commands or keyless HTTP
+# endpoints. perplexity bills Pro searches, composio connects arbitrary apps,
+# and keenable/parallel-search carry credentials — all excluded.
+GROK_MCP_ALLOWED = ("qmd", "semble", "deepwiki")
+GROK_REVIEW_TOOLS = ("read_file", "grep", "list_dir", "run_terminal_cmd")
+GROK_WEB_TOOLS = ("web_search", "web_fetch")
+# Admission is a behavior check, not a version pin: grok.admission
+# drives the lane's own `grok agent … stdio` through initialize + session/new
+# (zero inference) and asserts the resolved toolset — an unknown tool id makes
+# the profile allowlist fail OPEN to the full toolset — plus zero hooks, only
+# keyless MCP servers and the pinned model/effort. Routine upgrades pass while
+# that contract holds; a break reports the drift by name (see
+# integrations/grok-acp/README.md).
+GROK_ENV = {
+    # A subscription session, never a paid API-key fallback (XAI_API_KEY is
+    # scrubbed anyway; this refuses to use it if one ever leaked in).
+    "GROK_DISABLE_API_KEY_AUTH": "1",
+    "GROK_DISABLE_AUTOUPDATER": "1", "GROK_TELEMETRY_ENABLED": "0",
+    # No delegation, memory, title refresh or other side sampling. A fresh
+    # session still samples one initial title: no supported switch disables
+    # it, and a pre-prompt _x.ai/session/rename only discards its result (see
+    # integrations/grok-acp/README.md). usage.json's modelCalls excludes it.
+    "GROK_SUBAGENTS": "0", "GROK_MEMORY": "0",
+    "GROK_TITLE_REFRESH": "0", "GROK_TURN_SUMMARY": "0", "GROK_SESSION_RECAP": "0",
+    "GROK_SESSION_SEARCH": "0",
+    # Imported vendor integrations can carry MCP credentials, executable
+    # hooks and orchestrator instructions; the lane config is the only source.
+    **{f"GROK_{v}_{k}_ENABLED": "0" for v in ("CLAUDE", "CURSOR", "CODEX")
+       for k in ("MCPS", "HOOKS", "RULES", "SKILLS", "AGENTS", "SESSIONS")},
+    "GROK_MANAGED_MCPS_ENABLED": "0", "GROK_MANAGED_MCP_GATEWAY_TOOLS_ENABLED": "0",
+    "GROK_OFFICIAL_MARKETPLACE_AUTO_REGISTER": "0",
+}
+GROK_SANDBOX_ARGS = ("--sandbox", "off")
+
+
+def _toml_key(k: str) -> str:
+    return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
+
+
+def _toml_value(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_value(x)}" for k, x in v.items()) + " }"
+    raise TypeError(f"no TOML rendering for {type(v).__name__}")
+
+
+def _grok_operator_config() -> dict:
+    try:
+        return tomllib.loads(GROK_CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _grok_mcp() -> dict[str, dict]:
+    """Keyless MCP entries copied verbatim from the operator's config.
+
+    An allowlisted name is dropped if the entry gained any credential channel;
+    a lane must never inherit a key it was not designed to hold."""
+    cfg = _grok_operator_config()
+    servers = {}
+    for name in GROK_MCP_ALLOWED:
+        s = (cfg.get("mcp_servers") or {}).get(name)
+        if not isinstance(s, dict):
+            continue
+        if s.get("headers") or s.get("env") or s.get("env_vars"):
+            continue
+        servers[name] = s
+    return servers
+
+
+def _grok_rule_dirs() -> list[str]:
+    """The operator's `[paths] extra_rule_dirs` — the canonical shared rules
+    store (`~/.agents/rules`), referenced verbatim so lanes resolve the same
+    files. Non-string entries are dropped."""
+    paths = (_grok_operator_config().get("paths") or {})
+    return [d for d in (paths.get("extra_rule_dirs") or []) if isinstance(d, str)]
+
+
+def _grok_disabled_plugins(home: Path | None = None) -> list[str]:
+    """Names of plugins the operator enabled in vendor plugin stores.
+
+    Grok scans `~/.claude/plugins` (and sibling vendor stores) on every
+    launch, honors the vendor's own enabled-state file, and loads the
+    plugins' executable hooks; there is no supported global plugin kill —
+    `plugins.disabled` takes explicit names/IDs only, `["*"]` does not
+    match. Each store's `installed_plugins.json` keys are `name@store`; the
+    bare name is an accepted `plugins.disabled` entry (verified: loading
+    stops, discovery still counts the plugin)."""
+    names = set()
+    for vendor in ("claude", "cursor", "codex"):
+        f = (home or Path.home()) / f".{vendor}/plugins/installed_plugins.json"
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        names.update(k.split("@", 1)[0] for k in (data.get("plugins") or {}) if isinstance(k, str))
+    return sorted(names)
+
+
+def _grok_home(home: Path, lane: Lane, web: bool) -> Path:
+    """The lane's GROK_HOME: its own config, sessions, caches and plugins dir."""
+    home.mkdir(parents=True, exist_ok=True)
+    if GROK_REQUIREMENTS.is_file():
+        # The enterprise pin layer must survive isolation, not be sidestepped.
+        shutil.copy2(GROK_REQUIREMENTS, home / "requirements.toml")
+    lines = [
+        "# Written by xcheck for one Grok review lane. See integrations/grok-acp/README.md.",
+        # Root-level key (struct Config), not a [features] entry: it must sit
+        # before the first table header or TOML would bind it to the last one.
+        f"disable_web_search = {_toml_value(not web)}", "",
+        "[cli]", "auto_update = false", "use_leader = false", "",
+        "[features]", "telemetry = false", "title_refresh = false", "turn_summary = false",
+        "session_recap = false", "session_search = false", f"web_fetch = {_toml_value(web)}", "",
+        "[models]", f"default = {_toml_value(lane.model)}",
+        f"default_reasoning_effort = {_toml_value(lane.effort)}", "",
+        "[ui]", 'permission_mode = "always-approve"', "",
+        # The authorized unrestricted policy. The generated file is the pin:
+        # GROK_SANDBOX itself is scrubbed globally, so no env value can
+        # override it, and env cannot carry it anyway (see SCRUB_NAMES).
+        "[sandbox]", 'profile = "off"', "",
+        "[harness]", "disable_workspace_teleport = true", "",
+        "[subagents]", "enabled = false", "",
+        "[memory]", "enabled = false", "",
+        # The operator's extra_rule_dirs are the canonical shared rules
+        # (~/.agents/rules), loaded by reference — never copied. This is not
+        # a vendor compat import: `compat.*.rules` stays off while the
+        # explicit [paths] list is preserved verbatim. extra_skill_dirs is
+        # deliberately not carried (skill-injection record for /import-claude).
+        *(["[paths]", f"extra_rule_dirs = {_toml_value(rules)}", ""]
+          if (rules := _grok_rule_dirs()) else []),
+        # Vendor plugin hooks execute real commands in-agent; disable every
+        # installed plugin by name (no wildcard exists). `enabled` stays
+        # unset: project plugins already default off.
+        "[plugins]", f"disabled = {_toml_value(_grok_disabled_plugins())}", "",
+        # No operator marketplace sources; the official one is env-gated.
+        "[marketplace]", "sources = []",
+    ]
+    for name, server in _grok_mcp().items():
+        lines += ["", f"[mcp_servers.{_toml_key(name)}]",
+                  *(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in server.items())]
+    (home / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return home
+
+
+def _grok_profile(path: Path, web: bool) -> Path:
+    """The reviewed agent profile: an exact tool allowlist, nothing more.
+
+    `tools` are Grok's internal tool ids (the headless --tools names); the
+    doc's friendlier names fail open to the full toolset, so this list is
+    asserted by tests and verified in the agent's debug log."""
+    tools = ", ".join((*GROK_REVIEW_TOOLS, *(GROK_WEB_TOOLS if web else ())))
+    path.write_text("---\n"
+                    "name: xcheck-review\n"
+                    "description: Review-only agent profile for multi-model cross-check lanes.\n"
+                    "prompt_mode: full\n"
+                    "agents_md: true\n"
+                    f"tools: [{tools}]\n"
+                    "---\n\n"
+                    "You are one reviewer in a multi-model code review. Follow the packet instructions exactly.\n",
+                    encoding="utf-8")
+    return path
+
+
+def _grok_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    from .files import ROOT
+    d = log.parent
+    home = _grok_home(d / "grok-home", lane, web)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", str(d.parent.parent), "--log", str(log), "--",
+             shutil.which("grok") or "grok", "agent",
+             "--always-approve", "--no-leader", "-m", lane.model,
+             "--reasoning-effort", lane.effort,
+             "--agent-profile", str(_grok_profile(d / "grok-profile.md", web)),
+             "--debug-file", str(d / "grok-agent.log"), "stdio"]
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), "--model", lane.model,
+            # --always-approve resolves tool permission in-agent; --approve-all
+            # is the acpx-side equivalent for any request that still arrives.
+            "--approve-all", "--auth-policy", "skip", "--no-terminal", "--no-fs",
+            "--prompt-retries", "0", "--format", "json", "exec",
+            "--config-option", f"reasoning_effort={lane.effort}", "--file", str(message)]
+    return Launch(argv, None, env_set={**GROK_ENV, "GROK_HOME": str(home),
+                                       "GROK_AUTH_PATH": str(GROK_AUTH_FILE), "XCHECK_ROOT": str(ROOT)},
+                  kind="grok")
+
+
+GROK_PROBE_LOG = "grok-admission.log"
+
+
+def grok_probe_command(spec: Launch) -> tuple[list[str], Path] | None:
+    """The lane's inner `grok agent … stdio` command for the zero-inference
+    admission probe, its --debug-file repointed to the probe log so the real
+    run's grok-agent.log stays its own. None when the --agent payload no
+    longer carries that shape — itself a contract change to revalidate."""
+    try:
+        agent = shlex.split(spec.argv[spec.argv.index("--agent") + 1])
+        agent = agent[agent.index("--") + 1:]
+        dbg = agent.index("--debug-file") + 1
+        probe_log = Path(agent[dbg]).with_name(GROK_PROBE_LOG)
+        agent[dbg] = str(probe_log)
+        return agent, probe_log
+    except (ValueError, IndexError):
+        return None
+
+
+# Native accept-edits keeps the app path's workspace-edit permissions. Rules
+# approve shell/MCP/fetch; acpx denies any remaining permission request. The
+# shell's workspace limit is still an instruction, as it was in the app path.
+DEVIN_ENV = {"DEVIN_PERMISSION_MODE": "accept-edits", "DEVIN_REFUSAL_FALLBACK": "", "DEVIN_SANDBOX": "false"}
+DEVIN_USER_CONFIG = Path.home() / ".config/devin/config.json"
+
+
+DEVIN_ALLOW = ["exec", "mcp__*"]
+DEVIN_FETCH = ["Fetch(https://*/*)", "Fetch(http://*/*)"]
+
+
+def _devin_config(path: Path, web: bool) -> Path:
+    """Operator config with hooks removed, beside the harness log.
+    --config replaces the whole file: stripping login/setup made the client
+    ask to use local credentials. Empty hooks only, so moshi/Herdr
+    PermissionRequest cannot hang the lane (I3). Never --cloud."""
+    src: dict = {}
+    try:
+        src = json.loads(DEVIN_USER_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    src["hooks"] = {}
+    perms = src.setdefault("permissions", {})
+    perms["allow"] = [*perms.get("allow", []), *DEVIN_ALLOW, *(DEVIN_FETCH if web else [])]
+    if not web:
+        perms["deny"] = [*perms.get("deny", []), *DEVIN_FETCH]
+    path.write_text(json.dumps(src), encoding="utf-8")
+    return path
+
+
+def _devin_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    from .files import ROOT
+    config = _devin_config(log.with_name("devin-config.json"), web)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--run", str(log.parent.parent.parent), "--log", str(log), "--",
+             shutil.which("devin") or "devin", "--config", str(config), "--permission-mode", "accept-edits",
+             "--respect-workspace-trust", "false", "acp", "--model", lane.model]
+    # ACP collapses SWE-2 variants to swe-2-high plus thought_level. Passing
+    # swe-2-max through acpx's --model rejects it or resets the native effort.
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), "--deny-all", "--auth-policy", "skip", "--no-terminal", "--no-fs",
+            "--prompt-retries", "0", "--format", "json", "exec", "--config-option", "mode=accept-edits", "--file", str(message)]
+    return Launch(argv, None, env_set={**DEVIN_ENV, "DEVIN_MODEL": lane.model, "XCHECK_ROOT": str(ROOT)})
+
+# Claude reviews register only local readers and the two keyless retrieval
+# endpoints. --allowedTools pre-approves calls; it is not a tool allowlist.
+# --strict-mcp-config excludes other registrations, and --disallowedTools
+# removes account connectors even if the native client loads them separately.
+# `mcp__*` is not an allow pattern Claude honours; each server is allowed by
+# name, `mcp__<server>`, with non-identifier characters as `_`
+# ("claude.ai Gmail" -> mcp__claude_ai_Gmail). bypassPermissions is refused
+# in restricted mode.
+CLAUDE_JSON = Path.home() / ".claude.json"
+REVIEW_LOCAL_MCP = {"semble", "fff", "qmd", "pond"}
+REVIEW_FREE_MCP = {
+    "keenable-free": "https://api.keenable.ai/mcp",
+    "you-free": "https://api.you.com/mcp?profile=free&tools=you-search",
+}
+# A trusted local name is a trust decision about the command, not proof that
+# its registration is keyless: an approved entry may carry only these cache
+# locations in its env, and an HTTP one must be loopback without headers.
+# Anything else (a key, a token, a header helper, a remote URL) drops the
+# server instead of forwarding a credential channel past the lane's key scrub.
+LOCAL_MCP_ENV = {"UV_CACHE_DIR", "UV_TOOL_DIR", "NPM_CONFIG_CACHE"}
+LOOPBACK_URL = re.compile(r"http://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/[^\s?#@]*)?")
+
+
+def _local_mcp_ok(server: dict) -> bool:
+    if server.get("type", "stdio") == "stdio":
+        args, env = server.get("args", []), server.get("env", {})
+        return (set(server) <= {"type", "command", "args", "env"} and isinstance(server.get("command"), str)
+                and isinstance(args, list) and all(isinstance(a, str) for a in args)
+                and isinstance(env, dict) and set(env) <= LOCAL_MCP_ENV
+                and all(isinstance(v, str) for v in env.values()))
+    return (server.get("type") == "http" and set(server) == {"type", "url"}
+            and isinstance(server["url"], str) and LOOPBACK_URL.fullmatch(server["url"]) is not None)
+
+
+def _claude_review_servers(web: bool) -> dict:
+    """The operator's registrations a review may use: approved local readers in
+    the keyless shape above, plus (live web only) the exact keyless endpoints."""
+    try:
+        data = json.loads(CLAUDE_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    servers = data.get("mcpServers")
+    return {name: server for name, server in (servers.items() if isinstance(servers, dict) else ())
+            if isinstance(server, dict) and (
+                (name in REVIEW_LOCAL_MCP and _local_mcp_ok(server))
+                or (web and name in REVIEW_FREE_MCP and server == {"type": "http", "url": REVIEW_FREE_MCP[name]}))}
+
+
+# Native flags the lane depends on; admission and doctor require each in
+# `claude --help`, since the operator CLI upgrades on its own schedule.
+CLAUDE_NATIVE_FLAGS = ("--print", "--restricted", "--strict-mcp-config", "--mcp-config", "--tools",
+                       "--allowedTools", "--disallowedTools", "--permission-mode", "--permission-prompts",
+                       "--add-dir", "--no-session-persistence", "--model", "--effort", "--debug-file",
+                       "--output-format", "--verbose", "--include-partial-messages")
+
+
+def _claude_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    """Claude Code's own headless stream: `claude -p --output-format
+    stream-json`, the message on stdin. `--restricted` ignores settings files
+    and hooks and confines file tools to the working directories;
+    `--strict-mcp-config` with an inline `--mcp-config` registers only the
+    validated review servers; `--tools` lists the built-ins and
+    `--allowedTools` pre-approves them and each server by name; account
+    connectors are disallowed. The installed binary is the runner's direct
+    child and holds the pool itself. The ACP form of this lane
+    (xcheck-acpx + claude-agent-acp) is kept on the `acp/claude` branch."""
+    servers = _claude_review_servers(web)
+    tools = ["Read", *(["WebSearch", "WebFetch"] if web else [])]
+    argv = [shutil.which("claude") or "claude", "-p", "--restricted",
+            "--strict-mcp-config", "--mcp-config", json.dumps({"mcpServers": servers}),
+            "--disallowedTools", "mcp__claude_ai_*",
+            # With -p, anything that would prompt is denied instead of waiting.
+            "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--tools", ",".join(tools), "--allowedTools", ",".join([*tools, *sorted(f"mcp__{n}" for n in servers)]),
+            "--add-dir", str(work), "--no-session-persistence", "--model", lane.model, "--effort", lane.effort,
+            "--debug-file", str(log),
+            # Partial messages show native output during a long think.
+            "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+    return Launch(argv, message, env_set={"DISABLE_AUTOUPDATER": "1"})
+
+
+def claude_problem(*, allow_missing: bool = False) -> str | None:
+    """A subscription lane must prove the claude.ai login in the scrubbed lane
+    environment, and the installed CLI must still list the flags it relies on."""
+    env = lane_env(Launch([], None), Path.cwd())
+    claude = shutil.which("claude")
+    if not claude:
+        return "startup-unavailable: claude is not on PATH"
+    try:
+        out = subprocess.run([claude, "auth", "status", "--json"],
+                             env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        auth = json.loads(out.stdout) if out.returncode in (0, 1) else {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        auth = {}
+    missing = (allow_missing and isinstance(auth, dict) and auth.get("loggedIn") is False
+               and auth.get("authMethod") in (None, "none", "claude.ai")
+               and auth.get("apiProvider") in (None, "firstParty"))
+    if not (missing or (isinstance(auth, dict) and auth.get("loggedIn") and out.returncode == 0
+                        and auth.get("authMethod") == "claude.ai" and auth.get("apiProvider") == "firstParty")):
+        return ("auth-required: `claude auth status` is not a first-party claude.ai subscription login "
+                "(scrubbed routing overrides expose a different source, or the Keychain login is missing); "
+                "run claude once to refresh it")
+    try:
+        help_text = subprocess.run([claude, "--help"], env=env, stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        help_text = ""
+    if missing := [f for f in CLAUDE_NATIVE_FLAGS if f not in help_text]:
+        return (f"startup-unavailable: the installed claude no longer lists {', '.join(missing)}; "
+                "the lane's native limits depend on them — re-verify the lane before running it")
+    return None
+
+# Agy runs through acpx and Antigravity's own ACP server, the headless form
+# Antigravity ships for IDEs: `agy -p` ends the turn on any soft-denied tool.
+# The chain, outermost first:
+#   acpx --no-terminal --no-fs   transport only; no client-side fs or shell
+#   xcheck hold                  re-joins this run's pool (acpx passes only stdio)
+#   sandbox-exec -f agy.sb       writes only to the workspace and lane home
+#   agy_acp_server.par           Google's server; it logs in with agy's OAuth client
+# The server's own terminal sandbox exists only for oauth-business admin
+# controls, so the Seatbelt profile is the write boundary. Everything the server
+# reads from GEMINI_HOME is the lane's: auth type, MCP list, no hooks, and a copy
+# of the login. The canonical login is the Keychain item (service gemini, account
+# antigravity-acp) that agy-rotate writes through /usr/bin/security; the lane
+# reads it the same way and the server never touches the Keychain
+# (AGY_ACP_FORCE_FILE_STORAGE). A server that reads or rewrites that item itself
+# re-creates it under its own Developer ID, so every later reader through
+# `security`, and the server after the next rotation, raise a password dialog; a
+# dialog that outlasts the server's 3 s Keychain probe makes it fall back to an
+# empty token file and open a browser sign-in. Its temp files go to the lane
+# home, and uvx-started MCP servers use a uv cache only Agy lanes share
+# (ROOT/.cache/agy-uv), never the operator's.
+# Installed separately; XCHECK_AGY_ACP_DIR selects a local server directory.
+AGY_ACP_DIR = Path(os.environ.get("XCHECK_AGY_ACP_DIR") or Path.home() / ".local/lib/antigravity-acp")
+AGY_ACP_SERVER = AGY_ACP_DIR / "agy_acp_server.par"
+AGY_LOGIN = ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity-acp", "-w"]
+AGY_ENV = {"AGY_ACP_FORCE_FILE_STORAGE": "1"}
+# The server's file credential store: <GEMINI_HOME>/antigravity-acp/acp_token.json.
+AGY_TOKEN = Path("antigravity-acp") / "acp_token.json"
+ACPX_CONFIG = Path.home() / ".acpx" / "config.json"
+# Keys in acpx's own config that would change a lane: a timeout cancels quiet
+# reviewers, auth re-injects scrubbed credentials, MCP or agent entries change
+# what runs, default permissions change what is approved.
+ACPX_FORBIDDEN = ("timeout", "auth", "authPolicy", "mcpServers", "agents", "defaultPermissions",
+                  "nonInteractivePermissions", "promptRetries")
+# Review MCP servers the ACP server cannot start: fff rejects the `server/discover`
+# probe the server sends before `initialize`, which fails the whole turn; qmd
+# over HTTP never finishes connecting, and the server waits for every server.
+# Keenable's startup 429 also aborts the whole turn; keep You Free for retrieval.
+AGY_MCP_EXCLUDED = {"fff", "qmd", "keenable-free"}
+AGY_LANE_ENV = {"TMPDIR", "UV_CACHE_DIR", "UV_TOOL_DIR"}  # set by the lane; never a server's own
+BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
+
+
+def _agy_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    from .files import ROOT  # files imports this module
+    d = log.parent
+    home = _agy_home(d / "gemini-home", web)
+    agy_login(home)
+    uv = ROOT / ".cache" / "agy-uv"
+    uv.mkdir(parents=True, exist_ok=True)
+    profile = _agy_profile(d / "agy.sb", work, home, uv)
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool, "--run", str(d.parent.parent),
+             "--log", str(log), "--", "/usr/bin/sandbox-exec", "-f", str(profile), str(AGY_ACP_SERVER)]
+    argv = [
+        shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+        "--cwd", str(work), "--model", lane.model,
+        # The server refuses every write and tool without it; --no-terminal and
+        # --no-fs leave only the server's own tools, inside the Seatbelt profile.
+        "--approve-all", "--no-terminal", "--no-fs", "--prompt-retries", "0",
+        "--format", "json", "exec", "--file", str(message),
+    ]
+    return Launch(argv, None, env_set={"GEMINI_HOME": str(home), "XCHECK_ROOT": str(ROOT),
+                                       "TMPDIR": str(home / "tmp"), "UV_CACHE_DIR": str(uv),
+                                       "UV_TOOL_DIR": str(uv / "tools"), **AGY_ENV})
+
+
+def agy_login_blob() -> dict:
+    """The canonical ACP login, read through /usr/bin/security. A read that waits
+    on a Keychain dialog or finds no token raises before any spend."""
+    try:
+        p = subprocess.run(AGY_LOGIN, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise Unavailable("auth-required: reading the ACP login from the Keychain waited on a dialog; "
+                          "re-create the item with agy-rotate so /usr/bin/security owns it") from None
+    if p.returncode == 36:
+        raise Unavailable("auth-required: the login keychain is locked; unlock it interactively at the screen")
+    if p.returncode:
+        raise Unavailable("auth-required: no Antigravity ACP login in the Keychain (service gemini, account "
+                          "antigravity-acp); write one with agy-rotate <profile>")
+    try:
+        blob = json.loads(p.stdout)
+    except ValueError:
+        blob = None
+    if not (isinstance(blob, dict) and blob.get("refresh_token")):
+        raise Unavailable("auth-required: the Keychain item gemini/antigravity-acp holds no usable "
+                          "ACP login; write one with agy-rotate <profile>")
+    return blob
+
+
+def agy_login(home: Path) -> None:
+    """Copy the canonical ACP login into the lane's GEMINI_HOME as the server's
+    0600 token file, so the server never opens the Keychain or a browser sign-in."""
+    blob = agy_login_blob()
+    path = home / AGY_TOKEN
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(blob, f)
+
+
+def discard_agy_login(lane_dir: Path) -> None:
+    """Remove a settled lane's login copy; the Keychain item stays canonical."""
+    (lane_dir / "gemini-home" / AGY_TOKEN).unlink(missing_ok=True)
+
+
+def _acpx_quote(arg: str) -> str:
+    """One argv word for acpx's --agent splitter (POSIX-style quotes)."""
+    return arg if re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]+", arg) else "'" + arg.replace("'", "'\"'\"'") + "'"
+
+
+def _agy_home(home: Path, web: bool) -> Path:
+    """The lane's GEMINI_HOME: auth type and review MCP servers only. The server
+    reads HTTP servers from `url` and starts any entry with a `command`,
+    `disabled` or not, so entries are written in that shape here."""
+    (home / "antigravity-acp").mkdir(parents=True, exist_ok=True)
+    (home / "config").mkdir(exist_ok=True)
+    (home / "tmp").mkdir(exist_ok=True)
+    (home / "antigravity-acp" / "settings.json").write_text(json.dumps({"auth": {"type": "oauth-personal"}}))
+    servers = {}
+    for name, server in _claude_review_servers(web).items():
+        if name in AGY_MCP_EXCLUDED:
+            continue
+        if server.get("type") == "http":
+            servers[name] = {"url": server["url"]}
+        elif isinstance(server.get("command"), str):
+            # The lane decides where a server may write; a server's own cache
+            # or temp setting would point outside the Seatbelt profile.
+            env = {k: v for k, v in (server.get("env") or {}).items() if k not in AGY_LANE_ENV}
+            servers[name] = {"command": server["command"], "args": list(server.get("args") or []),
+                             **({"env": env} if env else {})}
+    (home / "config" / "mcp_config.json").write_text(json.dumps({"mcpServers": servers}, indent=1))
+    return home
+
+
+def _agy_profile(path: Path, work: Path, home: Path, uv: Path) -> Path:
+    """Seatbelt: everything allowed except writes outside the workspace, the
+    lane home (which holds the login copy the server refreshes), the Agy uv
+    cache and devices."""
+    allowed = [os.path.realpath(p) for p in (work, home, uv)] + ["/dev"]
+    path.write_text("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n"
+                    # Seatbelt accepts UTF-8 paths, not JSON's \uXXXX escapes.
+                    + "".join(f"  (subpath {json.dumps(p, ensure_ascii=False)})\n" for p in allowed) + ")\n")
+    return path
+
+
+def unavailable(lane: Lane) -> str | None:
+    """Why this lane cannot start here, before admission; None when it can."""
+    if lane.kind == "codex":
+        return None if shutil.which("codex") else "startup-unavailable: codex is not on PATH"
+    if lane.kind == "claude":
+        return claude_problem()
+    if lane.kind == "cline":
+        from . import cline
+        try:
+            _, binary = cline.installation()
+            out = subprocess.run([str(binary), "--help"], capture_output=True, text=True, timeout=15,
+                                 env=lane_env(Launch([], None, kind="cline"), Path.cwd()))
+            if out.returncode or any(flag not in out.stdout for flag in cline.FLAGS):
+                return "startup-unavailable: Cline native help no longer exposes the required flags"
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            return "startup-unavailable: Cline native npm installation could not be verified"
+        return cline.auth_problem()
+    if not shutil.which("acpx"):
+        # An npm -g update stopped mid-reify leaves the link renamed to a hidden .acpx-* file,
+        # and an agent shell's plain npm is Homebrew's, which installs into another prefix.
+        return ("startup-unavailable: acpx is not on PATH; restore a hidden .acpx-* link beside "
+                "nvm's node, or reinstall with the active nvm Node's npm (never Homebrew's)")
+    if lane.kind == "agy" and not AGY_ACP_SERVER.is_file():
+        return f"startup-unavailable: {AGY_ACP_SERVER} is missing; install the Antigravity ACP server or set XCHECK_AGY_ACP_DIR"
+    try:
+        config = json.loads(ACPX_CONFIG.read_text()) if ACPX_CONFIG.exists() else {}
+    except (OSError, ValueError) as e:
+        return f"startup-unavailable: {ACPX_CONFIG} is unreadable ({e}); fix or remove it"
+    if not isinstance(config, dict):
+        return f"startup-unavailable: {ACPX_CONFIG} must contain a JSON object; fix or remove it"
+    if set_keys := [k for k in ACPX_FORBIDDEN if k in config]:
+        return f"startup-unavailable: {ACPX_CONFIG} sets {', '.join(set_keys)}; xcheck lanes need acpx defaults"
+    if lane.kind in ("devin", "opencode"):
+        return None if shutil.which(lane.kind) else f"startup-unavailable: {lane.kind} is not on PATH"
+    if lane.kind == "grok":
+        if not shutil.which("grok"):
+            return "startup-unavailable: grok is not on PATH"
+        if not GROK_AUTH_FILE.is_file():
+            return ("auth-required: no Grok subscription login at ~/.grok/auth.json; "
+                    "run `grok` once to sign in")
+        return None
+    try:
+        agy_login_blob()
+    except Unavailable as e:
+        return str(e)
+    return None
+
+# Flags each adapter relies on, for `xcheck doctor` (help-text drift check).
+# Hidden-but-accepted flags are never used, so every entry must be listed.
+HELP_COMMANDS = {
+    "codex exec": (["codex", "exec", "--help"], ["--skip-git-repo-check", "--ephemeral", "--sandbox",
+                   "--cd", "--model", "--config", "--json", "--disable"]),
+    "codex mcp list": (["codex", "mcp", "list", "--help"], ["--json", "--config", "--disable"]),
+    # The capacity meter reads account/rateLimits/read from the app server.
+    "codex app-server": (["codex", "app-server", "--help"], ["--stdio"]),
+    # Admission checks these too, since the CLI upgrades separately.
+    "claude": (["claude", "--help"], list(CLAUDE_NATIVE_FLAGS)),
+    "claude auth status": (["claude", "auth", "status", "--help"], ["--json"]),
+    # grok itself only serves the startup probe (version --json); lanes run the agent.
+    "grok": (["grok", "--help"], ["--sandbox", "--cwd"]),
+    "grok agent": (["grok", "agent", "--help"], ["--model", "--reasoning-effort",
+             "--always-approve", "--agent-profile", "--no-leader", "--debug-file"]),
+    # agy itself only serves the capacity meter (`agy -p /usage`); lanes run acpx.
+    "agy": (["agy", "--help"], ["--output-format", "--print-timeout"]),
+    "acpx": (["acpx", "--help"], ["--agent", "--cwd", "--model", "--approve-all", "--no-terminal",
+             "--no-fs", "--prompt-retries", "--format", "--deny-all", "--auth-policy"]),
+    "acpx exec": (["acpx", "exec", "--help"], ["--file", "--config-option"]),
+    "opencode acp": (["opencode", "acp", "--help"], []),
+    "opencode api": (["opencode", "api", "--help"], ["--standalone", "--param"]),
+    "opencode auth list": (["opencode", "auth", "list", "--help"], ["--standalone", "--format"]),
+    "devin": (["devin", "--help"], ["--config", "--model", "--permission-mode",
+               "--respect-workspace-trust"]),
+    "devin acp": (["devin", "acp", "--help"], ["--model"]),
+}
+
+
+# --------------------------------------------------------------------------
+# Stream reading. One Reader per lane consumes stream lines in order and knows
+# the final text and any structured error when the stream ends.
+
+
+def _id_key(value) -> str:
+    """JSON-RPC ids compare by JSON value: 1 and "1" are different requests."""
+    return json.dumps(value)
+
+
+def _error_text(error: dict) -> str:
+    """An error's reason. acpx's own errors carry `data.acpxCode` (and often
+    `detailCode`); they lead the reason so it survives the clip and names the
+    cause without parsing prose."""
+    detail = error.get("data")
+    text = str((detail.get("message") if isinstance(detail, dict) else detail)
+               or error.get("message") or error)
+    codes = [c for c in ((detail.get("acpxCode"), detail.get("detailCode")) if isinstance(detail, dict) else ())
+             if isinstance(c, str) and c]
+    return _clip(f"{'/'.join(codes)}: {text}" if codes else text, 300)
+
+
+@dataclass
+class Reader:
+    """One lane's stream. Codex and Claude read their native streams (the
+    `_codex` / `_claude` methods); every other kind reads acpx `--format json`,
+    the raw ACP JSON-RPC traffic in both directions, printed without its
+    direction.
+
+    JSON-RPC ids belong to the side that sent the request, so an agent request
+    can reuse the id of acpx's own session/prompt. Correlation therefore never
+    assumes one id space:
+    - only a session/prompt response carries `stopReason` (ACP schema), so that
+      shape alone settles the turn, whichever id it reuses;
+    - every other request id, from either side, is counted until answered, and
+      a sender reuses an id only once its earlier request at it is answered;
+    - an error carrying the prompt's id while another request with that id is
+      open is ambiguous: it is held until the other response at that id
+      resolves which side sent it, or until acpx — the client, which does know
+      the direction — exits without a completion.
+    Errors that answer other requests, and acpx's own id-null errors, are kept
+    only as the failure reason if the turn never completes.
+    The answer is the agent text after the last tool call."""
+    kind: str
+    web: bool = True  # the run's mode: the MCP audit approves what the launch approved
+    text: str = ""
+    error: str | None = None
+    completed: bool = False
+    diagnostics: list[dict] = field(default_factory=list)
+    expected_model: str = ""
+    _buf: list[str] = field(default_factory=list)
+    _mcp_calls: dict[str, dict] = field(default_factory=dict)  # Claude: tool_use id → policy diagnostic
+    _prompt_id: object = None
+    _open: dict[str, int] = field(default_factory=dict)  # unanswered non-prompt requests per id
+    _held: str | None = None  # an ambiguous error at the prompt id
+    _failure: str | None = None  # the reason to report if the turn never completes
+
+    @classmethod
+    def replay(cls, kind: str, stream: Path, web: bool, model: str = "") -> "Reader":
+        """Rebuild a lane's reader from its saved stream (recovery after a
+        runner died). Completion stays exactly what the live reader requires."""
+        reader = cls(kind, web, expected_model=model)
+        try:
+            lines = stream.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                reader.feed(event)
+        if kind == "cline":
+            from .cline import stderr_errors
+            stderr_errors(reader, stream.parent / "stderr.log")
+        reader.finish()
+        return reader
+
+    def notes(self) -> list[str]:
+        notes = []
+        for d in self.diagnostics:
+            if d["kind"] == "mcp_startup":
+                notes.append(f"MCP startup {d['server']}: {d['status']}")
+            elif d["kind"] == "auth":
+                notes.append(f"auth source: {d['label']}")
+            elif d["kind"] == "native_error":
+                notes.append(f"native error: {d['type']}")
+            elif d["kind"] == "provider_error":
+                detail = f" [{d['detail']}]" if "detail" in d else ""
+                correlation = "; ".join(f"{key.replace('_', ' ')}: {d[key]}"
+                                        for key in ("request_id", "message_id") if key in d)
+                notes.append(f"Claude provider error{detail}" + (f"; {correlation}" if correlation else ""))
+            else:
+                outcome = d["outcome"]
+                label = "POLICY VIOLATION" if outcome == "succeeded" else "MCP policy warning"
+                notes.append(f"{label}: unapproved tool {d['tool']} {outcome}; "
+                             f"{'execution unconfirmed; ' if outcome == 'attempted' else ''}billing unknown")
+        return notes
+
+    def native(self):
+        """The kind's own stream reader, for a harness whose first-party
+        headless stream xcheck reads directly; None means ACP."""
+        return getattr(self, f"_{self.kind}", None)
+
+    def finish(self) -> None:
+        if self.native():
+            if not self.completed and not self.error and self._failure:
+                self.error = self._failure
+            return
+        self.text = "".join(self._buf)
+        head = self.text.strip()
+        # Agy's server reports an MCP server that will not start as the whole
+        # answer of a turn that still ends end_turn.
+        if self.kind == "agy" and re.fullmatch(r"The MCP server '[^'\n]+' failed to initialize[^\n]*", head):
+            self.error = _clip(head.splitlines()[0], 300)
+        elif not self.completed and not self.error and (self._held or self._failure):
+            self.error = self._held or self._failure
+
+    def feed(self, o: dict) -> None:
+        """Consume native evidence. Presentation belongs exclusively to view.py."""
+        if native := self.native():
+            return native(o)
+        if "method" in o:
+            if "id" in o:  # a request, from either side
+                if o["method"] == "session/prompt" and self._prompt_id is None:
+                    # acpx sends one prompt (--prompt-retries 0); session/prompt
+                    # is client-to-agent, so a later one is an ordinary request.
+                    self._prompt_id = o["id"]
+                else:
+                    key = _id_key(o["id"])
+                    if self._held is not None and self._open.get(key) and o["id"] == self._prompt_id:
+                        # A sender reuses an id only once its earlier request at
+                        # that id is answered, and the prompt is still open, so
+                        # the held error answered that earlier request.
+                        self._open[key] -= 1
+                        self._held = None
+                    self._open[key] = self._open.get(key, 0) + 1
+                return None
+            return self._notification(o)
+        if "result" in o or "error" in o:
+            return self._response(o)
+        return None
+
+    def _response(self, o: dict) -> None:
+        rid, result, error = o.get("id"), o.get("result"), o.get("error")
+        if isinstance(result, dict) and "stopReason" in result:
+            if self._prompt_id is None or rid != self._prompt_id:
+                return None
+            self._held = None  # an error held at this id answered the other request
+            reason = result["stopReason"]
+            if reason == "end_turn":
+                self.completed = True
+            else:
+                self.error = f"{self.kind.title()} ended without completing the review: {reason}"
+            return
+        key = _id_key(rid)
+        is_prompt = self._prompt_id is not None and rid == self._prompt_id
+        if not isinstance(error, dict):
+            if self._open.get(key):
+                self._open[key] -= 1
+                if is_prompt and self._held:
+                    # The other request at this id is answered: the held error was the prompt's.
+                    self.error, self._held = self._held, None
+                    return
+            return None
+        message = _error_text(error)
+        if is_prompt and self._open.get(key):
+            if self._held is None:
+                self._held = message
+                return
+            # Both responses at this id are errors; one of them ended the prompt.
+            self._open[key] -= 1
+            self.error, self._held = f"{self._held}; {message}", None
+            return
+        if is_prompt:
+            # The prompt's own failure: no result can legally follow it.
+            self.error = self._failure = message
+            return
+        if self._open.get(key):
+            self._open[key] -= 1
+        # acpx's own id-null error (agent disconnected, --model refused) or an
+        # error answering another request: the reason, unless the turn completes.
+        self._failure = message
+
+    def _notification(self, o: dict) -> None:
+        method, params = o.get("method"), o.get("params")
+        params = params if isinstance(params, dict) else {}  # a malformed event is ignored, never fatal
+        if (self.kind == "grok" and method == "_x.ai/mcp/server_status"
+                and params.get("status") not in (None, "ready", "initialized")):
+            self.diagnostics.append(dict(kind="mcp_startup", server=params.get("name"),
+                                         status=params.get("reason") or params.get("status")))
+            return None
+        update = params.get("update")
+        update = update if isinstance(update, dict) else {}
+        kind = update.get("sessionUpdate")
+        if kind == "agent_message_chunk":
+            content = update.get("content")
+            text = content.get("text") if isinstance(content, dict) else None
+            self._buf.append(text if isinstance(text, str) else "")
+            return None
+        if kind == "tool_call":
+            self._buf.clear()
+        return None
+
+    # -- codex: `codex exec --json`. Each agent_message is a whole message, so
+    # the last one is the answer; turn.completed ends the turn and turn.failed
+    # fails it. A top-level `error` (a reconnect notice) can recover, so it is
+    # only the reason if the turn never completes.
+    def _cline(self, o: dict) -> None:
+        if o.get("type") == "run_result":
+            model = o.get("model") if isinstance(o.get("model"), dict) else {}
+            if o.get("finishReason") != "completed":
+                self.error = _clip(f"Cline stopped: {o.get('finishReason')}", 300)
+            elif model.get("provider") != "cline" or (self.expected_model and model.get("id") != self.expected_model):
+                self.error = "Cline completed with a different model than the requested free selector"
+            elif not self.error:
+                self.completed = True
+                self.text = o.get("text") if isinstance(o.get("text"), str) else ""
+            return
+        if o.get("type") in ("error", "run_aborted"):
+            self.error = _clip(str(o.get("message") or o.get("reason") or "Cline error"), 300)
+            return
+        if o.get("type") == "agent_event":
+            event = o.get("event") or {}
+            if event.get("type") == "error" and not event.get("recoverable"):
+                error = event.get("error")
+                if isinstance(error, dict) and error.get("name") == "ClineOAuthTokenError":
+                    self.diagnostics.append({"kind": "native_error", "type": "provider.auth"})
+                self.error = _clip(str(error or "Cline agent error"), 300)
+                return
+        return None
+
+    def _codex(self, o: dict) -> None:
+        t = o.get("type")
+        item = o.get("item") if isinstance(o.get("item"), dict) else {}
+        if t == "turn.completed":
+            self.completed = True
+            return
+        if t == "turn.failed":
+            error = o.get("error")
+            self.error = _clip(str((error.get("message") if isinstance(error, dict) else None)
+                                   or self._failure or "turn.failed"), 300)
+            return
+        if t == "error":
+            self._failure = _clip(str(o.get("message") or "error"), 300)
+            return
+        if item.get("type") == "mcp_tool_call" and t in ("item.started", "item.completed"):
+            self._codex_mcp_policy(item, t)
+        if t == "item.started" and item.get("type") not in (None, "agent_message", "reasoning"):
+            self.text = ""  # narration before a tool call is not the answer
+            return
+        if t == "item.completed" and item.get("type") == "agent_message":
+            self.text = item.get("text") if isinstance(item.get("text"), str) else ""
+            return None
+        return None
+
+    def _approved_mcp(self) -> set[str]:
+        return REVIEW_LOCAL_MCP | (REVIEW_FREE_MCP.keys() if self.web else set())
+
+    def _codex_mcp_policy(self, item: dict, event: str) -> None:
+        """A call to an MCP server the launch did not approve (it should have
+        been disabled): one diagnostic per item id, updated on completion."""
+        server = item.get("server")
+        if not isinstance(server, str) or server in self._approved_mcp():
+            return
+        call = item.get("id") if isinstance(item.get("id"), str) else None
+        diagnostic = self._mcp_calls.get(call) if call else None
+        if diagnostic is None:
+            diagnostic = dict(kind="mcp_policy", tool=f"mcp__{server}__{item.get('tool')}", outcome="attempted",
+                              billing="unknown")
+            self.diagnostics.append(diagnostic)
+            if call:
+                self._mcp_calls[call] = diagnostic
+        if event == "item.completed":
+            diagnostic["outcome"] = "error" if item.get("status") == "failed" or item.get("error") else "succeeded"
+
+    # -- claude: `claude -p --output-format stream-json`. The `result` event
+    # ends the turn and carries the final text; with is_error it is the error
+    # (even when subtype says success). init lists each MCP server's startup
+    # status. Unapproved MCP calls are audited per tool_use id: a repeated id
+    # is one call, a later call to the same server is another, and its
+    # tool_result records whether it succeeded.
+    def _claude(self, o: dict) -> None:
+        t = o.get("type")
+        message = o.get("message") if isinstance(o.get("message"), dict) else {}
+        blocks = [b for b in (message.get("content") or []) if isinstance(b, dict)] \
+            if isinstance(message.get("content"), list) else []
+        if t == "system" and o.get("subtype") == "init":
+            for server in o.get("mcp_servers") if isinstance(o.get("mcp_servers"), list) else ():
+                if isinstance(server, dict) and server.get("status") in ("failed", "needs-auth"):
+                    self.diagnostics.append(dict(kind="mcp_startup", server=server.get("name"), status=server["status"]))
+            return None
+        if t == "result":
+            if o.get("is_error"):
+                result = str(o.get("result") or json.dumps(o.get("errors")) or "is_error")
+                self.error = _clip(result, 300)
+                self.completed, self.text = False, ""
+                # Keep only bounded native support fields, never arbitrary
+                # result text or a URL in the compact diagnostic record.
+                diagnostic = {"kind": "provider_error", "provider": "claude"}
+                for key, pattern in (
+                    ("detail", r"(?m)^Details:\s*`?\[([A-Za-z0-9_.-]{1,80})\]`?\s*$"),
+                    ("request_id", r"(?m)^Request ID:\s*(req_[A-Za-z0-9_-]{1,120})\s*$"),
+                    ("message_id", r"(?m)^Message ID:\s*(msg_[A-Za-z0-9_-]{1,120})\s*$"),
+                ):
+                    if match := re.search(pattern, result):
+                        diagnostic[key] = match.group(1)
+                if len(diagnostic) > 2:
+                    self.diagnostics.append(diagnostic)
+                return
+            self.completed = True
+            self.text = o.get("result") if isinstance(o.get("result"), str) else ""
+            return
+        if t == "user":
+            for block in blocks:
+                call = self._mcp_calls.get(block.get("tool_use_id")) if block.get("type") == "tool_result" else None
+                if call:
+                    call["outcome"] = "error" if block.get("is_error") else "succeeded"
+            return None
+        if t == "assistant":
+            for block in blocks:
+                if block.get("type") == "tool_use":
+                    self._claude_mcp_policy(block)
+        return None
+
+    def _claude_mcp_policy(self, block: dict) -> None:
+        """One diagnostic per unapproved MCP tool_use; the exact
+        `mcp__<server>__<tool>` name, never text that merely quotes one."""
+        call, name = block.get("id"), block.get("name")
+        if not isinstance(name, str) or (isinstance(call, str) and call in self._mcp_calls):
+            return
+        parts = name.split("__")
+        if len(parts) < 3 or parts[0] != "mcp" or parts[1] in self._approved_mcp():
+            return
+        diagnostic = dict(kind="mcp_policy", tool=name, outcome="attempted", billing="unknown")
+        self.diagnostics.append(diagnostic)
+        if isinstance(call, str):
+            self._mcp_calls[call] = diagnostic
+
+
+def _clip(s: str, n: int = 160) -> str:
+    s = re.sub(r"\s+", " ", s or "").strip()
+    return s if len(s) <= n else s[: n - 1] + "…"

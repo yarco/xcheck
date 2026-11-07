@@ -1,0 +1,10 @@
+__pycache__/
+.DS_Store
+# Private installation notes, never publication inputs.
+local/
+private/
+publication-policy.json
+*.bundle
+.env
+.env.*
+!.env.example

@@ -1,0 +1,33 @@
+Run as an ACP (Agent Client Protocol) server over stdio
+
+Usage: devin acp [OPTIONS]
+
+Options:
+      --agent-type <AGENT_TYPE>
+          The type of agent to run. When omitted, runs the default agent
+
+          Possible values:
+          - summarizer: A summarizer agent with no tools. The model outputs the full summary as text and a `PostAgentIteration` cog persists it to `~/.local/share/devin/summaries/<session_id>.md` (i.e. `$XDG_DATA_HOME/devin/summaries/`)
+          - review:     A code-review agent with read-only + shell tools. Reviews diffs and provides actionable feedback on correctness, style, security, performance, and completeness
+
+      --model <MODEL>
+          Default model for every new ACP session, overriding the enterprise-configured default. Accepts the same fuzzy names as `/model` (family slug, alias, or partial name), e.g. `--model opus`.
+
+          Also read from `DEVIN_MODEL`, so the in-process ACP server the REPL spawns (a `devin acp` child that inherits the env) picks it up too.
+
+          [env: DEVIN_MODEL=]
+
+      --refusal-fallback <MODEL>
+          Models to switch to, in order, when the provider refuses a request under its usage policy — Anthropic content policy, Anthropic cyber verification, or OpenAI cyber policy. Accepts the same fuzzy names as `--model`, and each candidate is tried at most once per session.
+
+          Also read from `DEVIN_REFUSAL_FALLBACK` (comma-separated), so the `devin acp` child the REPL spawns picks it up too — that env var is the way to enable this for `devin` and `devin -p`, whose agent runs in that child.
+
+          [env: DEVIN_REFUSAL_FALLBACK=]
+
+      --cloud
+          Relay to Devin cloud instead of running the local agent.
+
+          Proxies the stdio ACP transport to the Devin cloud ACP WebSocket, so the connected host drives cloud Devin sessions. Requires a Devin account (sign in with `auth login`). `--agent-type` and `--model` only apply to the local agent and are ignored.
+
+  -h, --help
+          Print help (see a summary with '-h')

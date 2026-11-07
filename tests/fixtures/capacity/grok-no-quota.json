@@ -1,0 +1,9 @@
+{
+  "config": {
+    "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"},
+    "onDemandCap": {"val": 0},
+    "onDemandUsed": {"val": 0},
+    "isUnifiedBillingUser": true,
+    "prepaidBalance": {"val": 0}
+  }
+}

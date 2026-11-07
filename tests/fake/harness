@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""Fake `codex exec` and `claude -p` streams, acpx, every ACP lane's server
+(grok agent stdio, devin acp, opencode acp, Agy's server), the capacity
+meters, `opencode models` and the Keychain lookup: each speaks its real CLI's
+shape.
+
+The kind is argv[0]'s basename. FAKE_MODE selects the review turn's behaviour;
+see `review_turn` (ACP) and `native_turn` for the modes.
+"""
+
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+kind = Path(sys.argv[0]).name
+mode = os.environ.get("FAKE_MODE", "ok")
+argv = sys.argv[1:]
+
+if kind == "codex" and "--help" in argv:
+    print("--skip-git-repo-check --ephemeral --sandbox --cd --model --config --json --disable"
+          if argv[:1] == ["exec"] else "--json --config --disable" if argv[:2] == ["mcp", "list"] else "--stdio")
+    sys.exit(0)
+
+# `codex [--disable F]… [--config K=V]… mcp list --json`: the effective MCP set.
+# FAKE_CODEX_MCP=broken fails the listing; =stuck ignores the overrides.
+if kind == "codex" and argv[-3:] == ["mcp", "list", "--json"]:
+    if os.environ.get("FAKE_CODEX_MCP") == "broken":
+        sys.exit(1)
+    servers = [
+        {"auth_status": "unsupported", "name": "semble", "transport": {"type": "stdio", "command": "uvx", "env": {"UV_CACHE_DIR": "/c"}}},
+        {"auth_status": "unsupported", "name": "qmd", "transport": {"type": "streamable_http", "url": "http://127.0.0.1:8181/mcp"}},
+        {"auth_status": "unsupported", "name": "keenable-free", "transport": {"type": "streamable_http", "url": "https://api.keenable.ai/mcp"}},
+        {"auth_status": "unsupported", "name": "perplexity", "transport": {"type": "stdio", "command": "pwm-mcp"}},
+        {"auth_status": "unsupported", "name": "keenable", "transport": {"type": "streamable_http", "url": "https://api.keenable.ai/mcp",
+                                           "http_headers": {"X-API-Key": "fixture"}}}]
+    if "plugins" not in [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--disable"]:
+        servers.append({"auth_status": "unsupported", "name": "cua_repl", "transport": {"type": "stdio", "command": "node"}})
+    off = {argv[i + 1].split(".")[1] for i, a in enumerate(argv[:-1])
+           if a == "--config" and argv[i + 1].startswith("mcp_servers.") and argv[i + 1].endswith(".enabled=false")}
+    if os.environ.get("FAKE_CODEX_MCP") == "stuck":
+        off = set()
+    print(json.dumps([{**s, "enabled": s["name"] not in off} for s in servers]))
+    sys.exit(0)
+
+if kind == "grok" and mode == "socket-symlink" and "--sandbox" in argv and argv[argv.index("--sandbox") + 1] != "off":
+    sys.stderr.write((Path(__file__).resolve().parent.parent / "fixtures/grok-sandbox-refusal.stderr").read_text())
+    sys.exit(1)
+if kind == "grok" and argv[-2:] == ["version", "--json"]:
+    assert argv[argv.index("--sandbox") + 1] == "off"
+    print(json.dumps({"currentVersion": os.environ.get("FAKE_GROK_VERSION",
+                                                        "1.0.62 (1474f9cbdd91)"),
+                      "channel": "stable"}))
+    sys.exit(0)
+if kind == "grok" and "--help" in argv:
+    print("--model --reasoning-effort --always-approve --agent-profile --no-leader --debug-file stdio"
+          if argv[:1] == ["agent"] else "--sandbox --cwd")
+    sys.exit(0)
+
+
+def emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+# The Keychain lookup for the Antigravity ACP login (FAKE_AGY_LOGIN=absent|locked|empty);
+# `-w` prints the stored token blob.
+if kind == "security":
+    login = os.environ.get("FAKE_AGY_LOGIN", "present")
+    if "-w" in argv and login in ("present", "empty"):
+        print(json.dumps({"refresh_token": "fake-refresh"} if login == "present" else {}))
+    sys.exit({"present": 0, "empty": 0, "absent": 44, "locked": 36}[login])
+
+
+UPSTREAM_LIMIT = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
+OPENCODE_MODELS = ["opencode/muse-spark-1.3-contributor-free", "opencode/space-bunny-free",
+                   "zai-coding-plan/glm-5.3", "openrouter/qwen/qwen3.8-27b:free",
+                   "fixture/a-b", "opencode/fixture-a-b"]
+if kind == "opencode" and argv[:2] == ["api", "model.list"] and "--help" not in argv:
+    print(json.dumps({"data": [{"providerID": model.split("/", 1)[0], "id": model.split("/", 1)[1],
+         "variants": [{"id": "high"}] if not model.startswith("openrouter/") else []} for model in OPENCODE_MODELS]}))
+    sys.exit(0)
+if kind == "opencode" and argv[:1] == ["models"] and "--help" not in argv:
+    print("\n".join(OPENCODE_MODELS))
+    sys.exit(0)
+# `opencode auth list`: a store whose text is the marker holds one Zen credential.
+# Any other OPENCODE_DB, including a missing file, has none. Types only.
+if kind == "opencode" and argv[:2] == ["auth", "list"]:
+    if "--help" in argv:
+        print("--standalone --server --format")
+        sys.exit(0)
+    store = os.environ.get("OPENCODE_DB")
+    try:
+        signed_in = bool(store) and Path(store).is_file() and Path(store).read_text(encoding="utf-8") == "credential\n"
+    except (OSError, UnicodeDecodeError):
+        signed_in = False
+    if "--format" in argv and argv[argv.index("--format") + 1] == "json":
+        connections = [{"type": "credential", "method": "oauth", "label": "Personal"}] if signed_in else []
+        rows = [{"id": "opencode", "name": "OpenCode", "connections": connections}] if signed_in else []
+        print(json.dumps(rows))
+    else:
+        print("opencode Personal stored" if signed_in else "No authenticated integrations")
+    sys.exit(0)
+
+# The operator's claude: help (native flag contract), the zero-spend auth probe,
+# and the custody child the adapter spawns as the SDK would. Routing overrides
+# shadow the Keychain login exactly like the real CLI, so an unscrubbed leak
+# shows up as a wrong authMethod/apiProvider instead of silently passing.
+CLAUDE_FLAGS = ["--print", "--restricted", "--strict-mcp-config", "--mcp-config", "--tools", "--allowedTools",
+                "--disallowedTools", "--permission-mode", "--permission-prompts", "--add-dir",
+                "--no-session-persistence", "--model", "--effort", "--debug-file", "--output-format", "--verbose",
+                "--include-partial-messages"]
+if kind == "claude" and argv == ["--help"]:
+    print(" ".join(f for f in CLAUDE_FLAGS if f != os.environ.get("FAKE_CLAUDE_DROPPED_FLAG")))
+    sys.exit(0)
+if kind == "claude" and argv[:2] == ["auth", "status"]:
+    if "--help" in argv:
+        print("--json")
+        sys.exit(0)
+    if os.environ.get("FAKE_CLAUDE_AUTH") == "absent":
+        print(json.dumps({"loggedIn": False}))
+    else:
+        print(json.dumps({
+            "loggedIn": True,
+            "authMethod": "oauth_token" if os.environ.get("ANTHROPIC_AUTH_TOKEN") else "claude.ai",
+            "apiProvider": "bedrock" if os.environ.get("CLAUDE_CODE_USE_BEDROCK")
+                          else "vertex" if os.environ.get("CLAUDE_CODE_USE_VERTEX")
+                          else "api" if os.environ.get("ANTHROPIC_BASE_URL") else "firstParty",
+            "subscriptionType": "pro"}))
+    sys.exit(0)
+
+# acpx: spawns the --agent command with only stdio, as Node does, prints the
+# ACP JSON-RPC stream in both directions without their direction (`--format
+# json`), answers the agent's requests (permission per --approve-all/
+# --deny-all; anything else method-not-found) and exits 0 only after a prompt
+# result, as acpx exec does.
+ACPX_HELP = ("--agent --cwd --model --approve-all --deny-all --auth-policy "
+             "--no-terminal --no-fs --prompt-retries --format")
+if kind == "acpx":
+    import shlex
+    import subprocess
+    if "--version" in argv:
+        print("0.19.4")
+        sys.exit(0)
+    if "--help" in argv:
+        print("--file --config-option" if argv[:1] == ["exec"] else ACPX_HELP)
+        sys.exit(0)
+
+    agent_argv = shlex.split(argv[argv.index("--agent") + 1])
+    cwd = argv[argv.index("--cwd") + 1] if "--cwd" in argv else os.getcwd()
+    model = (argv[argv.index("--model") + 1] if "--model" in argv
+             else agent_argv[agent_argv.index("--model") + 1] if "--model" in agent_argv else None)
+    prompt = Path(argv[argv.index("--file") + 1]).read_text() if "--file" in argv else argv[-1]
+    settings = [("model", model)] if any(Path(a).name == "opencode" for a in agent_argv) else []
+    settings += [tuple(argv[i + 1].split("=", 1)) for i, arg in enumerate(argv) if arg == "--config-option"]
+    agent = subprocess.Popen(agent_argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def send(msg):
+        emit(msg)
+        try:
+            agent.stdin.write(json.dumps(msg) + "\n")
+            agent.stdin.flush()
+        except BrokenPipeError:
+            emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "agent disconnected"}})
+            sys.exit(1)
+
+    def configure():
+        if settings:
+            key, value = settings.pop(0)
+            send({"jsonrpc": "2.0", "id": 5, "method": "session/set_config_option",
+                  "params": {"sessionId": "s", "configId": key, "value": value}})
+        else:
+            send({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+                  "params": {"sessionId": "s", "prompt": [{"type": "text", "text": prompt}]}})
+
+    send({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1}})
+    for line in agent.stdout:
+        msg = json.loads(line)
+        if mode == "error-no-newline" and msg.get("id") == 2 and "error" in msg:
+            sys.stdout.write(json.dumps(msg))
+            sys.stdout.flush()
+            os.close(1)
+            time.sleep(60)
+        emit(msg)
+        if msg.get("method") and "id" in msg:  # the agent's own request; ids are its own
+            if msg["method"] == "session/request_permission":
+                send({"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": {
+                      "outcome": "selected", "optionId": "deny" if "--deny-all" in argv else "allow"}}})
+            else:
+                send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": "Method not found"}})
+        elif msg.get("id") == 0 and "result" in msg:
+            send({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {"cwd": cwd, "mcpServers": []}})
+        elif msg.get("id") == 1:
+            if "error" in msg:
+                sys.exit(1)
+            result = msg["result"]
+            offered = ([m["modelId"] for m in result["models"]["availableModels"]] if "models" in result
+                       else [o["value"] for c in result["configOptions"] if c["id"] == "model" for o in c["options"]])
+            if model and model not in offered:
+                emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message":
+                      f'Cannot apply --model "{model}": Available models: {", ".join(offered)}'}})
+                sys.exit(1)
+            configure()
+        elif msg.get("id") == 5 and "result" in msg:
+            configure()
+        elif msg.get("id") == 2 and ("error" in msg or "stopReason" in (msg.get("result") or {})):
+            if mode == "terminal-hang":
+                time.sleep(60)
+            if mode in ("error-retry", "rate-limit-retry"):
+                while True:  # native retry events continue after the terminal error
+                    emit({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+                          "sessionUpdate": "agent_thought_chunk"}}})
+                    time.sleep(0.2)
+            sys.exit(0 if "result" in msg else 1)
+    emit({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "agent disconnected"}})
+    sys.exit(1)
+
+
+def update(u):
+    emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": u}})
+
+
+def chunks(text, size=9):
+    for i in range(0, len(text), size):
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text[i:i + size]}})
+
+
+ERRORS = {"opencode": UPSTREAM_LIMIT, "codex": "usage limit reached", "claude": "You've hit your limit · resets 7pm",
+          "grok": "HTTP 402 Grok Build usage balance exhausted"}
+
+
+def grok_agent_log():
+    """What a real `grok agent` build records at session/new: the resolved
+    allowlist, the hook count and the configured MCP set — the lane
+    admission contract reads exactly these lines from --debug-file."""
+    if "--debug-file" not in argv:
+        return
+    declared = []
+    if "--agent-profile" in argv:
+        profile = Path(argv[argv.index("--agent-profile") + 1])
+        if profile.is_file():
+            match = re.search(r"(?m)^tools: \[([^\]]*)\]", profile.read_text())
+            declared = [t.strip() for t in match.group(1).split(",")] if match else []
+    override = os.environ.get("FAKE_GROK_RESOLVED_TOOLS")
+    tools = json.loads(override) if override else declared
+    config = Path(os.environ.get("GROK_HOME") or "/nonexistent") / "config.toml"
+    names = os.environ.get("FAKE_GROK_MCP")
+    servers = (json.loads(names) if names else
+               [n.strip('"') for n in
+                re.findall(r'(?m)^\[mcp_servers\.([^\]]+)\]',
+                           config.read_text() if config.is_file() else "")])
+    with Path(argv[argv.index("--debug-file") + 1]).open("a") as f:
+        f.write(f"INFO xai_grok_hooks::discovery: hooks: discovery complete "
+                f"total_hooks={os.environ.get('FAKE_GROK_HOOKS', '0')} session_start=0\n")
+        f.write(f"DEBUG xai_grok_agent::builder: tools allowlist applied agent=xcheck-review "
+                f"allowed={json.dumps(tools)}\n")
+        f.write(f"INFO xai_grok_shell::session::acp_session::mcp: ensure_mcp_tools_initialized: "
+                f"starting MCP init config_count={len(servers)} config_names={json.dumps(servers)}\n")
+
+
+def review_turn(pid, server):
+    """One session/prompt. Modes:
+    ok | invalid | declined | echo402 | echo-upstream-limit | mcp-fail   answer text variants
+    error | error-retry | rate-limit-retry | error-no-newline           a native prompt error
+    collision-fail          the agent reuses the prompt id for its own request, then fails
+    refusal | text-only | silent-exit                                    no completed review
+    hang | slow | buffered-work | mixed-duration | progress-hang          quiet or endless work
+    draft-rewrite           a complete-looking draft, more tool work, then the final answer
+    bg-child                a background child that ignores TERM/HUP, then the answer
+"""
+    token = [l for l in Path("evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
+    good = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
+    if mode == "reasoning-only":
+        update({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Synthetic reasoning-only turn."}})
+        emit({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": "end_turn"}})
+        return
+    if mode == "silent-exit":
+        sys.exit(0)
+    if mode in ("hang", "slow"):
+        time.sleep(60 if mode == "hang" else 3)
+    if mode == "progress-hang":
+        while True:
+            update({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "."}})
+            time.sleep(0.2)
+    if mode == "draft-rewrite":
+        chunks(good.replace("The claim holds", "EARLY candidate"))
+        time.sleep(float(os.environ.get("FAKE_DELAY", "4")))
+    if mode == "bg-child":
+        child = os.fork()
+        if child == 0:
+            import signal
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            while True:
+                time.sleep(1)
+        Path("background-child.pid").write_text(str(child))
+    chunks("Reading the packet.")
+    update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Running view_file", "kind": "read",
+            "name": "Read", "rawInput": {"command": "SECRET command"}})
+    update({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})
+    emit({"jsonrpc": "2.0", "id": pid if mode == "collision-fail" else 7, "method": "session/request_permission",
+          "params": {"sessionId": "s", "toolCall": {"toolCallId": "t2"}}})
+    if mode == "draft-rewrite":
+        time.sleep(1)
+    if mode in ("buffered-work", "mixed-duration"):
+        time.sleep(float(os.environ.get("FAKE_DELAY", "7")))
+    if mode in ("error", "error-retry", "rate-limit-retry", "error-no-newline", "collision-fail"):
+        message = ERRORS.get(server, "Individual quota reached")
+        emit({"jsonrpc": "2.0", "id": pid, "error": {"code": -32603, "message": message,
+              "data": {"message": message, "service": "session", "errorName": "APIError"}}})
+        return
+    text = {"mcp-fail": "The MCP server 'semble' failed to initialize: connection closed",
+            "echo-upstream-limit": good.replace("The claim holds", "The packet quotes " + UPSTREAM_LIMIT),
+            "echo402": good.replace("The claim holds", "The packet quotes `HTTP 402 payment required`, "
+                                    "`You've hit your limit · resets 7pm` and `session limit reached`; "
+                                    "all are evidence, not errors. The claim holds"),
+            "draft-rewrite": good.replace("The claim holds", "FINAL reviewed answer"),
+            "invalid": "### 1) VERDICT\nfine but no proof and no marker\n",
+            "declined": "I cannot do this review.\nRESULT_INVALID\n"}.get(mode, good)
+    chunks(text)
+    if mode == "text-only":
+        sys.exit(0)
+    emit({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": "refusal" if mode == "refusal" else "end_turn"}})
+
+
+# Native ACP servers; all join pool custody, and Agy also runs in Seatbelt.
+if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in argv and "--help" not in argv)
+        or (kind == "grok" and "stdio" in argv)):
+    configured = {}
+    if kind == "devin":
+        selected = argv[argv.index("--model") + 1]
+    elif kind == "grok":
+        selected = argv[argv.index("-m") + 1]
+    if os.environ.get("FAKE_ENV_DUMP"):
+        path = Path("env.agy.json") if kind == "agy_acp_server.par" else Path(os.environ["FAKE_ENV_DUMP"]).with_suffix(f".{kind}.json")
+        path.write_text(json.dumps(dict(os.environ)))  # Agy's Seatbelt: only the workspace
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if msg.get("method") == "initialize":
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1}})
+        elif msg.get("method") == "session/new":
+            if kind == "opencode":
+                offered = OPENCODE_MODELS
+                emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s", "configOptions": [
+                    {"id": "model", "type": "select", "currentValue": offered[0], "options": [{"value": m} for m in offered]}]}})
+                continue
+            result = {"sessionId": "s", "models": {
+                "currentModelId": selected if kind in ("devin", "grok") else "gemini-3.8-flash-high", "availableModels":
+                    [{"modelId": selected}] if kind in ("devin", "grok") else [] if mode == "models-unavailable" else [
+                    {"modelId": "gemini-3.8-flash-high"}, {"modelId": "gemini-3.8-flash-medium"},
+                    {"modelId": "gemini-3.8-flash-low"}]}}
+            if kind == "grok":
+                effort = argv[argv.index("--reasoning-effort") + 1] if "--reasoning-effort" in argv else ""
+                current = os.environ.get("FAKE_GROK_MODEL", selected)
+                effort = os.environ.get("FAKE_GROK_EFFORT", effort)
+                result["models"]["currentModelId"] = current
+                result["configOptions"] = [
+                    {"id": "model", "type": "select", "currentValue": current,
+                     "options": [{"value": current}]},
+                    {"id": "reasoning_effort", "type": "select", "currentValue": effort,
+                     "options": [{"value": effort}]}]
+                grok_agent_log()
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+        elif msg.get("method") == "session/set_config_option":
+            configured[msg["params"]["configId"]] = msg["params"]["value"]
+            emit({"jsonrpc": "2.0", "id": msg["id"], "result": {"configOptions": []}})
+        elif msg.get("method") == "session/prompt":
+            if mode == "custody":  # what the spender holds, sees and may write
+                pool = "agy-gemini" if kind == "agy_acp_server.par" else kind
+                if kind == "opencode" and not configured["model"].startswith("opencode/"):
+                    pool += "-" + configured["model"].split("/", 1)[0]
+                busy = Path(os.environ["XCHECK_ROOT"]) / ".pools" / pool / "busy"
+                held = []
+                for fd in range(3, 256):
+                    try:
+                        held += [fd] if os.fstat(fd).st_ino == busy.stat().st_ino else []
+                    except OSError:
+                        pass
+                outside = Path(os.environ["XCHECK_ROOT"]) / "outside-probe.txt"
+                try:
+                    outside.write_text("x")
+                    wrote_outside = True
+                except OSError:
+                    wrote_outside = False
+                Path("probe.json").write_text(json.dumps({
+                    "holds_busy": held, "wrote_outside": wrote_outside,
+                    "opencode_db": os.environ.get("OPENCODE_DB"),
+                    "gemini_home": os.environ.get("GEMINI_HOME"),
+                    "agy_file_storage": os.environ.get("AGY_ACP_FORCE_FILE_STORAGE"),
+                    "agy_token": (lambda t: {"blob": json.loads(t.read_text()), "mode": oct(t.stat().st_mode & 0o777)}
+                                  if t.is_file() else None)(
+                        Path(os.environ.get("GEMINI_HOME") or "/nonexistent") / "antigravity-acp" / "acp_token.json"),
+                    "grok_home": os.environ.get("GROK_HOME"),
+                    "grok_auth_path": os.environ.get("GROK_AUTH_PATH"),
+                    "grok_env": sorted(k for k in os.environ if k.startswith("GROK_")),
+                    "devin_mode": os.environ.get("DEVIN_PERMISSION_MODE"),
+                    "devin_fallback": os.environ.get("DEVIN_REFUSAL_FALLBACK"),
+                    "devin_sandbox": os.environ.get("DEVIN_SANDBOX"),
+                    "config": configured,
+                    "acpx_env": sorted(k for k in os.environ if k.startswith("ACPX_"))}))
+            review_turn(msg["id"], kind)
+    sys.exit(0)
+
+
+def holds_pool(pool):
+    busy = Path(os.environ["XCHECK_ROOT"]) / ".pools" / pool / "busy"
+    held = []
+    for fd in range(3, 256):
+        try:
+            held += [fd] if os.fstat(fd).st_ino == busy.stat().st_ino else []
+        except OSError:
+            pass
+    return held
+
+
+class CodexStream:
+    """`codex exec --json` event shapes."""
+    def start(self):
+        emit({"type": "thread.started", "thread_id": "fixture-thread"})
+
+    def say(self, text):
+        emit({"type": "item.completed", "item": {"id": "m", "type": "agent_message", "text": text}})
+
+    def tool(self):
+        emit({"type": "item.started", "item": {"id": "c", "type": "command_execution", "command": "cat PACKET.md"}})
+        emit({"type": "item.completed", "item": {"id": "c", "type": "command_execution", "exit_code": 0}})
+
+    def think(self):
+        emit({"type": "item.started", "item": {"id": "r", "type": "reasoning"}})
+
+    def notice(self, message):
+        emit({"type": "error", "message": message})
+
+    def done(self, text):
+        self.say(text)
+        emit({"type": "turn.completed", "usage": {}})
+
+    def fail(self, message):
+        emit({"type": "error", "message": message})
+        emit({"type": "turn.failed", "error": {"message": message}})
+
+
+class ClaudeStream:
+    """`claude -p --output-format stream-json` event shapes."""
+    def __init__(self):
+        config = json.loads(argv[argv.index("--mcp-config") + 1])
+        self.servers = [{"name": n, "status": "connected"} for n in config.get("mcpServers", {})]
+        if "--strict-mcp-config" not in argv:  # the CLI would also load a global paid connector
+            self.servers.append({"name": "cloudflare-browser-rendering", "status": "connected"})
+        if mode == "mcp-startup-warning":
+            self.servers.append({"name": "optional-fake", "status": "needs-auth"})
+
+    def start(self):
+        emit({"type": "system", "subtype": "init", "model": argv[argv.index("--model") + 1],
+               "mcp_servers": self.servers})
+
+    def say(self, text):
+        emit({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+
+    def use(self, call, name, ok=True):
+        emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": call, "name": name,
+                                                            "input": {"file_path": "PACKET.md"}}]}})
+        emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": call,
+                                                       "is_error": not ok, "content": "ok" if ok else "needs-auth"}]}})
+
+    def tool(self):
+        self.use("toolu_read", "Read")
+        offered = any(s["name"] == "cloudflare-browser-rendering" for s in self.servers)
+        if mode == "mcp-policy-audit" or (mode == "mcp-policy-probe" and offered):  # a forbidden call that succeeds
+            self.use("toolu_cf", "mcp__cloudflare-browser-rendering__get_url_links")
+        if mode == "mcp-startup-warning":  # an unapproved call the CLI refuses
+            self.use("toolu_of", "mcp__optional-fake__fetch", ok=False)
+
+    def think(self):
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta"}}})
+
+    def notice(self, message):
+        emit({"type": "system", "subtype": "notice", "message": message})
+
+    def done(self, text):
+        self.say(text)
+        emit({"type": "result", "subtype": "success", "is_error": False, "result": text})
+
+    def fail(self, message):
+        emit({"type": "result", "subtype": "success", "is_error": True, "result": message})
+
+
+def native_turn(stream, server, work):
+    """One headless run in the CLI's own event shapes. Modes: ok, invalid,
+    declined, echo402, custody, silent-exit, hang, slow, progress-hang,
+    reconnect, buffered-work, mixed-duration, error and its retry variants,
+    text-only, terminal-hang; Claude adds mcp-policy-audit, mcp-policy-probe
+    and mcp-startup-warning. Other review_turn modes are ACP-only and fall
+    through to an ordinary answer here."""
+    token = [l for l in (work / "evidence/manifest-tail.txt").read_text().splitlines() if l.strip()][-1]
+    good = f"### 1) VERDICT\nThe claim holds; the parser handles it.\n\n6) PROOF: {token}\nRESULT_COMPLETE\n"
+    if os.environ.get("FAKE_ENV_DUMP"):
+        Path(os.environ["FAKE_ENV_DUMP"]).with_suffix(f".{server}.json").write_text(json.dumps(dict(os.environ)))
+    stream.start()
+    if mode == "custody":
+        (work / "probe.json").write_text(json.dumps({"holds_busy": holds_pool(server), "argv": argv,
+                                                     "stdin": sys.stdin.read()}))
+    if mode in ("silent-exit", "stdout-leak"):
+        if mode == "stdout-leak" and os.fork() == 0:  # a descendant keeps stdout open
+            time.sleep(60)
+            os._exit(0)
+        sys.exit(0)
+    if mode in ("hang", "slow"):
+        time.sleep(60 if mode == "hang" else 3)
+    if mode == "progress-hang":
+        while True:
+            stream.think()
+            time.sleep(0.2)
+    if mode == "reconnect":
+        stream.notice("Reconnecting... 1/5 (stream disconnected before completion)")
+    stream.say("Reading the packet.")
+    stream.tool()
+    if mode in ("buffered-work", "mixed-duration") and not (mode == "mixed-duration" and server == "codex"):
+        time.sleep(float(os.environ.get("FAKE_DELAY", "7")))
+    if mode in ("error", "error-retry", "rate-limit-retry", "error-no-newline", "collision-fail"):
+        stream.fail(ERRORS.get(server, "Individual quota reached"))
+        while mode in ("error-retry", "rate-limit-retry"):  # the process keeps going after its failure
+            stream.think()
+            time.sleep(0.2)
+        sys.exit(1)
+    text = {"echo402": good.replace("The claim holds", "The packet quotes `HTTP 402 payment required`, "
+                                    "`You've hit your limit · resets 7pm` and `session limit reached`; "
+                                    "all are evidence, not errors. The claim holds"),
+            "invalid": "### 1) VERDICT\nfine but no proof and no marker\n",
+            "declined": "I cannot do this review.\nRESULT_INVALID\n"}.get(mode, good)
+    if mode == "text-only":
+        stream.say(text)
+        sys.exit(0)
+    stream.done(text)
+    if mode == "terminal-hang":
+        time.sleep(60)
+    sys.exit(0)
+
+
+if kind == "codex" and "exec" in argv:
+    native_turn(CodexStream(), "codex", Path(argv[argv.index("--cd") + 1]))
+if kind == "claude" and "-p" in argv:
+    native_turn(ClaudeStream(), "claude", Path(argv[argv.index("--add-dir") + 1]))
+
+
+# Quota meters (xcheck/capacity.py), FAKE_CAPACITY=eligible|reserve-low.
+used = {"eligible": 40, "reserve-low": 95}[os.environ.get("FAKE_CAPACITY", "eligible")]
+if kind == "codex" and argv[:1] == ["app-server"]:
+    for line in sys.stdin:  # stays open until answered, like the real server
+        msg = json.loads(line)
+        if msg.get("id") == 1:
+            emit({"id": 1, "result": {}})
+        elif msg.get("id") == 2:
+            emit({"id": 2, "result": {"rateLimits": {
+                "primary": {"usedPercent": used, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 10, "windowDurationMins": 10080}}}})
+    sys.exit(0)
+if kind == "agy" and argv == ["--version"]:
+    print("1.2.12")
+    sys.exit(0)
+if kind == "agy" and argv[:2] == ["-p", "/usage"]:
+    bucket = lambda i, left: {"id": i, "remaining_fraction": left}
+    emit({"status": "SUCCESS", "num_turns": 0, "command": {"name": "usage", "data": {"groups": [
+        {"buckets": [bucket("gemini-weekly", (100 - used) / 100), bucket("gemini-5h", 1)]},
+        {"buckets": [bucket("3p-weekly", 0.5), bucket("3p-5h", 1)]}]}}})
+    sys.exit(0)
+if kind == "agy" and "--help" in argv:
+    print("--output-format --print-timeout", file=sys.stderr)
+    sys.exit(0)
+
+sys.exit(f"fake harness: no behaviour for {kind} {argv}")

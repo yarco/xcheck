@@ -1,0 +1,58 @@
+{
+  "source": "Configuration fragment captured from a native OpenCode 2.0.27 ACP reply on 2026-10-13; model catalogs, sessions and custom agents omitted.",
+  "configOptions": [
+    {
+      "id": "effort",
+      "name": "Effort",
+      "description": "Available effort levels for this model",
+      "category": "thought_level",
+      "type": "select",
+      "currentValue": "default",
+      "options": [
+        {
+          "value": "minimal",
+          "name": "Minimal"
+        },
+        {
+          "value": "low",
+          "name": "Low"
+        },
+        {
+          "value": "medium",
+          "name": "Medium"
+        },
+        {
+          "value": "high",
+          "name": "High"
+        },
+        {
+          "value": "xhigh",
+          "name": "Xhigh"
+        },
+        {
+          "value": "default",
+          "name": "Default"
+        }
+      ]
+    },
+    {
+      "id": "mode",
+      "name": "Session Mode",
+      "category": "mode",
+      "type": "select",
+      "currentValue": "build",
+      "options": [
+        {
+          "value": "build",
+          "name": "Build",
+          "description": "The default agent. Executes tools based on configured permissions."
+        },
+        {
+          "value": "plan",
+          "name": "Plan",
+          "description": "Read-only agent for exploring the codebase and planning work before implementation."
+        }
+      ]
+    }
+  ]
+}
