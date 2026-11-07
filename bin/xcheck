@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""X-Check: fan a staged review packet out to peer agent CLIs and collect answers.
+
+  xcheck run    --base B [--lanes kind:model[:effort],...] [--orch KIND] [--mode auto|headless|herdr]
+  xcheck run    ... --add opencode:<provider>/<model>[:variant]   opt in from `xcheck models`
+  xcheck run    ... --detach  start the supervisor in the background and return
+  xcheck wait   --base B [--timeout S]   block until the run ends (exit 3 = still
+                running after S seconds); also reattaches if the supervisor died
+  xcheck status --base B      render STATUS from files, no waiting
+  xcheck activity --base B [--lane NAME] [--json]  compact native progress metadata
+  xcheck doctor               check adapter flags and model pins against installed CLIs
+  xcheck capacity [--lanes …] read each lane's quota pool now (no inference)
+  xcheck models [--provider ID] [--json] discover recent zero-price coding models
+  xcheck install              publish a read-only copy as `xcheck` on PATH (+ Codex rule)
+  xcheck lane   --base B --lane NAME   (internal: run one lane)
+  xcheck hold   --pool P --run B -- CMD (internal: an ACP lane's agent command)
+
+See Multi-Agent Cross-Check Protocol.md for the protocol.
+"""
+
+import argparse
+import os
+import shutil
+import sys
+from pathlib import Path
+
+# The source copy starts through `env python3`, which may resolve to an older
+# system Python; the installed copy names its own 3.12+ interpreter.
+if sys.version_info < (3, 12):
+    newer = next(filter(None, map(shutil.which, ("python3.14", "python3.13", "python3.12"))), None)
+    if newer is None:
+        sys.exit(f"xcheck needs Python 3.12+ (this is {sys.version.split()[0]}); run it with a newer python3")
+    os.execv(newer, [newer, *sys.argv])
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from xcheck import adapters, lane, run, validate  # noqa: E402
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="xcheck", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("run", help="launch a staged BASE and wait for every lane")
+    r.add_argument("--base", required=True, type=Path)
+    r.add_argument("--orch", required=True, choices=[*adapters.KINDS, "other"],
+                   help="the orchestrating harness; its kind is never a peer")
+    r.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster minus --orch")
+    r.add_argument("--add", action="append", default=[], metavar="LANE",
+                   help="append an opt-in lane (kind:model[:effort]); pins: "
+                        + ", ".join(f"{l.kind}:{l.model}" for l in adapters.OPT_IN)
+                        + "; more opencode selectors from `xcheck models`")
+    r.add_argument("--mode", default="auto", choices=["auto", "headless", "herdr"])
+    r.add_argument("--web", default="live", choices=["live", "packet"],
+                   help="live (default): allow web; packet: disable built-in web and request no web (not isolation)")
+    r.add_argument("--idle", type=int, default=None,
+                   help="optional explicit silence cutoff; may stop working models (no default cutoff)")
+    r.add_argument("--cap", type=int, default=None, help="optional explicit wall-clock spend limit; default waits for completion")
+    r.add_argument("--force-lane", action="append", default=[], metavar="NAME",
+                   help="launch this lane even if capacity says no (record why in chat)")
+    r.add_argument("--skip-capacity", action="store_true", help="no capacity probe (tests, smoke runs)")
+    r.add_argument("--detach", action="store_true",
+                   help="return once launched; retain one wait or verified completion callback")
+
+    r.add_argument("--supervisor", action="store_true", help=argparse.SUPPRESS)
+
+    w = sub.add_parser("wait")
+    w.add_argument("--base", required=True, type=Path)
+    w.add_argument("--timeout", type=int, help="return with exit 3 after this many seconds")
+    st = sub.add_parser("status")
+    st.add_argument("--base", required=True, type=Path)
+    ca = sub.add_parser("cancel", help="explicitly cancel owned lanes; waiting never cancels")
+    ca.add_argument("--base", required=True, type=Path)
+    ca.add_argument("--lane")
+    ca.add_argument("--reason", required=True)
+    ac = sub.add_parser("activity", help="inspect native progress metadata without peer answer text")
+    ac.add_argument("--base", required=True, type=Path)
+    ac.add_argument("--lane")
+    ac.add_argument("--json", action="store_true", help="full native metadata instead of one line per lane")
+    sub.add_parser("doctor")
+    cp = sub.add_parser("capacity", help="read each lane's quota pool now (no inference)")
+    cp.add_argument("--lanes", help="comma list of kind:model[:effort]; default roster")
+    md = sub.add_parser("models", help="discover current zero-price tool models; no inference or roster changes")
+    md.add_argument("--provider", action="append", help="primary source provider ID (repeatable); default: all configured discovery sources")
+    md.add_argument("--sources", type=Path, help="JSON file adding/overriding public provider discovery sources")
+    md.add_argument("--limit", type=int, default=20, help="maximum rows, undated offers then latest releases (default 20)")
+    md.add_argument("--json", action="store_true", help="metadata with sources, provider docs and auth variable names")
+    sub.add_parser("install")
+    hd = sub.add_parser("hold")  # internal: acpx's agent command for an ACP lane
+    hd.add_argument("--pool", required=True)
+    hd.add_argument("--run", required=True)
+    hd.add_argument("--log", type=Path)
+    hd.add_argument("argv", nargs=argparse.REMAINDER)
+    ln = sub.add_parser("lane")
+    ln.add_argument("--base", required=True, type=Path)
+    ln.add_argument("--lane", required=True)
+
+    a = p.parse_args()
+    try:
+        if a.cmd == "run" and not a.supervisor:
+            code = run.detach([x for x in sys.argv[1:] if x != "--detach"] + ["--supervisor"], a.base)
+            return code if code or a.detach else run.wait(a.base, None)
+        if a.cmd == "run":
+            if a.lanes:
+                lanes = [adapters.parse_lane(s.strip()) for s in a.lanes.split(",") if s.strip()]
+            else:
+                lanes = [l for l in adapters.DEFAULT_ROSTER if l.kind != a.orch]
+            lanes += [adapters.parse_lane(s.strip()) for s in a.add]
+            return run.start(a.base, lanes, a.mode, a.orch, a.web == "live", a.idle, a.cap,
+                             set(a.force_lane), a.skip_capacity)
+        if a.cmd == "wait":
+            return run.wait(a.base, a.timeout)
+        if a.cmd == "status":
+            print(run.render_status(run.launched(a.base.resolve())))
+            return 0
+        if a.cmd == "cancel":
+            return run.cancel(run.launched(a.base.resolve()), a.lane, a.reason)
+        if a.cmd == "activity":
+            import json
+            from xcheck import activity
+            current = run.launched(a.base.resolve())
+            names = [a.lane] if a.lane else list(current.lanes)
+            if any(n not in current.lanes for n in names):
+                raise ValueError("unknown lane")
+            rows = [activity.snapshot(current, n) for n in names]
+            print(json.dumps(rows, indent=2) if a.json else "\n".join(activity.compact(row) for row in rows))
+            return 0
+        if a.cmd == "capacity":
+            from xcheck import capacity
+            lanes = ([adapters.parse_lane(s.strip()) for s in a.lanes.split(",") if s.strip()]
+                     if a.lanes else list(adapters.DEFAULT_ROSTER))
+            for l in lanes:
+                r = capacity.read(l, capacity.sharing(l, lanes))
+                print(f"{l.name:30} {r.status:17} {r.note}", flush=True)
+            return 0
+        if a.cmd == "doctor":
+            return run.doctor()
+        if a.cmd == "models":
+            import json
+            from xcheck import models
+            if a.limit <= 0:
+                raise ValueError("models --limit must be positive")
+            try:
+                result = models.discover(set(a.provider) if a.provider else None, a.sources)
+            except Exception as error:
+                print(f"xcheck: model discovery failed: {type(error).__name__}: {error}", file=sys.stderr)
+                return 1
+            total = len(result["models"])
+            result["total"] = total
+            result["models"] = result["models"][:a.limit]
+            if a.json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(result["notice"])
+                print(f"Checked {result['checked_at']}; prices and availability from provider sources")
+                for warning in result["warnings"]:
+                    print(f"Warning: {warning}")
+                for row in result["models"]:
+                    action = "--add" if row["state"] == "ready" else "needs-client-setup"
+                    print(f"{row['release_date'] or 'unknown':10} {action} {row['selector']}")
+                print(f"{len(result['models'])} shown of {total}; --provider ID filters; --json includes sources and account setup")
+            return 1 if result["warnings"] else 0
+        if a.cmd == "install":
+            from xcheck import install
+            dest = install.install()
+            print(f"xcheck: installed {dest}\n  {install.LINK} → it\n  Codex rule: {install.RULES}")
+            return 0
+        if a.cmd == "hold":
+            argv = a.argv[1:] if a.argv[:1] == ["--"] else a.argv
+            return lane.hold(a.pool, a.run, a.log, argv)
+        if a.cmd == "lane":
+            return lane.run_lane(a.base.resolve(), a.lane)
+    except (run.RunError, validate.PacketError, ValueError) as e:
+        print(f"xcheck: {e}", file=sys.stderr)
+        return 2
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

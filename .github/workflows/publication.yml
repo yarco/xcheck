@@ -1,0 +1,50 @@
+name: Publication guard
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare read-only test source
+        run: |
+          sudo install -D -m 644 tools/check_publication.py /opt/publication-source/tools/check_publication.py
+          sudo install -D -m 644 tools/tests/test_publication.py /opt/publication-source/tools/tests/test_publication.py
+          sudo install -d -m 755 /opt/publication-root/{usr,source,scratch,etc}
+          for path in bin sbin lib lib64; do
+            sudo ln -s "usr/$path" "/opt/publication-root/$path"
+          done
+          printf 'nobody:x:65534:65534:Test runner:/scratch/home:/bin/sh\n' | sudo tee /opt/publication-root/etc/passwd >/dev/null
+          printf 'nogroup:x:65534:\n' | sudo tee /opt/publication-root/etc/group >/dev/null
+      - name: Test without network, accounts or writable host state
+        run: |
+          trap 'status=$?; if [ "$status" -ne 0 ]; then sudo journalctl --since="-2min" --grep="publication-guard|NAMESPACE|Failed to set up|Failed at step" --no-pager -n 80; fi; exit "$status"' EXIT
+          # A minimal root exposes only the toolchain, source and synthetic
+          # identity files, never runner homes, credentials or service sockets.
+          sudo systemd-run --unit=publication-guard --wait --pipe --collect --service-type=exec \
+            -p User=nobody -p Group=nogroup \
+            -p RootDirectory=/opt/publication-root -p MountAPIVFS=yes \
+            -p 'BindReadOnlyPaths=/usr /opt/publication-source:/source' \
+            -p WorkingDirectory=/source \
+            -p PrivateNetwork=yes -p RestrictAddressFamilies=AF_UNIX \
+            -p PrivateDevices=yes -p PrivateIPC=yes \
+            -p ProtectSystem=strict \
+            -p 'InaccessiblePaths=-/dev/shm' \
+            -p 'TemporaryFileSystem=/scratch:rw,size=128M,mode=1777' \
+            -p NoNewPrivileges=yes -p CapabilityBoundingSet= \
+            -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
+            -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes \
+            -p CPUQuota=100% -p MemoryMax=512M -p MemorySwapMax=0 \
+            -p TasksMax=64 -p LimitNOFILE=128 -p LimitFSIZE=16M \
+            -p LimitCPU=60 -p LimitCORE=0 -p RuntimeMaxSec=180 \
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME=/scratch/home \
+              TMPDIR=/scratch/tmp XDG_CACHE_HOME=/scratch/cache \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null LC_ALL=C \
+              /bin/sh -c 'mkdir -p "$HOME" "$TMPDIR" "$XDG_CACHE_HOME"; exec /usr/bin/python3 -I -B -m unittest discover -s tools/tests -v'

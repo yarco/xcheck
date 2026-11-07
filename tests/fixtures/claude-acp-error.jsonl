@@ -1,0 +1,6 @@
+{"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1}}
+{"jsonrpc": "2.0", "id": 0, "result": {"protocolVersion": 1}}
+{"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {"cwd": "/tmp/xcheck-smoke/claude", "mcpServers": [], "_meta": {"claudeCode": {"options": {"model": "no-such-model", "title": "xcheck review"}}}}}
+{"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1", "configOptions": []}}
+{"jsonrpc": "2.0", "id": 2, "method": "session/prompt", "params": {"sessionId": "s1", "prompt": [{"type": "text", "text": "review"}]}}
+{"jsonrpc": "2.0", "id": 2, "error": {"code": -32603, "message": "There's an issue with the selected model (no-such-model). It may not exist or you may not have access to it.", "data": {"message": "There's an issue with the selected model (no-such-model)."}}}
