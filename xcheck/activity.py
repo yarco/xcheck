@@ -133,14 +133,15 @@ def _wrapped_provider_text(response) -> str | None:
     if not isinstance(raw, str):
         return None
     raw = ' '.join(raw.split())
-    if not raw or len(raw) > 300:
+    if not raw or len(raw) > 300 or raw.startswith(('{', '[', '<')):
         return None
     return raw
 
 
 def _native_error_message(error: dict) -> str:
     message = ' '.join(str(error.get('message') or '').split())
-    raw = _wrapped_provider_text(error.get('response'))
+    raw = (_wrapped_provider_text(error.get('response'))
+           if not message or message.lower().rstrip('.') == 'provider returned error' else None)
     if raw and raw not in message:
         message = f'{message}: {raw}' if message else raw
     return message[:500]

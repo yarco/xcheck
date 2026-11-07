@@ -131,7 +131,7 @@ def _command(argv: list[str], deadline: float | None, pool_fd: int, auth_fd: int
 
 
 def admit(lane, reading: capacity.Reading, same_pool: int, phase, *,
-          pool_fd: int, deadline: float | None = None) -> capacity.Reading:
+          pool_fd: int, deadline: float | None = None, show=lambda lines: None) -> capacity.Reading:
     if lane.kind != "claude" or reading.status != "auth-required":
         return reading
     # The pool excludes other runs, but same-run lanes can share it. Serialize
@@ -151,7 +151,7 @@ def admit(lane, reading: capacity.Reading, same_pool: int, phase, *,
         if reading.status != "auth-required":
             return reading
         phase("refreshing_auth")
-        print("xcheck: trying Claude's native zero-turn authentication refresh", flush=True)
+        show(["xcheck: trying Claude's native zero-turn authentication refresh"])
         try:
             _command(["claude", "--safe-mode", "--no-session-persistence", "--tools", "",
                       "--permission-prompts", "none", "-p", "/status"],
@@ -164,7 +164,7 @@ def admit(lane, reading: capacity.Reading, same_pool: int, phase, *,
         if reading.status != "auth-required" or LOGIN_COMMAND is None:
             return reading
         phase("waiting_for_login")
-        print("xcheck: opening Claude login; complete native sign-in in the browser/terminal window", flush=True)
+        show(["xcheck: opening Claude login; complete native sign-in in the browser/terminal window"])
         try:
             code = _command([str(LOGIN_COMMAND)], deadline, pool_fd, lock.fileno(), attended=True)
         except OSError:

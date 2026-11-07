@@ -5,19 +5,22 @@ import json
 import os
 import re
 import selectors
+import signal
 import subprocess
 import time
 from pathlib import Path
+from functools import partial
 
 from . import adapters
 from .environment import lane_env
-from .files import end_group
+from .files import defer_stop, end_group
 
 PROBE_TIMEOUT = 45
 
 
 def version_probe(work: Path) -> tuple[str | None, str | None]:
     # Unlike --version/--help, this subcommand resolves native sandbox/startup.
+    # Only this known version JSON is inspected; never expose other stdout.
     spec = adapters.Launch(["grok", *adapters.GROK_SANDBOX_ARGS, "--cwd", str(work),
                             "version", "--json"], None, env_set=adapters.GROK_ENV, kind="grok")
     try:
@@ -55,15 +58,13 @@ def probe_session(work: Path, spec: adapters.Launch):
         err = log_path.with_suffix(".stderr").open("w")
     except OSError as exc:
         return argv, None, log_path, f"startup-unavailable: probe log: {exc}"
+    proc, sel = None, None
     try:
-        proc = subprocess.Popen(argv, cwd=work, env=lane_env(spec, work), stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=err, start_new_session=True)
-    except OSError as exc:
-        err.close()
-        return argv, None, log_path, (f"startup-unavailable: Grok contract probe: {exc}; "
-                                      "repair startup and recheck xcheck doctor")
-    sel = selectors.DefaultSelector()
-    try:
+        with defer_stop() as previous:
+            proc = subprocess.Popen(argv, cwd=work, env=lane_env(spec, work), stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=err, start_new_session=True,
+                                    preexec_fn=partial(signal.pthread_sigmask, signal.SIG_SETMASK, previous))
+        sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
 
         def send(obj):
@@ -90,6 +91,7 @@ def probe_session(work: Path, spec: adapters.Launch):
                     if not isinstance(msg, dict):
                         continue
                     if msg.get("method") and "id" in msg:
+                        # Refuse requests like acpx does for unsupported methods.
                         send({"jsonrpc": "2.0", "id": msg["id"],
                               "error": {"code": -32601, "message": "Method not found"}})
                     elif msg.get("id") == 1 and "result" in msg:
@@ -110,10 +112,18 @@ def probe_session(work: Path, spec: adapters.Launch):
     except OSError:
         return argv, None, log_path, "startup-unavailable: Grok contract probe disconnected"
     finally:
-        sel.close()
-        end_group(proc.pid)
-        proc.wait()
-        err.close()
+        with defer_stop():
+            try:
+                if sel is not None:
+                    sel.close()
+                if proc is not None:
+                    end_group(proc.pid, reap=proc.poll)
+                    proc.wait()
+            finally:
+                if proc is not None:
+                    proc.stdin.close()
+                    proc.stdout.close()
+                err.close()
 
 
 def contract(argv: list[str], session: dict, log_path: Path | None) -> str | None:

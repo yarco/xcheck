@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 from functools import partial
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 
 import shutil
 
@@ -56,33 +56,53 @@ def _raise_stop(signum, _frame):
     raise _Stop(signal.Signals(signum).name)
 
 
+@contextmanager
+def _settling(directory):
+    """Finish publication/cleanup before delivering another stop signal.
+
+    Once exit.json exists, a delayed signal cannot revise that terminal record.
+    A failed publication still propagates the stop for supervisor recovery.
+    """
+    signal.alarm(0)
+    try:
+        with defer_stop():
+            yield
+    except _Stop:
+        if not (directory / "exit.json").exists():
+            raise
+
+
 def run_lane(base: Path, name: str) -> int:
     """Run one lane; whatever happens, end with exit.json."""
     run = Run.load(base)
     d = run.lane_dir(name)
     outcome = settlement.Outcome(directory=d)
-    _alive = hold_life(d / "alive")
+    _alive = hold_life(d / "alive", wait=True)
     try:  # exit.json already under the lock: cancelled before this runner started
         code = 0 if (d / "exit.json").exists() else _run_lane(run, name, outcome)
     except _Stop as stop:  # a signal outside the guarded spans still ends with a record
         code = 130
-        outcome.stop(*_stop_status(stop, run.cap, d))
-        saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web, run.lane(name).model)
-        settlement.publish(run, name, saved, outcome)
+        with _settling(d):
+            if not (d / "exit.json").exists():
+                outcome.stop(*_stop_status(stop, run.cap, d))
+                saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web, run.lane(name).model)
+                settlement.publish(run, name, saved, outcome)
     except Exception as e:  # a runner bug must not look like a silent death
         import traceback
-        try:
-            (d / "runner-error.log").write_text(traceback.format_exc())
-        except OSError:
-            pass
-        if not (d / "exit.json").exists():
-            saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web, run.lane(name).model)
-            settlement.publish(run, name, saved, outcome,
-                               context=f"lane runner error: {e!r} (runner-error.log)")
+        with _settling(d):
+            try:
+                (d / "runner-error.log").write_text(traceback.format_exc())
+            except OSError:
+                pass
+            if not (d / "exit.json").exists():
+                saved = adapters.Reader.replay(run.lane(name).kind, d / "stream.jsonl", run.web, run.lane(name).model)
+                settlement.publish(run, name, saved, outcome,
+                                   context=f"lane runner error: {e!r} (runner-error.log)")
         code = 1
     finally:
         try:
-            adapters.discard_agy_login(d)
+            with _settling(d):
+                adapters.discard_agy_login(d)
         finally:
             signal.alarm(0)
             _alive.close()
@@ -167,7 +187,7 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
                     reading = claude_auth.admit(
                         lane, reading, same_pool,
                         lambda phase: atomic_write(d / "phase.json", json.dumps(dict(phase=phase))),
-                        pool_fd=held.fileno(), deadline=admission_deadline)
+                        pool_fd=held.fileno(), deadline=admission_deadline, show=pane.show)
                     if lane.kind == "claude" and reading.ok:
                         blocked = adapters.claude_problem()
                         if blocked:
@@ -209,7 +229,7 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
                         preexec_fn=partial(signal.pthread_sigmask, signal.SIG_SETMASK, previous))
                 atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": proc.pid}))
                 atomic_write(d / "phase.json", json.dumps(dict(phase="running")))
-                pane.show([pane_header(name, lane.model, lane.effort, proc.pid, now(started))])
+                pane.show(lambda: [pane_header(name, lane.model, lane.effort, proc.pid, now(started))])
                 sel.register(proc.stdout, selectors.EVENT_READ)
                 last = spend_from = time.monotonic()
                 pending = b""
@@ -322,7 +342,7 @@ def _consume(reader: adapters.Reader, raw: bytes, progress=None, pane=None) -> N
         obj = json.loads(line)
     except json.JSONDecodeError:
         if pane is not None:
-            pane.show([adapters._clip(line)])
+            pane.show(lambda: [adapters._clip(line)])
         return
     if isinstance(obj, dict):
         if progress:
@@ -382,7 +402,7 @@ class Display:
                 self._failed(error)
 
     def show(self, lines):
-        self._call(lambda: lines)
+        self._call(lines if callable(lines) else lambda: lines)
 
     def feed(self, event):
         self._call(lambda: self.pane.feed(event))

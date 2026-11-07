@@ -27,6 +27,8 @@ def inventory() -> list[str] | None:
         work, home = Path(tmp) / "work", adapters._agy_home(Path(tmp) / "home", web=False)
         work.mkdir()
         (home / "config" / "mcp_config.json").write_text('{"mcpServers": {}}')
+        # Without a staged login the server would open browser sign-in, even
+        # for this inventory-only probe. Never let it fall back to Keychain.
         try:
             adapters.agy_login(home)
         except adapters.Unavailable:

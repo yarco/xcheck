@@ -67,26 +67,34 @@ def signal_group(pgid: int, sig: int) -> bool:
             return False
 
 
-def end_group(pgid: int) -> bool:
+def end_group(pgid: int, *, reap=None) -> bool:
     """End every process in a lane's group: TERM, up to 3 s grace, then KILL.
     False if the group was already empty."""
     if not signal_group(pgid, signal.SIGTERM):
         return False
     for _ in range(30):
         time.sleep(0.1)
+        if reap is not None:
+            reap()  # a direct child zombie must not masquerade as a live group
         if not signal_group(pgid, 0):
             return True
     signal_group(pgid, signal.SIGKILL)
     return True
 
 
-def hold_life(path: Path):
+def hold_life(path: Path, *, wait: bool = False):
     """Hold an exclusive lock on `path` for this process's lifetime. Liveness of
     the holder is then `is_alive(path)`: the kernel drops the lock on exit,
     crash included, so there is no PID to reuse and no process table to read
     (which a sandboxed orchestrator may not be allowed to do)."""
     fh = open(path, "a+")
-    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        # The initial runner waits out a brief observer/recovery lock, then
+        # checks exit.json. Recovery and cancellation must remain nonblocking.
+        fcntl.flock(fh, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+    except BaseException:
+        fh.close()
+        raise
     return fh
 
 

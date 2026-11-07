@@ -21,7 +21,7 @@ def check() -> int:
     for kind, (cmd, flags) in adapters.HELP_COMMANDS.items():
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            text = out.stdout + out.stderr
+            text = out.stdout + out.stderr  # agy prints its help on stderr
         except (OSError, subprocess.TimeoutExpired) as e:
             print(f"FAIL {kind}: {' '.join(cmd)}: {e}")
             bad += 1

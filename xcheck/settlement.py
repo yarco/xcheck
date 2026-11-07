@@ -60,6 +60,9 @@ def publish(run, name: str, reader, outcome: Outcome, *, context: str = "") -> d
     path = directory / "exit.json"
     if path.exists():
         return json.loads(path.read_text())
+    if outcome.status is None:
+        recorded = recorded_stop(directory)
+        outcome.status, outcome.reason = recorded.status, recorded.reason
     fallback = context or f"harness exited without native completion (exit {outcome.code})"
     status, reason = decide(reader, outcome, run.contract, fallback)
     notes = reader.notes()

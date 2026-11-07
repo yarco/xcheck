@@ -267,7 +267,7 @@ def wait(base: Path, timeout: int | None) -> int:
 def _still_running(run: Run) -> int:
     print(render_status(run) + "xcheck: still running; collection is pending. Retain one completion operation or "
           "collect on an explicit request; do not schedule another master turn. "
-          "Report any failed or skipped row above now.", flush=True)
+          "Report any failed or skipped row above now; its reason and stderr_tail are in lanes/<lane>/exit.json.", flush=True)
     return STILL_RUNNING
 
 
@@ -344,16 +344,17 @@ def _pid_cmd(pid) -> str:
         return ""
 
 
-def _settle_dead_runner(run: Run, name: str) -> None:
+def _settle_dead_runner(run: Run, name: str) -> bool:
     """The runner died without exit.json. Stop its orphaned harness, then keep
     whatever answer it had already published."""
     d = run.lane_dir(name)
     try:
         lock = hold_life(d / "alive")
     except BlockingIOError:
-        return  # a runner or another recovery owns settlement
+        return False  # a runner or another recovery owns settlement
     with lock:
         _recover(run, name)
+        return True
 
 
 def _recover(run: Run, name: str) -> None:
@@ -415,8 +416,10 @@ def cancel(run: Run, name: str | None, reason: str) -> int:
         _signal(pid, signal.SIGTERM)
         print(f'xcheck: cancellation sent to {selected}')
     for selected in dead:
-        _settle_dead_runner(run, selected)
-        print(f'xcheck: {selected} settled; its runner had already exited')
+        if _settle_dead_runner(run, selected):
+            print(f'xcheck: {selected} settled; its runner had already exited')
+        else:
+            print(f'xcheck: {selected} recovery pending; lane custody is busy; retain xcheck wait')
     for selected, lock in unstarted:
         _write_exit(run, selected, 'interrupted', f'cancelled: {reason.strip()}; no runner had started')
         lock.close()
@@ -432,9 +435,9 @@ def _signal(pid, sig: int) -> None:
             pass
 
 
-def _write_exit(run: Run, name: str, status: str, reason: str, diagnostics: list | None = None) -> None:
+def _write_exit(run: Run, name: str, status: str, reason: str) -> None:
     settlement.publish(run, name, adapters.Reader(run.lane(name).kind, run.web),
-                       settlement.Outcome(status=status, reason=reason, diagnostics=diagnostics or []))
+                       settlement.Outcome(status=status, reason=reason))
 
 
 # ------------------------------------------------------------------ status

@@ -63,6 +63,13 @@ raw stream remains unchanged. `cancel.json` also retains an explicit operator
 request before the runner can acknowledge it.
 
 The lane life lock serializes runner, recovery and cancellation publication.
+The initial runner waits out any observer/recovery custody and then checks for
+an existing terminal record; observers cannot make its initial lock acquisition
+fail. Recovery and cancellation remain nonblocking and report pending custody
+honestly. Exception recovery defers further stop signals through publication
+and credential cleanup. Every publication path consults durable stop records
+when it has no earlier in-memory decision, including cancellation requests that
+arrive before their signal is delivered.
 Recovery acquires it, checks `exit.json` again, verifies any orphan's identity,
 settles the owned process group where possible, and only then publishes. A
 recorded PID alone never grants kill authority. Unverifiable orphan identity
@@ -87,7 +94,10 @@ files. A bounded pending wait renders current state without taking publication
 ownership.
 
 Display and progress are best effort. A display exception disables that display
-and records a diagnostic; the review continues. Process cleanup is in an
+and records a diagnostic; the review continues. Authentication progress and
+header formatting use the same guarded display. A failure first occurring in
+the final post-publication display cannot be added to immutable `exit.json`;
+publication remains ahead of presentation. Process cleanup is in an
 unconditional nested `finally`, even if final transcript flushing fails. The
 Reader computes native state only; the old discarded display-return interface
 is removed. Raw stream parsing, transcript rendering and text-free activity have
