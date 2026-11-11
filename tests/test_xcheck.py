@@ -30,6 +30,12 @@ TOKEN = "MANIFEST_TAIL_TOKEN: 0123abcd"
 CONTRACT = validate.Contract("VERDICT", "evidence/manifest-tail.txt", TOKEN)
 
 
+def workpath(root: Path, base: Path, lane: Lane) -> Path:
+    from xcheck import files
+    with patch.object(files, "ROOT", root):
+        return files.workspace(lane, base)
+
+
 def read_fixture(kind: str, name: str) -> adapters.Reader:
     r = adapters.Reader(kind)
     for line in (FIX / name).read_text().splitlines():
@@ -819,7 +825,7 @@ class RunnerBound(unittest.TestCase):
                         (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM)}
             try:
                 with patch.object(lane, "ROOT", root), \
-                     patch.object(lane, "workspace", return_value=root / "work"), \
+                     patch.object(lane.Run, "workspace", return_value=root / "work"), \
                      patch.object(lane, "bound", return_value=1), \
                      patch.object(lane.capacity, "read", side_effect=lambda *_: time.sleep(10)):
                     lane.run_lane(base, peer.name)
@@ -890,15 +896,16 @@ class PoolAdmission(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 1)
         self.assertEqual(waits, [])
 
-    def test_same_run_shares_but_every_holder_must_release_for_another_run(self):
-        first, second = self.take("codex", "A"), self.take("codex", "A")
+    def test_each_lane_uses_a_permit_and_one_release_admits_a_waiter(self):
+        first, second = self.take("codex", "A/first"), self.take("codex", "A/second")
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
         self.assertIsNone(self.take("codex", "B", 0.02))
         first.release()
-        self.assertIsNone(self.take("codex", "B", 0.02))
-        second.release()
         self.assertIsNotNone(self.take("codex", "B"))
+        self.assertIsNone(self.take("codex", "C", 0.02))
+        second.release()
+        self.assertIsNotNone(self.take("codex", "C"))
 
     def test_disjoint_pool_does_not_wait_for_a_busy_one(self):
         self.assertIsNotNone(self.take("grok", "A"))
@@ -1639,7 +1646,7 @@ class EndToEnd(unittest.TestCase):
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
         self.assertEqual(row["status"], "skipped", row)
         self.assertIn("ZAI_API_KEY is empty", row["reason"])
-        self.assertFalse((self.root / ".lanes" / "opencode-zai-coding-plan" / "opencode-zai-coding-plan-glm-5.3").exists())
+        self.assertFalse((workpath(self.root, self.base, adapters.parse_lane("opencode:zai-coding-plan/glm-5.3"))).exists())
 
     def test_a_base_outside_the_root_is_refused_before_anything_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1763,7 +1770,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         for kind in (l.split(":", 1)[0] for l in lanes.split(",")):
             lane = next(l for l in lanes.split(",") if l.startswith(kind + ":"))
-            work = self.root / ".lanes" / adapters.parse_lane(lane).pool / adapters.parse_lane(lane).name
+            work = workpath(self.root, self.base, adapters.parse_lane(lane))
             # The Agy server may write only inside its lane: it dumps into its workspace.
             seen = json.loads((work / "env.agy.json" if kind == "agy" else dump.with_suffix(f".{kind}.json")).read_text())
             self.assertFalse(set(leak) & set(seen), f"{kind} saw {set(leak) & set(seen)}")
@@ -1807,20 +1814,27 @@ class EndToEnd(unittest.TestCase):
         self.detach(other, "opencode:fixture-a-b", "ok")
         self.assertEqual(self.lane_exit(other, second.name)["status"], "done")
         with patch.object(files, "ROOT", self.root):
-            self.assertNotEqual(files.workspace(first), files.workspace(second))
-            self.assertEqual((files.workspace(first) / "evidence/ownership.txt").read_text(), "first packet")
-            self.assertEqual((files.workspace(second) / "evidence/ownership.txt").read_text(), "second packet")
+            self.assertNotEqual(files.workspace(first, self.base), files.workspace(second, other))
+            self.assertEqual((files.workspace(first, self.base) / "evidence/ownership.txt").read_text(), "first packet")
+            self.assertEqual((files.workspace(second, other) / "evidence/ownership.txt").read_text(), "second packet")
         self.assertEqual(self.lane_exit(self.base, first.name)["status"], "done")
 
-    def test_runs_on_the_same_pool_queue(self):
-        other = self.second_base()
+    def test_two_runs_on_the_same_lane_overlap_and_a_third_waits(self):
+        other, third = self.second_base(), self.second_base()
+        second_token = "MANIFEST_TAIL_TOKEN: second-packet"
+        (other / "evidence/manifest-tail.txt").write_text(second_token)
         self.detach(self.base, "codex:gpt-6.1-sol:high", "slow")
         self.detach(other, "codex:gpt-6.1-sol:high", "slow")
+        self.detach(third, "codex:gpt-6.1-sol:high", "ok")
         first = self.lane_exit(self.base, "codex-gpt-6.1-sol-high")
         second = self.lane_exit(other, "codex-gpt-6.1-sol-high")
-        self.assertEqual((first["status"], second["status"]), ("done", "done"))
-        self.assertGreaterEqual(second["started"], first["ended"])
-        self.assertIn("waiting for pool codex", (other / "lanes" / "codex-gpt-6.1-sol-high" / "view.log").read_text())
+        last = self.lane_exit(third, "codex-gpt-6.1-sol-high")
+        self.assertEqual((first["status"], second["status"], last["status"]), ("done", "done", "done"))
+        self.assertLess(max(first["started"], second["started"]), min(first["ended"], second["ended"]))
+        self.assertGreaterEqual(last["started"], min(first["ended"], second["ended"]))
+        self.assertIn("2 lane permits occupied", (third / "lanes" / "codex-gpt-6.1-sol-high" / "view.log").read_text())
+        self.assertIn(TOKEN, (self.base / "RESULT-codex-gpt-6.1-sol-high.md").read_text())
+        self.assertIn(second_token, (other / "RESULT-codex-gpt-6.1-sol-high.md").read_text())
 
     def test_disjoint_pools_and_same_run_lanes_run_together(self):
         other = self.second_base()
@@ -1834,8 +1848,11 @@ class EndToEnd(unittest.TestCase):
         self.assertLess(time.time() - t0, 12)  # three 4 s lanes, not serialized
 
     def test_an_orphaned_harness_keeps_its_pool_until_it_is_stopped(self):
-        # The harness inherits the pool lock: a killed runner must not let a
-        # second run spend from the same pool while its harness still can.
+        # Fill one permit; a killed runner's spender must retain the other.
+        from xcheck import pools
+        occupied = pools.acquire(self.root, "opencode-zen-space-bunny-free", "other-lane", time.monotonic() + 1)
+        self.assertIsNotNone(occupied)
+        self.addCleanup(occupied.release)
         other = self.second_base()
         self.detach(self.base, "opencode:opencode/space-bunny-free", "hang")
         pids_file = self.base / "lanes" / "opencode-space-bunny-free" / "pids.json"
@@ -1870,7 +1887,7 @@ class EndToEnd(unittest.TestCase):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other",
                         "--lanes", "opencode:opencode/space-bunny-free", "--mode", "headless",
                         "--skip-capacity", mode="bg-child")
-        work = self.root / ".lanes" / "opencode-zen-space-bunny-free" / "opencode-space-bunny-free"
+        work = workpath(self.root, self.base, adapters.parse_lane("opencode:opencode/space-bunny-free"))
         child = int((work / "background-child.pid").read_text())
         self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
@@ -1924,7 +1941,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_leftovers_of_an_earlier_run_never_reach_the_next(self):
         # a stale complete answer, and scratch a peer left read-only (Go module caches do)
-        work = self.root / ".lanes" / "grok" / "grok-4.7-xhigh"
+        work = workpath(self.root, self.base, adapters.parse_lane("grok:grok-4.7:xhigh"))
         (work / "cache" / "mod").mkdir(parents=True)
         (work / "cache" / "mod" / "f.go").write_text("x")
         (work / "ANSWER.md").write_text(f"### 1) VERDICT\nstale\n6) PROOF: {TOKEN}\nRESULT_COMPLETE\n")
@@ -1946,13 +1963,13 @@ class EndToEnd(unittest.TestCase):
         os.utime(self.base / "evidence" / "manifest-tail.txt")  # staged last
         rows = self.run_lanes()
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-        work = self.root / ".lanes" / "codex" / "codex-gpt-6.1-sol-high" / "evidence"
+        work = workpath(self.root, self.base, adapters.parse_lane("codex:gpt-6.1-sol:high")) / "evidence"
         for n in names:
             self.assertEqual((work / n).read_text(), n)
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()
-        work = self.root / ".lanes" / "codex" / "codex-gpt-6.1-sol-high"
+        work = workpath(self.root, self.base, adapters.parse_lane("codex:gpt-6.1-sol:high"))
         self.assertEqual(sorted(p.name for p in work.iterdir()), ["PACKET.md", "PROMPT.md", "evidence"])
 
 

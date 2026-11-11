@@ -119,7 +119,7 @@ class Catalog(unittest.TestCase):
         with db:
             db.execute('CREATE TABLE session_v2 (id, directory, time_created)')
             db.execute('CREATE TABLE session_message (session_id, type, data, time_updated, seq)')
-            db.execute('INSERT INTO session_v2 VALUES (?, ?, ?)', ('session', str(files.workspace(peer)), 101000))
+            db.execute('INSERT INTO session_v2 VALUES (?, ?, ?)', ('session', str(directory / "work"), 101000))
             message = {"model": {"providerID": "kilo", "id": "vendor/model:free"}, "error": {
                 "type": "provider.quota", "status": 402, "message": "Quota exhausted",
                 "response": {"headers": {"authorization": "SECRET"}, "body": "SECRET"}}}
@@ -130,6 +130,7 @@ class Catalog(unittest.TestCase):
             def store(self, name): return None
             def lane(self, name): return peer
             def lane_dir(self, name): return directory
+            def workspace(self, name): return directory / "work"
         result = activity.opencode_failure(Run(), peer.name)
         self.assertEqual((result["type"], result["status"]), ("provider.quota", 402))
         self.assertNotIn("SECRET", json.dumps(result))
@@ -147,7 +148,7 @@ class Catalog(unittest.TestCase):
         with db:
             db.execute('CREATE TABLE session_v2 (id, directory, time_created)')
             db.execute('CREATE TABLE session_message (session_id, type, data, time_updated, seq)')
-            db.execute('INSERT INTO session_v2 VALUES (?, ?, ?)', ('session', str(files.workspace(peer)), 101000))
+            db.execute('INSERT INTO session_v2 VALUES (?, ?, ?)', ('session', str(directory / "work"), 101000))
             message = {"model": {"providerID": "kilo", "id": "stealth/crouton-alpha"}, "error": {
                 "type": "provider.auth", "status": 403, "message": "Provider returned error",
                 "response": {"headers": {"authorization": "SECRET"}, "body": body}}}
@@ -160,6 +161,7 @@ class Catalog(unittest.TestCase):
             def store(self, name): return None
             def lane(self, name): return peer
             def lane_dir(self, name): return directory
+            def workspace(self, name): return directory / "work"
 
         result = activity.opencode_failure(Run(), peer.name)
         self.assertEqual(result["type"], "provider.auth")

@@ -264,6 +264,18 @@ raise SystemExit(lane.run_lane(Path(sys.argv[1]), sys.argv[2]))
         self.assertEqual(self.finish(second, peer=other)["status"], "done")
         self.assertEqual(self.actions(), ["refresh", "login"])
 
+    def test_different_runs_share_one_authentication_recovery(self):
+        self.prepare()
+        other = self.root / "second-run"
+        other.mkdir()
+        self.make_run(other, PEER)
+        first = self.start(LOGIN_DELAY="0.8")
+        wait_for(lambda: self.actions() == ["refresh", "login"])
+        second = self.start(base=other)
+        self.assertEqual(self.finish(first)["status"], "done")
+        self.assertEqual(self.finish(second, base=other)["status"], "done")
+        self.assertEqual(self.actions(), ["refresh", "login"])
+
     def test_abrupt_runner_death_also_settles_the_native_refresh_and_its_locks(self):
         self.prepare()
         proc = self.start(REFRESH_DELAY="60")
@@ -311,8 +323,12 @@ raise SystemExit(lane.run_lane(Path(sys.argv[1]), sys.argv[2]))
         self.prepare(cap=1)
         from xcheck import pools
         held = pools.acquire(self.root, "claude", "other-run", time.monotonic() + 1)
+        second = pools.acquire(self.root, "claude", "other-lane", time.monotonic() + 1)
+        self.addCleanup(held.release)
+        self.addCleanup(second.release)
         proc = self.start(LOGIN_DELAY="0.7")
         time.sleep(0.6)
+        self.assertEqual(self.actions(), [])
         held.release()
         row = self.finish(proc)
         self.assertEqual(row["status"], "timeout", row)

@@ -49,7 +49,7 @@ ignores them for completion.
 `adapters._grok_launch` builds one argv per lane:
 
 ```
-acpx --agent "<python> -I bin/xcheck hold --pool grok --run <base> --log harness.log
+acpx --agent "<python> -I bin/xcheck hold --pool grok --lease <lane-directory> --log harness.log
               -- grok agent --always-approve --no-leader -m grok-4.7
                  --reasoning-effort xhigh --agent-profile grok-profile.md
                  --debug-file grok-agent.log stdio"

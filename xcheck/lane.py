@@ -24,7 +24,7 @@ import shutil
 from . import activity, adapters, capacity, grok, pools, settlement
 from .view import Pane, header as pane_header
 from .environment import lane_env
-from .files import ROOT, Run, atomic_write, defer_stop, end_group, hold_life, now, signal_group, workspace
+from .files import ROOT, Run, atomic_write, defer_stop, end_group, hold_life, now, signal_group
 
 LINGER = 3  # seconds a finished Herdr pane stays visible
 DRAIN = 3  # seconds of stdout silence after the harness exits; a descendant's open copy is not the harness
@@ -117,7 +117,7 @@ def run_lane(base: Path, name: str) -> int:
 def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
     lane = run.lane(name)
     d = run.lane_dir(name)
-    work, message = workspace(lane), d / "message.txt"
+    work, message = run.workspace(name), d / "message.txt"
     stream_path, err_path = d / "stream.jsonl", d / "stderr.log"
     log = d / "harness.log"  # the harness's own debug log: where root causes are found
     idle = run.idle  # 0: no silence limit; quiet work is not inactivity
@@ -148,12 +148,12 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
                else adapters.unavailable(lane))
     if blocked:
         return finish("skipped", blocked)
-    # One run at a time spends from a pool; wait here (no orchestrator turns).
+    # One permit per lane, across all runs. Waiting invokes no model.
     admission_deadline = time.monotonic() + run.cap if run.cap is not None else None
-    held = pools.acquire(ROOT, lane.pool, str(run.base), admission_deadline,
-                         on_wait=lambda owner: pane.show([
+    held = pools.acquire(ROOT, lane.pool, str(d), admission_deadline,
+                         on_wait=lambda reason: pane.show([
                              f"xcheck lane {name}: waiting for pool {lane.pool} "
-                             f"(held by {Path(owner).name or 'another run'})"]))
+                             f"({reason})"]))
     if held is None:
         return finish("skipped", f"pool {lane.pool} stayed busy for {run.cap}s")
     try:
@@ -172,14 +172,14 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
                               "no inference or automatic substitution; refresh the selector after an inventory check")
         started = time.time()  # when spending can start; exit.json records wall time
         outcome.started = started
-        _stage(run, work)  # only now: the pool lock makes this workspace ours
+        _stage(run, work)  # this run/lane alone owns the workspace
         (d / "staged").touch()
 
         # Capacity is read here, immediately before spending and outside any
         # orchestrator sandbox when the runner lives in a Herdr pane.
         if run.capacity and name not in run.forced:
             atomic_write(d / "phase.json", json.dumps(dict(phase="checking_capacity")))
-            same_pool = capacity.sharing(lane, run.lanes.values())
+            same_pool = held.active
             from . import claude_auth
             try:
                 with claude_auth.bounded(admission_deadline if lane.kind == "claude" else None):
@@ -187,7 +187,7 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
                     reading = claude_auth.admit(
                         lane, reading, same_pool,
                         lambda phase: atomic_write(d / "phase.json", json.dumps(dict(phase=phase))),
-                        pool_fd=held.fileno(), deadline=admission_deadline, show=pane.show)
+                        pool_fds=held.filenos(), deadline=admission_deadline, show=pane.show)
                     if lane.kind == "claude" and reading.ok:
                         blocked = adapters.claude_problem()
                         if blocked:
@@ -225,7 +225,7 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
                 with defer_stop() as previous:
                     proc = subprocess.Popen(
                         spec.argv, cwd=work, env=env, stdin=stdin, stdout=subprocess.PIPE,
-                        stderr=err, start_new_session=True, pass_fds=(held.fileno(),),
+                        stderr=err, start_new_session=True, pass_fds=held.filenos(),
                         preexec_fn=partial(signal.pthread_sigmask, signal.SIG_SETMASK, previous))
                 atomic_write(d / "pids.json", json.dumps({"runner": os.getpid(), "harness": proc.pid}))
                 atomic_write(d / "phase.json", json.dumps(dict(phase="running")))
@@ -304,7 +304,7 @@ def _writable_retry(func, path, exc) -> None:
 
 
 def _stage(run: Run, work: Path) -> None:
-    """Fresh copy of the packet in the lane's stable workspace."""
+    """Fresh copy of the packet in this run/lane's exclusively owned workspace."""
     if work.exists():
         shutil.rmtree(work, onexc=_writable_retry)
     work.mkdir(parents=True)
@@ -314,19 +314,20 @@ def _stage(run: Run, work: Path) -> None:
         shutil.copytree(run.base / ".packet" / "evidence", work / "evidence")
 
 
-def hold(pool: str, run_id: str, log: Path | None, argv: list[str]) -> int:
-    """Join this run's hold on `pool`, then exec `argv` holding it.
+def hold(pool: str, lease: str, log: Path | None, argv: list[str]) -> int:
+    """Join this lane's permit, then exec `argv` holding both custody locks.
 
     acpx gives the agent it starts only stdin, stdout and stderr, so the
     runner's inherited pool descriptor stops at acpx. This wrapper is acpx's
-    agent command: it takes its own shared hold (only while this run still owns
-    the pool), keeps it across exec, and sends the agent's stderr to the lane's
+    agent command: it joins only this live lane's permit, keeps it across exec,
+    and sends the agent's stderr to the lane's
     harness log."""
-    held = pools.join(ROOT, pool, run_id)
+    held = pools.join(ROOT, pool, lease)
     if held is None:
-        print(f"xcheck hold: pool {pool} is no longer held by {run_id}; not starting the agent", file=sys.stderr)
+        print(f"xcheck hold: lane {lease} no longer holds a permit in {pool}; not starting the agent", file=sys.stderr)
         return 75
-    os.set_inheritable(held.fileno(), True)
+    for fd in held.filenos():
+        os.set_inheritable(fd, True)
     if log is not None:
         fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         os.dup2(fd, 2)

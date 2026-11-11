@@ -10,10 +10,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test_xcheck as support
-from xcheck import adapters, capacity, herdr, install, settings
+from xcheck import adapters, capacity, herdr, install, pools, settings
 
 
 class LocalConfiguration(unittest.TestCase):
+    def test_pool_limits_are_positive_integer_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(pools.LIMITS):
+            cfg = Path(tmp) / "config.json"
+            with patch.dict(os.environ, XCHECK_CONFIG=str(cfg)):
+                for invalid in [None, [], {"grok": 0}, {"grok": True}, {"grok": "2"}, {"": 2}]:
+                    cfg.write_text(json.dumps({"pool_concurrency": invalid}))
+                    with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "positive integers"):
+                        settings.load()
+                cfg.write_text(json.dumps({"pool_concurrency": {"grok": 3}}))
+                settings.apply()
+                self.assertEqual(pools.LIMITS["grok"], 3)
+                self.assertEqual(pools.LIMITS["agy-gemini"], 4)
+
     def test_missing_optional_config_preserves_current_private_setup(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
             with patch.dict(os.environ):

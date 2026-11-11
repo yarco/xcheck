@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from .files import atomic_write, is_alive, now, workspace
+from .files import atomic_write, is_alive, now
 
 
 class Activity:
@@ -105,7 +105,7 @@ def _opencode_messages(run, name, session):
         path = run.lane_dir(name) / 'opencode.db'
     with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
         owner = db.execute('SELECT directory, time_created FROM session_v2 WHERE id=?', (session,)).fetchone()
-        if not owner or Path(owner[0]).resolve() != workspace(run.lane(name)).resolve() or owner[1] < run.epoch * 1000:
+        if not owner or Path(owner[0]).resolve() != run.workspace(name).resolve() or owner[1] < run.epoch * 1000:
             raise ValueError('native session ownership could not be verified')
         return db.execute("SELECT data, time_updated FROM session_message WHERE session_id=? AND type='assistant' ORDER BY time_updated DESC, seq DESC LIMIT 20", (session,)).fetchall()
 

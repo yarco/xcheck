@@ -55,8 +55,9 @@ class Lanes(unittest.TestCase):
         row = json.loads((directory / "exit.json").read_text())
         self.assertEqual(row["status"], "done", row)
         self.assertTrue((directory / "stream.jsonl").exists())
-        probe = json.loads((self.root / ".lanes" / PEER.pool / PEER.name / "probe.json").read_text())
+        probe = json.loads((support.workpath(self.root, self.base, PEER) / "probe.json").read_text())
         self.assertTrue(probe["holds_busy"], "Devin, not just acpx, must retain admission")
+        self.assertTrue(probe["holds_permit"], "the actual spender must retain its lane permit")
         self.assertEqual(probe["devin_mode"], "accept-edits")
         self.assertEqual(probe["devin_fallback"], "")
         self.assertEqual(probe["devin_sandbox"], "false")
@@ -79,8 +80,8 @@ class Lanes(unittest.TestCase):
                 if complete:
                     events.append(rpc(id=3, result={"stopReason": "end_turn"}))
                 (directory / "stream.jsonl").write_text("\n".join(map(json.dumps, events)))
-                with patch.object(run, "workspace", return_value=self.root / ".lanes" / PEER.pool / PEER.name), \
-                        patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {self.root / '.lanes' / PEER.pool / PEER.name}"), \
+                with patch.object(run.Run, "workspace", return_value=support.workpath(self.root, self.base, PEER)), \
+                        patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {support.workpath(self.root, self.base, PEER)}"), \
                         patch.object(run, "end_group", return_value=True) as stopped:
                     run._settle_dead_runner(current, PEER.name)
                 stopped.assert_called_once_with(123)

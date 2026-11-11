@@ -14,6 +14,8 @@ flowchart LR
     E --> F[Premise checks + CONSENSUS.md]
 ```
 
+Independent runs can use the same model concurrently: each lane owns a separate workspace and a crash-safe concurrency permit (two per pool by default; four for Agy). Quota checks still apply.
+
 The runner owns process control, quota admission, pool locks, snapshots, completion parsing and validation. The orchestrator owns scope, evidence, reviewer selection and judgment. There is no reviewer vote and no automatic retry of a review turn.
 
 [Start here](docs/adoption.md) · [Review protocol](Multi-Agent%20Cross-Check%20Protocol.md) · [Examples](examples/README.md)

@@ -1,21 +1,10 @@
-"""Quota-pool locks held by the process that spends.
+"""Bounded lane permits held by the processes that can spend.
 
-One run at a time may spend from a quota pool (codex, claude, grok,
-agy-gemini), so a capacity reading is not invalidated by another run
-drawing from the same meter. Lanes of the same run share their pool; runs on
-disjoint pools proceed in parallel.
-
-The lock is a BSD `flock` held by the lane runner for as long as its harness
-can spend, so the kernel releases it the moment that process ends, crash
-included: no stale locks, no PID or boot-identity checks, nothing to clean up.
-
-Per pool, under ROOT/.pools/<pool>/:
-  gate   exclusive, held for an instant while one lane decides admission
-  busy   shared by every live lane of the owning run; exclusive = nobody spends
-  owner  the BASE of the run that last took the pool (meaningful only while
-         `busy` is held)
+The short `gate` serializes admission, not inference. Each slot has a shared
+kernel lock and one lane identity; its runner and ACP server share that SAME
+permit. Aggregate `busy` custody excludes account rotation until all spenders
+exit. Neither files nor recorded owners establish liveness.
 """
-
 from __future__ import annotations
 
 import fcntl
@@ -23,83 +12,141 @@ import os
 import time
 from pathlib import Path
 
-POLL = 2.0        # pool held by another run
-GATE_POLL = 0.05  # gate held by a lane deciding admission, for an instant
+POLL = 0.2
+GATE_POLL = 0.05
+DEFAULT_LIMIT = 2
+# Two ordinary Flash + Argon reviews may overlap; no run gets special priority.
+LIMITS = {"agy-gemini": 4}
+OWNER = "xcheck-lane-permits-v1"
 
 
 class Held:
-    """A held pool; keep the object alive while spending."""
+    """One permit, including aggregate account custody, until its last holder exits."""
 
-    def __init__(self, fh):
-        self._fh = fh
+    def __init__(self, busy, slot, active: int):
+        self._busy, self._slot = busy, slot
+        self.active = active
 
-    def fileno(self) -> int:
-        return self._fh.fileno()
+    def filenos(self) -> tuple[int, int]:
+        return self._busy.fileno(), self._slot.fileno()
 
     def release(self) -> None:
-        self._fh.close()
+        try:
+            self._slot.close()
+        finally:
+            self._busy.close()
 
 
-def acquire(root: Path, pool: str, run_id: str, deadline: float | None, on_wait=None) -> Held | None:
-    """Block until this run may spend from `pool`; None once `deadline` (on
-    time.monotonic(), which stops while the Mac sleeps) passes. Waiting for the
-    gate and for the pool both count against `deadline`."""
+def _slots(directory: Path, limit: int):
+    """Stable inodes: never unlink slots, including after a limit is lowered."""
+    slots = directory / "slots"
+    slots.mkdir(exist_ok=True)
+    for number in range(limit):
+        (slots / str(number)).open("a").close()
+    return sorted(p for p in slots.iterdir() if p.name.isdecimal())
+
+
+def _take(d: Path, lease: str, limit: int, deadline: float | None):
+    with open(d / "gate", "a+") as gate:
+        if not _try(gate, fcntl.LOCK_EX):
+            return None, None
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, None
+        busy, candidate = open(d / "busy", "a+"), None
+        try:
+            free = _try(busy, fcntl.LOCK_EX)
+            # An older runtime may still own this lock. Let it drain rather
+            # than mistaking spenders without permits for an empty pool.
+            if not free and _read(d / "owner") != OWNER:
+                return None, "earlier runtime or account maintenance"
+            if free:
+                _write(d / "owner", OWNER)
+            if not _try(busy, fcntl.LOCK_SH):
+                return None, "account maintenance"
+            active = 0
+            for path in _slots(d, limit):
+                slot = open(path, "a+")
+                if _try(slot, fcntl.LOCK_EX):
+                    if candidate is None and int(path.name) < limit:
+                        candidate = slot
+                    else:
+                        slot.close()
+                else:
+                    active += 1
+                    slot.close()
+                    if _read(path.with_suffix(".owner")) == lease:
+                        raise ValueError("lane already owns a permit; children must join it")
+            if active >= limit or candidate is None:
+                return None, f"{limit} lane permits occupied"
+            if deadline is not None and time.monotonic() >= deadline:
+                return None, None
+            _write(Path(candidate.name).with_suffix(".owner"), lease)
+            fcntl.flock(candidate, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            result = Held(busy, candidate, active + 1)
+            busy = candidate = None  # transfer both descriptors, not the gate
+            return result, None
+        finally:
+            if candidate is not None:
+                candidate.close()
+            if busy is not None:
+                busy.close()  # queued callers must not block account rotation
+
+
+def acquire(root: Path, pool: str, lease: str, deadline: float | None, on_wait=None) -> Held | None:
+    """Claim one lane permit, irrespective of its run; never admit after deadline.
+
+    `lease` is the canonical lane artifact directory, unique within a BASE.
+    Callers own their lane life lock. ACP children use join, not acquire.
+    """
     d = root / ".pools" / pool
     d.mkdir(parents=True, exist_ok=True)
-    busy = open(d / "busy", "a+")
     announced = False
-    try:
-        while deadline is None or time.monotonic() < deadline:
-            pause = GATE_POLL
-            with open(d / "gate", "a+") as gate:
-                if _try(gate, fcntl.LOCK_EX):
-                    if deadline is not None and time.monotonic() >= deadline:  # never admit after the deadline
-                        break
-                    owner = _read(d / "owner")
-                    free = _try(busy, fcntl.LOCK_EX)
-                    if free or owner == run_id:
-                        if free:
-                            _write(d / "owner", run_id)
-                        # From exclusive (free) or nothing (joining our own run) to
-                        # shared. Only gate holders ever take `busy` exclusively, and we
-                        # hold the gate, so the conversion cannot be raced.
-                        fcntl.flock(busy, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                        return Held(busy)
-                    if on_wait and not announced:
-                        on_wait(owner)
-                        announced = True
-                    pause = POLL
-            time.sleep(pause if deadline is None else max(0.0, min(pause, deadline - time.monotonic())))
-    except BaseException:
-        busy.close()
-        raise
-    busy.close()
+    while deadline is None or time.monotonic() < deadline:
+        held, reason = _take(d, lease, LIMITS.get(pool, DEFAULT_LIMIT), deadline)
+        if held is not None:
+            return held
+        if reason and on_wait and not announced:
+            on_wait(reason)
+            announced = True
+        pause = POLL if reason else GATE_POLL
+        time.sleep(pause if deadline is None else max(0.0, min(pause, deadline - time.monotonic())))
     return None
 
 
-def join(root: Path, pool: str, run_id: str) -> Held | None:
-    """Take a shared hold on a pool this run already holds; None otherwise.
+def join(root: Path, pool: str, lease: str) -> Held | None:
+    """Rejoin this exact lane's LIVE permit across acpx's stdio-only boundary.
 
-    For a spender that cannot inherit the runner's descriptor (acpx passes its
-    agent only stdio). Never waits and never admits: the pool must be busy and
-    owned by `run_id`, checked under `gate`, so a wrapper started after its
-    run's holders died cannot share a pool another run has since taken."""
+    This never admits: a stale identity cannot join a freed or reassigned slot.
+    """
     d = root / ".pools" / pool
-    try:
-        busy = open(d / "busy", "a+")
-    except OSError:
+    if not (d / "slots").is_dir():
         return None
-    try:
-        with open(d / "gate", "a+") as gate:
-            fcntl.flock(gate, fcntl.LOCK_EX)
-            if _read(d / "owner") != run_id or _try(busy, fcntl.LOCK_EX):
-                busy.close()  # not ours, or nobody holds it any more
+    with open(d / "gate", "a+") as gate:
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        busy, slot = open(d / "busy", "a+"), None
+        try:
+            if _read(d / "owner") != OWNER or _try(busy, fcntl.LOCK_EX):
                 return None
-            fcntl.flock(busy, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            return Held(busy)
-    except BaseException:
-        busy.close()
-        raise
+            if not _try(busy, fcntl.LOCK_SH):
+                return None
+            for path in sorted((d / "slots").iterdir()):
+                if not path.name.isdecimal() or _read(path.with_suffix(".owner")) != lease:
+                    continue
+                slot = open(path, "a+")
+                if _try(slot, fcntl.LOCK_EX):
+                    slot.close()
+                    slot = None
+                    continue
+                fcntl.flock(slot, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                result = Held(busy, slot, 0)
+                busy = slot = None
+                return result
+            return None
+        finally:
+            if slot is not None:
+                slot.close()
+            if busy is not None:
+                busy.close()
 
 
 def _try(fh, op: int) -> bool:
@@ -112,7 +159,8 @@ def _try(fh, op: int) -> bool:
 
 def _read(path: Path) -> str:
     try:
-        return path.read_text()  # exactly as written: a stripped id would never match its own run
+        with path.open(encoding="utf-8", newline="") as source:
+            return source.read()  # lease identities may contain literal CR/CRLF
     except OSError:
         return ""
 

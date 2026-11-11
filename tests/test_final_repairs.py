@@ -135,7 +135,10 @@ class FinalLifecycleRepairs(unittest.TestCase):
     def test_queued_lane_receives_launch_snapshot_despite_live_base_edits(self):
         held = pools.acquire(self.root, adapters.parse_lane('opencode:opencode/space-bunny-free').pool, 'blocking-run',
                              time.monotonic() + 1)
+        second = pools.acquire(self.root, adapters.parse_lane('opencode:opencode/space-bunny-free').pool, 'blocking-lane-2',
+                               time.monotonic() + 1)
         self.assertIsNotNone(held)
+        self.assertIsNotNone(second)
         try:
             result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
                                  'opencode:opencode/space-bunny-free', '--mode', 'headless',
@@ -146,11 +149,12 @@ class FinalLifecycleRepairs(unittest.TestCase):
                 (self.base / p).write_text('CHANGED WHILE QUEUED')
         finally:
             held.release()
+            second.release()
         result = self.xcheck('wait', '--base', str(self.base), '--timeout', '15', timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / 'STATUS.json').read_text())['lanes'][0]
         self.assertEqual(row['status'], 'done', row)
-        work = self.root / '.lanes' / 'opencode-zen-space-bunny-free' / row['lane']
+        work = support.workpath(self.root, self.base, adapters.parse_lane("opencode:opencode/space-bunny-free"))
         for p, content in original.items():
             self.assertEqual((work / p).read_bytes(), content)
         self.assert_settled(row)
@@ -357,7 +361,7 @@ class CapBeforeCompletion(unittest.TestCase):
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM)}
         try:
             with patch.object(lane, 'ROOT', self.root), \
-                    patch.object(lane, 'workspace', return_value=self.root / '.lanes' / peer.pool / peer.name), \
+                    patch.object(lane.Run, 'workspace', return_value=support.workpath(self.root, self.base, peer)), \
                     patch.object(lane, 'time', SimpleNamespace(monotonic=clock, time=time.time, sleep=time.sleep)), \
                     patch.dict(os.environ, {'PATH': f'{self.bin}:{os.environ["PATH"]}', 'FAKE_MODE': 'ok'}):
                 lane.run_lane(self.base, peer.name)

@@ -17,6 +17,7 @@ from xcheck import adapters, pools  # noqa: E402
 
 FIX = support.FIX
 LANE = "agy-gemini-3.8-flash-high"
+PEER = adapters.Lane("agy", "gemini-3.8-flash-high")
 
 
 def read(lines) -> adapters.Reader:
@@ -162,7 +163,10 @@ class Join(unittest.TestCase):
         self.root = Path(support.tempfile.mkdtemp(prefix="xcheck-join-")).resolve()
         self.addCleanup(support.shutil.rmtree, self.root, True)
 
-    def test_join_needs_a_live_hold_by_the_same_run(self):
+    def test_join_needs_a_live_hold_by_the_same_lane(self):
+        limits = patch.dict(pools.LIMITS, {"agy-gemini": 1})
+        limits.start()
+        self.addCleanup(limits.stop)
         self.assertIsNone(pools.join(self.root, "agy-gemini", "run-a"))  # never taken
         held = pools.acquire(self.root, "agy-gemini", "run-a", time.monotonic() + 1)
         self.assertIsNone(pools.join(self.root, "agy-gemini", "run-b"))  # someone else's
@@ -179,7 +183,7 @@ class Join(unittest.TestCase):
     def test_hold_refuses_to_start_the_agent_without_its_runs_hold(self):
         marker = self.root / "started"
         p = subprocess.run([sys.executable, "-I", str(support.REPO / "bin" / "xcheck"), "hold", "--pool", "agy-gemini",
-                            "--run", "run-a", "--", "/usr/bin/touch", str(marker)],
+                            "--lease", "run-a", "--", "/usr/bin/touch", str(marker)],
                            env={**os.environ, "XCHECK_ROOT": str(self.root)}, capture_output=True, text=True)
         self.assertEqual(p.returncode, 75, p.stderr)
         self.assertFalse(marker.exists())
@@ -199,8 +203,9 @@ class Lanes(unittest.TestCase):
     def test_the_spender_holds_the_pool_and_writes_only_inside(self):
         row = self.agy("custody", env={"ACPX_AUTH_TOKEN": "t"})
         self.assertEqual(row["status"], "done", row)
-        probe = json.loads((self.root / ".lanes" / "agy-gemini" / LANE / "probe.json").read_text())
+        probe = json.loads((support.workpath(self.root, self.base, PEER) / "probe.json").read_text())
         self.assertTrue(probe["holds_busy"], "the server must hold the pool, not only acpx")
+        self.assertTrue(probe["holds_permit"], "the actual spender must retain its lane permit")
         self.assertFalse(probe["wrote_outside"], "Seatbelt must refuse writes outside the lane")
         self.assertFalse((self.root / "outside-probe.txt").exists())
         self.assertEqual(probe["acpx_env"], [])
@@ -217,7 +222,7 @@ class Lanes(unittest.TestCase):
         # identity, and every later reader then raises a password dialog.
         probe_row = self.agy("custody")
         self.assertEqual(probe_row["status"], "done", probe_row)
-        probe = json.loads((self.root / ".lanes" / "agy-gemini" / LANE / "probe.json").read_text())
+        probe = json.loads((support.workpath(self.root, self.base, PEER) / "probe.json").read_text())
         self.assertEqual(probe["agy_file_storage"], "1")
         self.assertEqual(probe["agy_token"], {"blob": {"refresh_token": "fake-refresh"}, "mode": "0o600"})
         self.assertFalse((self.base / "lanes" / LANE / "gemini-home" / adapters.AGY_TOKEN).exists(),
@@ -283,8 +288,8 @@ class Lanes(unittest.TestCase):
                 if complete:
                     events.append(rpc(id=3, result={"stopReason": "end_turn"}))
                 (directory / "stream.jsonl").write_text("\n".join(map(json.dumps, events)))
-                with patch.object(run, "workspace", return_value=self.root / ".lanes" / peer.pool / peer.name), \
-                        patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {self.root / '.lanes' / peer.pool / peer.name} --model {peer.model}"), \
+                with patch.object(run.Run, "workspace", return_value=support.workpath(self.root, self.base, peer)), \
+                        patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {support.workpath(self.root, self.base, peer)} --model {peer.model}"), \
                         patch.object(run, "end_group", return_value=True) as stopped:
                     run._settle_dead_runner(current, peer.name)
                 stopped.assert_called_once_with(123)

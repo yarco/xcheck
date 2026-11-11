@@ -18,9 +18,10 @@ CLI → supervisor → lane runner → native harness / acpx → native ACP serv
 ```
 
 Herdr changes where the runner executes, not this ownership chain. The runner
-holds the lane life lock and quota pool. Its harness inherits pool custody;
-`xcheck hold` restores custody across acpx's stdio-only child boundary. The
-process group is settled before the runner releases its pool. An independently
+holds the lane life lock, one concurrency permit and aggregate pool custody.
+Its harness inherits both custody descriptors; `xcheck hold` rejoins that exact
+lane's permit across acpx's stdio-only child boundary. The process group is
+settled before the runner releases its permit. An independently
 owned authentication watcher retains its own locks and parent-EOF lease because
 native sign-in must also stop when the runner dies.
 
@@ -73,7 +74,7 @@ arrive before their signal is delivered.
 Recovery acquires it, checks `exit.json` again, verifies any orphan's identity,
 settles the owned process group where possible, and only then publishes. A
 recorded PID alone never grants kill authority. Unverifiable orphan identity
-remains an explicit limitation; inherited pool custody still prevents overlap.
+remains an explicit limitation; inherited custody keeps its permit occupied.
 
 Result bytes are written before `exit.json`; terminal records are immutable.
 Failure of the storage itself can still prevent publication. Reattachment can
@@ -120,8 +121,9 @@ into failure unless the operator requested a cancellation limit.
 | Renderer failures must not affect spending | Best-effort Display + unconditional cleanup | `test_settlement.py` display failure; spawn/setup tests | Diagnostics remain outside execution decisions |
 | Concurrent observers can publish stale state | Supervisor-only summary publication; read-only observers | `test_settlement.py` status tests | A stronger single-authority projection mechanism, not more writers |
 | Failed spawn is different from uncertain delivery | Per-lane headless failure settlement; explicit Herdr delivery state | `test_settlement.py`, Herdr ownership tests | Native placement supplies an equally precise result |
-| Runner death must not release a live spender's pool | Inherited flock and ACP hold wrapper | Pool, custody and runtime E2E tests | Verified native descriptor custody across every launch layer |
-| Queued lanes must see the launched packet | Launch snapshot; pool-owned staging | `test_final_repairs.py` queued snapshot regression | Another immutable shared input contract |
+| Runner death must not release a live spender's permit or allow account rotation | Inherited slot + aggregate flocks and exact-lane ACP hold wrapper | `test_pools.py`, native custody and orphan runtime tests | Verified native descriptor custody across every launch layer |
+| Unrelated reviews must overlap without overwriting evidence | Bounded per-lane permits; run-scoped workspaces recorded in `run.json` | `test_pools.py`, same-model two-run overlap / third-run queue regression | Equivalent bounded concurrency and disjoint ownership |
+| Queued lanes must see the launched packet | Launch snapshot; run/lane-owned staging | `test_final_repairs.py` queued snapshot regression | Another immutable shared input contract |
 | Authentication recovery must survive caller death safely | Owned watchdog, pool/auth locks, EOF lease | `test_claude_auth.py` | Native ownership provides the same guarantee |
 | Unknown inventory/price is not absence or free access | Explicit provider observations and admission checks | `test_models.py`, `test_agy_acp.py`, `test_cline.py` | A provider-owned replacement with the same distinctions |
 | Grok renamed tool IDs fail its allowlist open | Zero-turn resolved-toolset contract | `test_runner_issues.py` Grok probes | Native allowlists fail closed and their result remains observable |

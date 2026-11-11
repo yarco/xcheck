@@ -26,6 +26,22 @@ Optional `~/.config/xcheck/config.json` is read at each command invocation. `XCH
 
 All keys are optional. Path values must be absolute or start with `~/`; a helper is an executable path, not a shell command. Lane selectors use the ordinary parser; duplicate normalized names and empty lists are refused. An explicit `--lanes` replaces the configured default roster for that run; `--orch` exclusion still applies. `--add` appends normally. The selected lanes/efforts are frozen in `run.json`. Do not change local integration settings while a run is active.
 
+`pool_concurrency` optionally maps pool names to positive integer lane limits,
+for example `{"grok": 3, "claude": 2}`. Omitted pools allow two simultaneous
+lanes, except `agy-gemini`, which allows four (two Flash + Argon reviews).
+These limits apply across runs, not separately to each run. They are operating
+policy, not a provider quota guarantee. Same-run siblings consume permits too.
+Capacity still fails closed on unknown or insufficient quota; opt-in meterless
+providers remain meterless. Do not use account changes or extra pools to evade
+provider limits.
+
+Every permit retains the existing aggregate `gate`/`busy` maintenance contract.
+Account-switch helpers must hold the gate and take `busy` exclusively before
+changing a shared login. Native refresh recovery retains its separate auth lock.
+Never delete slot or lock files. Old runtimes keep their immutable code and
+workspace layout: new permit admission waits for their aggregate custody to
+drain. Prefer installing between runs, and do not relaunch pending work.
+
 The helper path and optional roster path preserve the existing default locations when omitted. Existing `XCHECK_AGY_ACP_DIR` and `XCHECK_GROK_HOME` overrides remain supported; they are local installation/test settings, not credentials. Native login stores remain native. Do not put tokens in this JSON or commit an environment dump.
 
 `free_roster` points to an optional JSON object such as `{"lanes":["opencode:provider/model"]}`. Missing/unreadable roster files produce no optional free lanes. The file is a selection aid, not proof of current price, availability or quality. `xcheck models` checks provider sources live; an external qualification job is not bundled. `doctor` checks optional roster pins as well as defaults.

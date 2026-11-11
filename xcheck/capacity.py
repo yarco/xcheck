@@ -10,7 +10,7 @@ Each pool has one free meter that runs no inference:
   devin   opt-in (no protocol meter)
 
 A lane spends only when every window it draws on has more than the reserve
-left: 10 %, or 5 + 5n % for the n lanes of one run sharing an Agy family
+left: 10 %, or 5 + 5n % for the n occupied Agy permits observed at admission across runs
 (capped at 90). A meter that cannot be read is `capacity-unknown`, a login the
 provider rejects is `auth-required`; both skip the lane. There is no fallback
 meter: a reading is trusted or the lane does not spend.
@@ -65,7 +65,7 @@ class LoginRequired(Exception):
 
 
 def sharing(lane: Lane, roster) -> int:
-    """Lanes of one roster drawing on this lane's pool (the Agy reserve grows with it)."""
+    """Roster sharing for diagnostic capacity reads and pre-launch Agy rotation."""
     return sum(1 for other in roster if other.pool == lane.pool)
 
 

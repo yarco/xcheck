@@ -189,8 +189,9 @@ class Lanes(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         row = json.loads((self.base / "lanes" / PEER.name / "exit.json").read_text())
         self.assertEqual(row["status"], "done", row)
-        probe = json.loads((self.root / ".lanes" / PEER.pool / PEER.name / "probe.json").read_text())
+        probe = json.loads((support.workpath(self.root, self.base, PEER) / "probe.json").read_text())
         self.assertTrue(probe["holds_busy"], "the Codex process itself must hold admission")
+        self.assertTrue(probe["holds_permit"], "the actual spender must retain its lane permit")
         self.assertIn("Read ./PACKET.md", probe["stdin"])
         argv = probe["argv"]
         self.assertIn("mcp_servers.perplexity.enabled=false", argv)  # the real fake listing's unapproved servers

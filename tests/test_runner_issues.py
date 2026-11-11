@@ -625,7 +625,7 @@ class ReportClaudePolicy(unittest.TestCase):
             events = [*cloudflare_call(), *claude_answer(text)]
             (directory / 'stream.jsonl').write_text('\n'.join(map(json.dumps, events)))
             with patch.object(run, '_pid_cmd', return_value=''), \
-                    patch.object(run, 'workspace', return_value=base/'work'):
+                    patch.object(run.Run, 'workspace', return_value=base/'work'):
                 run._settle_dead_runner(current, peer.name)
             record = json.loads((directory/'exit.json').read_text())
             self.assertEqual(record['status'], 'done', record)

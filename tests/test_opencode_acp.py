@@ -80,7 +80,7 @@ class NativeAuthFailure(unittest.TestCase):
             for _, ddl in json.loads((support.FIX / 'opencode-v2-schema.json').read_text()):
                 db.execute(ddl)
             db.execute('INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                       ('ses_auth', 'fixture', 'fixture', str(files.workspace(peer)), '2.0.32', 101000, 101000))
+                       ('ses_auth', 'fixture', 'fixture', str(files.workspace(peer, self.base)), '2.0.32', 101000, 101000))
             db.execute('INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)',
                        ('msg_auth', 'ses_auth', 'assistant', 1, 102000, 102000, json.dumps(message)))
         reader = adapters.Reader('opencode')
@@ -106,7 +106,7 @@ class NativeAuthFailure(unittest.TestCase):
                     db.execute(sql, args)
                 self.assertIsNone(activity.opencode_failure(current, name))
             with closing(sqlite3.connect(path)) as db, db:
-                db.execute('UPDATE session_v2 SET directory=?', (str(files.workspace(peer)),))
+                db.execute('UPDATE session_v2 SET directory=?', (str(files.workspace(peer, self.base)),))
                 message['model']['id'] = 'another-model'
                 db.execute('UPDATE session_message SET data=?', (json.dumps(message),))
             self.assertIsNone(activity.opencode_failure(current, name))
@@ -131,7 +131,7 @@ class NativeAuthFailure(unittest.TestCase):
             for _, ddl in json.loads((support.FIX / 'opencode-v2-schema.json').read_text()):
                 db.execute(ddl)
             db.execute('INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                       ('ses_auth', 'fixture', 'fixture', str(files.workspace(peer)), '2.0.32', 101000, 101000))
+                       ('ses_auth', 'fixture', 'fixture', str(files.workspace(peer, self.base)), '2.0.32', 101000, 101000))
             db.execute('INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)',
                        ('msg_auth', 'ses_auth', 'assistant', 1, 102000, 102000, json.dumps(message)))
         empty = self.root / 'empty-xdg'
@@ -202,12 +202,14 @@ class Lanes(unittest.TestCase):
                                                        "OPENCODE_CONFIG_CONTENT": '{"permission":"deny"}'})
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         name = "opencode-openrouter-qwen-qwen3.8-27b-free-high"
+        peer = adapters.parse_lane("opencode:openrouter/qwen/qwen3.8-27b:free:high")
         directory = self.base / "lanes" / name
         row = json.loads((directory / "exit.json").read_text())
         self.assertEqual(row["status"], "done", row)
         self.assertTrue((directory / "stream.jsonl").exists())
-        probe = json.loads((self.root / ".lanes" / "opencode-openrouter" / name / "probe.json").read_text())
+        probe = json.loads((support.workpath(self.root, self.base, peer) / "probe.json").read_text())
         self.assertTrue(probe["holds_busy"], "the native server must hold admission, not just acpx")
+        self.assertTrue(probe["holds_permit"], "the actual spender must retain its lane permit")
         self.assertEqual(probe["config"], {"model": "openrouter/qwen/qwen3.8-27b:free",
                                           "mode": "build", "effort": "high"})
         self.assertEqual(probe["acpx_env"], [])
@@ -235,8 +237,8 @@ class Lanes(unittest.TestCase):
                 if completed:
                     events.append(rpc(id=3, result={"stopReason": "end_turn"}))
                 (directory / "stream.jsonl").write_text("\n".join(map(json.dumps, events)))
-                work = self.root / ".lanes" / PEER.pool / PEER.name
-                with patch.object(run, "workspace", return_value=work), \
+                work = support.workpath(self.root, self.base, PEER)
+                with patch.object(run.Run, "workspace", return_value=work), \
                         patch.object(run, "_pid_cmd", return_value=f"node acpx --cwd {work}"), \
                         patch.object(run, "end_group", return_value=True) as stopped:
                     run._settle_dead_runner(current, PEER.name)
@@ -282,7 +284,7 @@ class Lanes(unittest.TestCase):
         self.assertNotIn(f"| {router.name} (", status)
 
         def probe(lane):
-            return json.loads((self.root / ".lanes" / lane.pool / lane.name / "probe.json").read_text())
+            return json.loads((support.workpath(self.root, self.base, lane) / "probe.json").read_text())
 
         self.assertEqual(probe(zen_a)["opencode_db"], str(stores["a"]))
         self.assertEqual(probe(zen_b)["opencode_db"], str(stores["b"]))

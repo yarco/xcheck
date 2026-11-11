@@ -13,7 +13,7 @@
   xcheck models [--provider ID] [--json] discover recent zero-price coding models
   xcheck install              publish a read-only copy as `xcheck` on PATH (+ Codex rule)
   xcheck lane   --base B --lane NAME   (internal: run one lane)
-  xcheck hold   --pool P --run B -- CMD (internal: an ACP lane's agent command)
+  xcheck hold   --pool P --lease D -- CMD (internal: an ACP lane's agent command)
 
 See Multi-Agent Cross-Check Protocol.md for the protocol.
 """
@@ -89,7 +89,7 @@ def main() -> int:
     sub.add_parser("install")
     hd = sub.add_parser("hold")  # internal: acpx's agent command for an ACP lane
     hd.add_argument("--pool", required=True)
-    hd.add_argument("--run", required=True)
+    hd.add_argument("--lease", required=True)
     hd.add_argument("--log", type=Path)
     hd.add_argument("argv", nargs=argparse.REMAINDER)
     ln = sub.add_parser("lane")
@@ -183,7 +183,7 @@ def main() -> int:
             return 0
         if a.cmd == "hold":
             argv = a.argv[1:] if a.argv[:1] == ["--"] else a.argv
-            return lane.hold(a.pool, a.run, a.log, argv)
+            return lane.hold(a.pool, a.lease, a.log, argv)
         if a.cmd == "lane":
             return lane.run_lane(a.base.resolve(), a.lane)
     except (run.RunError, validate.PacketError, ValueError) as e:

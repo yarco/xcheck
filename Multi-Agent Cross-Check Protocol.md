@@ -67,7 +67,7 @@ xcheck run --base /tmp/agent-offload/<slug> --orch claude  # default roster minu
 
 `run` options: `--lanes kind:model[:effort],…` replaces the roster (Agy and Devin take no effort; OpenCode's ACP effort and Cline's thinking level are optional; Codex, Claude and Grok require one); `--add LANE` appends an opt-in lane to it. `--mode auto|headless|herdr` (default `auto`: visible Herdr panes when the caller verifies, else headless). Leave it unset; `--mode headless` is for an operator request or a placement smoke, never an orchestrator's preference, because it hides lanes the operator expects to watch. `--web live` (default: peers may search and must cite what they relied on) or `packet` (built-in web tools off and peers told not to fetch; connected MCP tools remain, so this is not isolation). `--idle` and `--cap` are optional operator-requested cancellation limits; neither has a default. The caller must not invent a limit to guess how long a reviewer should take. Without a limit, a quiet lane and a queued lane remain pending until completion, an observed failure or explicit cancellation. A supplied `--cap` also bounds pool admission and arms the runner's watchdog; its expiry means policy stopped the work, never that the reviewer was idle. Silence cannot establish inactivity. `--force-lane NAME` launches a selected lane past a capacity refusal, only on the operator's say-so and announced in chat. `--skip-capacity` is for controlled smokes. `--detach` returns once launch is confirmed; if preflight outlasts its 30-second observation window, it reports a live supervisor with launch unconfirmed. A reused BASE is refused before spawning another supervisor.
 
-Invalid options (a BASE that does not resolve under `/tmp/agent-offload`, no peers, non-positive budgets, a forced lane not in the roster, a same-kind peer) are refused before any pane, model or launch marker exists. Inside that root any slug works (spaces, quotes, non-ASCII, nesting, a relative path or a symlink that resolves there), and peers always run in the fixed `.lanes/<pool>/<lane>` workspaces, so no BASE spelling reaches a trust or approval prompt. Other commands: `xcheck wait --base B [--timeout S]` (subscriber; reattaches without relaunch), `xcheck status --base B` (render from files), `xcheck activity --base B [--lane NAME] [--json]` (one compact line per lane; `--json` requests full metadata without peer findings), `xcheck cancel --base B [--lane NAME] --reason TEXT` (prevalidate all selected runner identities before signalling; preserve the operator’s reason in final status). Caller or supervisor interruption detaches; it never cancels peers.
+Invalid options (a BASE that does not resolve under `/tmp/agent-offload`, no peers, non-positive budgets, a forced lane not in the roster, a same-kind peer) are refused before any pane, model or launch marker exists. Inside that root any slug works (spaces, quotes, non-ASCII, nesting, a relative path or a symlink that resolves there), and peers always run in the run-scoped `.lanes/<run-key>/<pool>/<lane>` workspaces, so no BASE spelling reaches a trust or approval prompt. Other commands: `xcheck wait --base B [--timeout S]` (subscriber; reattaches without relaunch), `xcheck status --base B` (render from files), `xcheck activity --base B [--lane NAME] [--json]` (one compact line per lane; `--json` requests full metadata without peer findings), `xcheck cancel --base B [--lane NAME] --reason TEXT` (prevalidate all selected runner identities before signalling; preserve the operator’s reason in final status). Caller or supervisor interruption detaches; it never cancels peers.
 
 Exit codes: 0 every lane settled (read the table); 2 refused before any spend; 3 `wait` timed out while lanes run; 130 supervisor interrupted.
 
@@ -175,7 +175,7 @@ The markers are literal lines: no period, code fence, quote or explanation after
 
 **What every lane is told** (`run.MESSAGE`): the owner convened the review; read `PACKET.md` then `PROMPT.md` (PROMPT decides format); work from the staged directory; connected MCP tools are available, external actions (sending messages, changing records) are not; nobody answers questions mid-review. Codex, Claude and Agy use tools that read (plus web in live mode); Grok, OpenCode, Cline and Devin may also run Bash and write disposable scratch inside their own workspace, never the staged files. Every lane prints the answer as its final message; only native turn completion publishes it, so a complete-looking draft is not a publication signal.
 
-**What `run` adds to BASE**: `run.json` (roster, contract, settings and any Zen account assignment fixed at launch; Herdr pane ids added as panes are created), `lanes/<lane>/` (`message.txt`, `staged` stamp, `pids.json`, `exit.json`, `stream.jsonl` + `view.log`, `stderr.log`, `harness.log` where the CLI supports one), `RESULT-<lane>.md` (the captured answer), `STATUS.json` / `STATUS.md` (one row per selected lane, skipped ones included; an assigned lane names its account, and the markdown cell is `lane (account)`). Peers work in stable workspaces `/tmp/agent-offload/.lanes/<pool>/<lane>/`, restaged only after pool admission and reused by the next run of that lane. The pool namespace makes different pools disjoint even when selectors normalize to the same lane name; inspect a run's evidence in its BASE, not in a later run's workspace. Artifacts stay under the run root; never commit run directories or private review packets.
+**What `run` adds to BASE**: `run.json` (roster, contract, settings and any Zen account assignment fixed at launch; Herdr pane ids added as panes are created), `lanes/<lane>/` (`message.txt`, `staged` stamp, `pids.json`, `exit.json`, `stream.jsonl` + `view.log`, `stderr.log`, `harness.log` where the CLI supports one), `RESULT-<lane>.md` (the captured answer), `STATUS.json` / `STATUS.md` (one row per selected lane, skipped ones included; an assigned lane names its account, and the markdown cell is `lane (account)`). Peers work in separate `/tmp/agent-offload/.lanes/<run-key>/<pool>/<lane>/` workspaces. The run key is the SHA-256 of the canonical BASE path, so arbitrary slug characters do not reach native workspace controls. `run.json` records the actual workspace paths; old records retain their original layout when read. Another run never restages this workspace. The immutable review evidence remains in `BASE/.packet`. Artifacts stay under the run root; never commit run directories or private review packets.
 
 ## Lane statuses
 
@@ -190,7 +190,7 @@ Only the supervisor holding `supervisor.alive` publishes the shared `STATUS.json
 | `skipped` | no review inference: capacity reserve, auth, unknown capacity, startup/inventory unavailable, exact model absent, or pool busy past `--cap` | tell the operator; `--force-lane` only on their say-so |
 | `interrupted` | a lane runner was signalled or explicitly cancelled | the final reason preserves an explicit cancellation reason; a signalled subscriber/supervisor only detaches |
 
-Never relaunch a lane that died of quota or auth in the same run. The [pre-inference Claude authentication recovery](docs/reference.md#capacity) resumes a pending admission; it never restarts a reviewer turn. A lane lost to a bad packet or prompt is rerun in a fresh BASE after fixing the packet, and the operator is told. A lane that dies within seconds with a usage message usually means a flag drifted: read the first stderr line, run `xcheck doctor`, and compare the installed CLI's `--help` before blaming quota or the model. The only answer channel is the lane's final message; a review written to a file instead ends `failed` and is not scouted. Read its saved stream, and the file in `/tmp/agent-offload/.lanes/<pool>/<lane>/`, before the next run of that lane restages it.
+Never relaunch a lane that died of quota or auth in the same run. The [pre-inference Claude authentication recovery](docs/reference.md#capacity) resumes a pending admission; it never restarts a reviewer turn. A lane lost to a bad packet or prompt is rerun in a fresh BASE after fixing the packet, and the operator is told. A lane that dies within seconds with a usage message usually means a flag drifted: read the first stderr line, run `xcheck doctor`, and compare the installed CLI's `--help` before blaming quota or the model. The only answer channel is the lane's final message; a review written to a file instead ends `failed` and is not scouted. Read its saved stream and, if needed for diagnosis, its recorded workspace; do not promote that file into a completed answer.
 
 ## Placement and views
 
@@ -212,18 +212,20 @@ See [placement, stream correlation and recovery details](docs/reference.md#place
 
 Codex, Claude, Grok and Agy have non-inference meters. Each lane reads its meter
 under pool custody immediately before spend. Admission requires more than 10%
-remaining, or `min(90, 5 + 5n)%` for the run's `n` Agy lanes in one family. A failed
-read is `capacity-unknown`; rejected login is `auth-required`; insufficient reserve
-is `reserve-low`. All skip before review inference, with no fallback meter.
-Devin, OpenCode and Cline have no protocol quota meter; serialization does not
-establish available allowance. A reading cannot guarantee later provider access.
+remaining, or `min(90, 5 + 5n)%` for `n` occupied Agy permits observed at
+admission across all runs. A failed read is `capacity-unknown`; rejected login
+is `auth-required`; insufficient reserve is `reserve-low`. All skip before
+review inference, with no fallback meter. Devin, OpenCode and Cline have no
+protocol quota meter; a concurrency limit does not establish available allowance.
+A reading cannot guarantee later provider access.
 
 Only a configured local helper may rotate Agy accounts or complete attended
 Claude sign-in. Claude may first make one bounded native, non-inference refresh
-under the pool lock; recovery continues the same pending admission, never retries
-a reviewer turn. Diagnostic commands, forced lanes and `--skip-capacity` do not
-recover authentication. Do not hand-roll OAuth, force authentication failures,
-log out a working session or switch to API billing.
+while retaining its permit and the authentication lock; recovery continues the
+same pending admission, never retries a reviewer turn. Diagnostic commands,
+forced lanes and `--skip-capacity` do not recover authentication. Do not hand-roll
+OAuth, force authentication failures, log out a working session or switch to API
+billing.
 
 Use `xcheck capacity` for diagnostics. Report failed admission and its remedy;
 use a fresh BASE after repairing the cause. [Meter, throttle and authentication
@@ -232,10 +234,18 @@ locked-Keychain handling and explicitly supplied usage readings.
 
 ## Locking and liveness
 
-Cooperating runs share host-local quota pools and stable lane workspaces. A lane
-takes one pool before capacity checking, staging or spend; same-run lanes may
-share it, and disjoint pools run concurrently. Inherited kernel locks retain
-custody while an owned native process is alive, including after runner death.
+Cooperating runs share host-local pools with bounded **lane** concurrency, not
+run-level exclusion. The default is two lanes per pool, four for `agy-gemini`
+so two ordinary Flash + Argon reviews can overlap. Optional `pool_concurrency`
+settings override these operating limits; they are not measured provider ceilings.
+Every lane consumes one permit, including siblings in the same run. A free permit
+and successful admission checks allow another run's same model to start immediately.
+
+Each run/lane owns a separate workspace. The short pool gate protects permit
+allocation, never an entire review. The runner, native child and ACP server retain
+the same permit through kernel locks; runner death cannot free a live spender's
+permit. Aggregate pool custody still excludes account rotation until every
+spender exits. Old-runtime holders drain before new permits are admitted.
 
 Never delete lock files or use a test root to bypass contention. Kernel `alive`
 locks establish liveness; PIDs, process tables and output activity do not. Recovery
@@ -280,21 +290,22 @@ offline demo.
 | I11 | Exact harness, selector and requested effort are preserved; normalized labels cannot collide within a roster | `run.json`, argv, `adapters.Lane.name`, duplicate-name preflight |
 | I12 | Local supervision invokes no model; the master resumes for terminal events or an explicit request | one retained host operation/verified completion callback; disclose unsupported hosts |
 | I13 | Orchestrator control variables are scrubbed; provider keys are retained only for the explicitly selected OpenCode provider; the runner sets `OPENCODE_DB` for an assigned Zen store | lane environment scrub, provider allowlist and account assignment |
-| I14 | A stable workspace has one owning pool; separate pools cannot overwrite it | `.lanes/<pool>/<lane>` and pool custody before staging |
+| I14 | Every run/lane has a separate workspace; another review cannot restage it | `.lanes/<run-key>/<pool>/<lane>` and recorded workspace paths |
 | I15 | Unknown inventory or price never becomes confirmed availability/free pricing; temporary failure never silently changes defaults | admission/discovery fail closed; deliberate roster changes and orchestrator coverage reporting |
 | I16 | Progress and the one-hour warning never publish an answer, cancel a lane or authorize another turn | supervisor diagnostics, native completion reader, explicit cancellation/limits |
 
 ## Current limits
 
-- Distinct model IDs can produce the same sanitised lane name; a roster with duplicate names is refused before launch. The exact ID remains in run metadata and argv. Across runs, colliding names under different pools have different workspaces; within one pool the existing lock owns the workspace. Empty, dot and parent path segments in model selectors are refused.
-- Claude and Codex register only approved local/keyless MCP servers (Codex disables every other server it would load, plugins included, and any with a stored login), and Claude blocks account connectors; packet mode omits their remote MCP retrieval servers. Grok keeps its filtered lane config; Agy, Devin and OpenCode retain instruction-only MCP/web restrictions. Shells, connected local tools and native web tools prevent a general free-only network guarantee. `--web packet` is not a security boundary for untrusted material.
-- Grok and Devin’s shell can write anywhere the operator can (Grok uses an unrestricted profile; Devin’s sandbox hides the login), including another lane's scratch; their own-workspace limit is an instruction. OpenCode uses whichever executable wins PATH; xcheck adds no OS boundary. A separately maintained wrapper may still share writable temporary directories, configuration, databases and MCP caches, so assess those boundaries before admitting private evidence. Codex (read-only sandbox), Claude (no shell) and Agy (Seatbelt: workspace, lane home, Agy uv cache) cannot.
+- Distinct model IDs can produce the same sanitised lane name; a roster with duplicate names is refused before launch. The exact ID remains in run metadata and argv. Across runs, even identical lane names have separate workspaces; within a run, duplicate normalized names remain refused. Empty, dot and parent path segments in model selectors are refused.
+- Claude and Codex register only approved local/keyless MCP servers (Codex disables every other server it would load, plugins included, and any with a stored login), and Claude blocks account connectors; packet mode omits their remote MCP retrieval servers. Grok keeps its filtered lane config; Agy, Devin, OpenCode and Cline retain instruction-only MCP/web restrictions. Shells, connected local tools and native web tools prevent a general free-only network guarantee. `--web packet` is not a security boundary for untrusted material.
+- Grok and Devin’s shell can write anywhere the operator can (Grok uses an unrestricted profile; Devin’s sandbox hides the login), including another lane's scratch; their own-workspace limit is an instruction. OpenCode uses whichever executable wins PATH; xcheck adds no OS boundary. Cline likewise has no added OS write boundary. A separately maintained wrapper may still share writable temporary directories, configuration, databases and MCP caches, so assess those boundaries before admitting private evidence. Codex (read-only sandbox), Claude (no shell) and Agy (Seatbelt: workspace, lane home, Agy uv cache) cannot.
 - An Agy lane's login copy is deleted when its runner settles the lane. A runner killed outright leaves the 0600 copy in `BASE/lanes/<lane>/gemini-home` until that BASE is removed. A server refresh is written only to the copy, so the canonical item keeps its original refresh token.
 - Concurrent runs each assign Zen lanes from the start of `opencode_accounts`, so they can spend the same account. The external free-roster refresh spends the account its own process is signed into. The default of 5 Zen lanes per account is an estimate from 2026-10-21, not a measured request/token ceiling or a capacity guarantee. Account count cannot establish relief from shared IP or upstream limits. As checked 2026-10-24, the [OpenCode terms](https://opencode.ai/legal/terms-of-service) prohibit using multiple accounts to circumvent usage limits; legitimate separate account ownership does not establish an unlimited shared allowance. No automatic account creation or quota-circumvention mechanism is part of this integration.
 - Agy lanes share `ROOT/.cache/agy-uv`, which every Agy lane may write, so one Agy lane could alter the uvx MCP packages another Agy lane runs. It never reaches the operator's uv cache.
 - No Agy lane gets `fff`, `qmd`, or `keenable-free`: the first two fail ACP initialization (see Harness facts), and Keenable's startup HTTP 429 can abort the whole Agy turn. You Free remains its web retrieval server. Requalify each excluded server before restoring it; this availability exception does not authorize a paid-capable replacement.
 - Grok 1.0.46 and 1.0.49 refuse `read-only` startup on symlinked container-runtime endpoints such as OrbStack's `/var/run/docker.sock`. The current adapter uses an unrestricted profile, not an OS write boundary. Do not change host container configuration to make a review launch; requalify a restrictive profile before claiming isolation.
 - A turn that blocks silently (a native tool buffering output, a stuck login) remains pending unless the operator supplies `--cap`/`--idle` or cancels; silence is not evidence of inactivity.
+- Permit admission has no FIFO guarantee. Concurrency bounds in-flight xcheck lanes, not interactive sessions, provider request rates or total review cost. Quota readings are snapshots, not reservations or a guaranteed 10% floor. Pool names retain their provider/family grouping; Zen pools remain per model, not an account-wide concurrency budget.
 - Display failures first occurring after terminal publication cannot amend immutable `exit.json`. Final pane output is best effort; the authoritative record remains published before that output.
 - A Herdr failure after a split but before `pane run` leaves a pane with an idle shell; close it by hand. (A failed `exec` makes zsh exit, so that pane closes itself.) A placement failure known to the supervisor is settled explicitly. An unobserved runner startup remains pending; elapsed time does not prove it failed. `cancel` settles it: with no runner recorded it takes the lane's life lock (proof none runs) and writes `interrupted`; a runner that starts later finds that record under the lock and stops.
 - Only an explicitly supplied `--cap` ends a lane on elapsed spend. It is a cancellation policy; rerun in a fresh BASE after recording lost work. Native session continuation cannot restore killed OS processes or deleted scratch.

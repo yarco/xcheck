@@ -298,13 +298,13 @@ class RuntimeHandoff(unittest.TestCase):
             for _, ddl in json.loads((support.FIX / "opencode-v2-schema.json").read_text()):
                 db.execute(ddl)
             db.execute('INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                       ("ses_test", "fixture-project", "fixture", str(self.root / ".lanes" / lane.pool / name), "2.0.27", 101000, 101000))
+                       ("ses_test", "fixture-project", "fixture", str(support.workpath(self.root, self.base, lane)), "2.0.27", 101000, 101000))
             content = [dict(type="reasoning", text="SECRET reasoning"),
                        dict(type="tool", name="shell", state=dict(status="running", input="SECRET command", content=[dict(type="text", text="SECRET result")]), time=dict(created=103000, unrecognized="SECRET metadata"))]
             db.execute('INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)',
                        ("msg_fixture", "ses_test", "assistant", 1, 103000, 103000, json.dumps(dict(content=content))))
 
-        with patch.dict(os.environ, XDG_DATA_HOME=str(fake_store)), patch.object(activity, "workspace", return_value=self.root / ".lanes" / lane.pool / name):
+        with patch.dict(os.environ, XDG_DATA_HOME=str(fake_store)), patch.object(files.Run, "workspace", return_value=support.workpath(self.root, self.base, lane)):
             observed = activity.opencode_native(run, name, "ses_test")
             self.assertEqual(observed["last_tool"]["status"], "running")
             self.assertEqual(observed["last_tool"]["kind"], "shell")

@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from . import adapters, capacity, herdr, settlement, validate
-from .files import ROOT, Run, atomic_write, end_group, hold_life, is_alive, now, workspace
+from .files import ROOT, Run, atomic_write, end_group, hold_life, is_alive, now
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 STILL_RUNNING = 3
 POLL = 0.2  # seconds between local file/lock checks; no model is involved
@@ -368,7 +368,7 @@ def _recover(run: Run, name: str) -> None:
         harness = None
     note = "lane runner died without writing exit.json"
     cmd = _pid_cmd(harness)  # identity: every adapter argv names the lane dir or workspace
-    if harness and any(re.search(re.escape(str(p)) + r"(?=[/\s'\"]|$)", cmd) for p in (d, workspace(run.lane(name)))):
+    if harness and any(re.search(re.escape(str(p)) + r"(?=[/\s'\"]|$)", cmd) for p in (d, run.workspace(name))):
         if end_group(harness):
             note += "; its harness was still running and was stopped"
     elif harness:

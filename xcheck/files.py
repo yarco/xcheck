@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import signal
@@ -33,10 +34,10 @@ def defer_stop():
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
-def workspace(lane: Lane) -> Path:
-    """A lane's stable working directory, exclusive under its pool lock.
-    The runner restages the immutable packet here each run."""
-    return Path(os.path.realpath(ROOT)) / ".lanes" / lane.pool / lane.name
+def workspace(lane: Lane, base: Path) -> Path:
+    """Run-scoped workspace with a safe opaque path, independent of BASE spelling."""
+    identity = hashlib.sha256(os.fsencode(os.path.realpath(base))).hexdigest()
+    return Path(os.path.realpath(ROOT)) / ".lanes" / identity / lane.pool / lane.name
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -134,6 +135,7 @@ class Run:
     forced: list = None          # lanes launched past a capacity refusal
     epoch: float = 0.0           # lower bound for this run's native-session creation time
     accounts: dict = None        # Zen lane → {"name", "store"}: its OpenCode account, fixed at launch
+    workspaces: dict = None      # actual paths, retained for settled records from earlier layouts
 
     def lane(self, name: str) -> Lane:
         return self.lanes[name]
@@ -146,6 +148,11 @@ class Run:
         account = (self.accounts or {}).get(name)
         return Path(account["store"]) if account else None
 
+    def workspace(self, name: str) -> Path:
+        if self.workspaces is not None and name in self.workspaces:
+            return Path(self.workspaces[name])
+        return workspace(self.lane(name), self.base)
+
     def save(self) -> None:
         atomic_write(self.base / "run.json", json.dumps({
             "lanes": {n: l.to_json() for n, l in self.lanes.items()},
@@ -154,6 +161,7 @@ class Run:
             "orch": self.orch, "started": self.started, "panes": self.panes,
             "herdr": self.herdr, "capacity": self.capacity,
             "forced": self.forced or [], "epoch": self.epoch, "accounts": self.accounts or {},
+            "workspaces": {n: str(self.workspace(n)) for n in self.lanes},
         }, indent=2))
 
     @classmethod
@@ -167,4 +175,8 @@ class Run:
             orch=d["orch"], started=d["started"], panes=d.get("panes", {}),
             herdr=d.get("herdr", {}), capacity=d.get("capacity", True),
             forced=d.get("forced", []), epoch=d.get("epoch", 0.0), accounts=d.get("accounts", {}),
+            workspaces=d.get("workspaces", {
+                n: str(Path(os.path.realpath(ROOT)) / ".lanes" / Lane.from_json(v).pool / n)
+                for n, v in d["lanes"].items()
+            }),
         )

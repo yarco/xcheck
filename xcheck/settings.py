@@ -22,7 +22,7 @@ def load() -> dict:
         # Config contents and OS error strings can contain private data.
         raise ValueError("cannot read xcheck local configuration as JSON") from error
     paths = {"caller_context_helper", "free_roster", "agy_rotate_command", "claude_login_command"}
-    keys = paths | {"default_lanes", "opencode_accounts", "opencode_lanes_per_account"}
+    keys = paths | {"default_lanes", "opencode_accounts", "opencode_lanes_per_account", "pool_concurrency"}
     if not isinstance(data, dict) or data.keys() - keys:
         raise ValueError("xcheck local configuration has unknown keys or is not an object")
     for key in paths:
@@ -63,14 +63,21 @@ def load() -> dict:
         lanes = data["default_lanes"]
         if not isinstance(lanes, list) or not lanes or not all(isinstance(x, str) for x in lanes):
             raise ValueError("default_lanes must be a non-empty list of lane selectors")
+    if "pool_concurrency" in data:
+        limits = data["pool_concurrency"]
+        if not isinstance(limits, dict) or not all(
+                isinstance(k, str) and k.strip() and isinstance(v, int) and not isinstance(v, bool) and v > 0
+                for k, v in limits.items()):
+            raise ValueError("pool_concurrency must map pool names to positive integers")
     return data
 
 
 def apply() -> None:
     """Apply only explicit overrides; absent config keeps the existing setup."""
-    from . import adapters, capacity, claude_auth, herdr
+    from . import adapters, capacity, claude_auth, herdr, pools
 
     data = load()
+    pools.LIMITS.update(data.get("pool_concurrency", {}))
     if "default_lanes" in data:
         try:
             lanes = tuple(adapters.parse_lane(x) for x in data["default_lanes"])

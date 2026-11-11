@@ -266,7 +266,7 @@ def _opencode_model(lane: Lane) -> list[str]:
 def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path, store: Path | None = None) -> Launch:
     from .files import ROOT
     agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
-             "--run", str(log.parent.parent.parent), "--log", str(log), "--",
+             "--lease", str(log.parent), "--log", str(log), "--",
              shutil.which("opencode") or "opencode", "acp"]
     argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
             "--cwd", str(work), *_opencode_model(lane), "--approve-all", "--auth-policy", "skip",
@@ -531,7 +531,7 @@ def _grok_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) ->
     d = log.parent
     home = _grok_home(d / "grok-home", lane, web)
     agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
-             "--run", str(d.parent.parent), "--log", str(log), "--",
+             "--lease", str(d), "--log", str(log), "--",
              shutil.which("grok") or "grok", "agent",
              "--always-approve", "--no-leader", "-m", lane.model,
              "--reasoning-effort", lane.effort,
@@ -602,7 +602,7 @@ def _devin_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -
     from .files import ROOT
     config = _devin_config(log.with_name("devin-config.json"), web)
     agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
-             "--run", str(log.parent.parent.parent), "--log", str(log), "--",
+             "--lease", str(log.parent), "--log", str(log), "--",
              shutil.which("devin") or "devin", "--config", str(config), "--permission-mode", "accept-edits",
              "--respect-workspace-trust", "false", "acp", "--model", lane.model]
     # ACP collapses SWE-2 variants to swe-2-high plus thought_level. Passing
@@ -774,7 +774,7 @@ def _agy_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> 
     uv = ROOT / ".cache" / "agy-uv"
     uv.mkdir(parents=True, exist_ok=True)
     profile = _agy_profile(d / "agy.sb", work, home, uv)
-    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool, "--run", str(d.parent.parent),
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool, "--lease", str(d),
              "--log", str(log), "--", "/usr/bin/sandbox-exec", "-f", str(profile), str(AGY_ACP_SERVER)]
     argv = [
         shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),

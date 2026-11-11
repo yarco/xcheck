@@ -90,7 +90,7 @@ def watch(argv: list[str]) -> int:
                 proc.wait()
 
 
-def _command(argv: list[str], deadline: float | None, pool_fd: int, auth_fd: int,
+def _command(argv: list[str], deadline: float | None, pool_fds: tuple[int, ...], auth_fd: int,
              timeout: float | None = None, *, attended: bool = False) -> int:
     if deadline is not None:
         left = deadline - time.monotonic()
@@ -109,7 +109,7 @@ def _command(argv: list[str], deadline: float | None, pool_fd: int, auth_fd: int
                 [sys.executable, "-I", "-c", bootstrap, str(Path(__file__).resolve().parent.parent),
                  str(timeout) if timeout is not None else "", "1" if attended else "0", *argv],
                 env=env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True, pass_fds=(pool_fd, auth_fd),
+                start_new_session=True, pass_fds=(*pool_fds, auth_fd),
                 preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, previous))
         code = proc.wait()
         if code == 124:
@@ -131,11 +131,11 @@ def _command(argv: list[str], deadline: float | None, pool_fd: int, auth_fd: int
 
 
 def admit(lane, reading: capacity.Reading, same_pool: int, phase, *,
-          pool_fd: int, deadline: float | None = None, show=lambda lines: None) -> capacity.Reading:
+          pool_fds: tuple[int, ...], deadline: float | None = None, show=lambda lines: None) -> capacity.Reading:
     if lane.kind != "claude" or reading.status != "auth-required":
         return reading
-    # The pool excludes other runs, but same-run lanes can share it. Serialize
-    # recovery too, then reread so a waiter uses the preceding lane's refresh.
+    # Serialize authentication across every run, then reread so a waiter
+    # uses the preceding lane's refresh rather than starting another login.
     with open(ROOT / ".pools" / "claude" / "auth", "a+") as lock:
         while True:
             if deadline is not None and time.monotonic() >= deadline:
@@ -155,7 +155,7 @@ def admit(lane, reading: capacity.Reading, same_pool: int, phase, *,
         try:
             _command(["claude", "--safe-mode", "--no-session-persistence", "--tools", "",
                       "--permission-prompts", "none", "-p", "/status"],
-                     deadline, pool_fd, lock.fileno(), REFRESH_TIMEOUT)
+                     deadline, pool_fds, lock.fileno(), REFRESH_TIMEOUT)
         except OSError:
             pass
         reading = capacity.read(lane, same_pool)
@@ -166,7 +166,7 @@ def admit(lane, reading: capacity.Reading, same_pool: int, phase, *,
         phase("waiting_for_login")
         show(["xcheck: opening Claude login; complete native sign-in in the browser/terminal window"])
         try:
-            code = _command([str(LOGIN_COMMAND)], deadline, pool_fd, lock.fileno(), attended=True)
+            code = _command([str(LOGIN_COMMAND)], deadline, pool_fds, lock.fileno(), attended=True)
         except OSError:
             return capacity.Reading("auth-required", "cannot start the configured Claude login helper")
         if code:

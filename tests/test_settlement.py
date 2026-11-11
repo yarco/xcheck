@@ -94,7 +94,7 @@ class Settlement(unittest.TestCase):
         previous = {s: signal.getsignal(s) for s in files.STOP_SIGNALS}
         try:
             with patch.object(lane, 'ROOT', self.root), \
-                 patch.object(lane, 'workspace', return_value=self.root / 'work'), \
+                 patch.object(lane.Run, 'workspace', return_value=self.root / 'work'), \
                  patch.dict(os.environ, {'PATH': f'{self.bin}:{os.environ["PATH"]}',
                                          'FAKE_MODE': 'buffered-work', 'FAKE_DELAY': '0.2'}), \
                  patch.object(lane.Pane, 'feed', side_effect=BrokenPipeError('closed display')), \

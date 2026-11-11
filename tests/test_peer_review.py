@@ -51,7 +51,7 @@ class PeerReview(unittest.TestCase):
              patch.object(claude_auth, '_command', return_value=0) as refresh, \
              patch('builtins.print', side_effect=BrokenPipeError):
             self.assertIs(claude_auth.admit(peer, expired, 1, lambda p: None,
-                          pool_fd=0, show=display.show), ready)
+                           pool_fds=(0,), show=display.show), ready)
         refresh.assert_called_once()
         self.assertEqual(outcome.diagnostics[0]['kind'], 'display')
 
@@ -61,7 +61,7 @@ class PeerReview(unittest.TestCase):
         previous = {s: signal.getsignal(s) for s in files.STOP_SIGNALS}
         try:
             with patch.object(lane, 'ROOT', self.root), \
-                 patch.object(lane, 'workspace', return_value=self.root / 'work'), \
+                 patch.object(lane.Run, 'workspace', return_value=self.root / 'work'), \
                  patch.dict(os.environ, {'PATH': f'{self.bin}:{os.environ["PATH"]}'}), \
                  patch.object(lane, 'pane_header', side_effect=ValueError):
                 lane.run_lane(self.base, peer.name)
