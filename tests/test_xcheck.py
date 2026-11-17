@@ -63,6 +63,22 @@ def grok_probe_log(tools=("read_file", "grep", "list_dir", "run_terminal_cmd",
             f"config_count=3 config_names={mcps}\n")
 
 
+AGY_LEVELS = {"gemini-4-argon": ("low", "medium", "high"),
+              "gemini-4-hydrogen": ("low", "medium", "high", "xhigh"),
+              "gemini-3.8-flash": ("low", "medium", "high")}
+
+
+def agy_offer(models=None, levels=None):
+    """A stand-in for agy.inventory (its side_effect); defaults read AGY_LEVELS when called."""
+    from xcheck import agy
+    levels = AGY_LEVELS if levels is None else levels
+    listed = tuple(levels if models is None else models)
+
+    def inventory(model=None):
+        return agy.Inventory(listed, tuple(levels.get(model, ())) if model in listed else None)
+    return inventory
+
+
 def grok_probe_ok(root: Path, log=None, session=None) -> tuple:
     """A canned _grok_probe_session return: a real spec's argv, the session/new
     result and a probe log. Defaults are the healthy contract."""
@@ -81,12 +97,12 @@ class LaneNames(unittest.TestCase):
         self.assertEqual(Lane("codex", "gpt-6.2-sol", "high").name, "codex-gpt-6.2-sol-high")
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").name, "grok-4.7-xhigh")
         self.assertEqual(Lane("claude", "claude-opus-5-5", "high").name, "claude-opus-5-5-high")
-        self.assertEqual(Lane("agy", "gemini-3.8-flash-high").name, "agy-gemini-3.8-flash-high")
+        self.assertEqual(Lane("agy", "gemini-3.8-flash", "high").name, "agy-gemini-3.8-flash-high")
         self.assertEqual(Lane("devin", "swe-2-max").name, "devin-swe-2-max")
         self.assertEqual(Lane("codex", "gpt-6.2-sol-high", "high").name, "codex-gpt-6.2-sol-high")
 
     def test_pools(self):
-        self.assertEqual(Lane("agy", "gemini-3.8-flash-high").pool, "agy-gemini")
+        self.assertEqual(Lane("agy", "gemini-3.8-flash", "high").pool, "agy-gemini")
         self.assertEqual(Lane("agy", "gemini-flash-agent").pool, "agy-gemini")
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").pool, "grok")
         self.assertEqual(Lane("devin", "swe-2-max").pool, "devin")
@@ -115,7 +131,11 @@ class LaneNames(unittest.TestCase):
         bunny = adapters.parse_lane("opencode:openrouter/stealth/space-bunny-alpha")
         self.assertEqual(bunny.name, "opencode-openrouter-stealth-space-bunny-alpha")
         self.assertEqual(bunny.pool, "opencode-openrouter")
-        for bad in ("codex:gpt-6.2-sol", "agy:gemini-3.8-flash:high", "nope:x:y", "codex",
+        hydrogen = adapters.parse_lane("agy:gemini-4-hydrogen:xhigh")
+        self.assertEqual((hydrogen.model, hydrogen.effort, hydrogen.name, hydrogen.pool),
+                         ("gemini-4-hydrogen", "xhigh", "agy-gemini-4-hydrogen-xhigh", "agy-gemini"))
+        self.assertEqual(adapters.parse_lane("agy:gemini-4-argon").effort, "")  # the server's default level
+        for bad in ("codex:gpt-6.2-sol", "nope:x:y", "codex", "agy:gemini-4-argon:x/y",
                     "devin:swe-2-max:high"):  # selector carries effort
             with self.assertRaises(ValueError):
                 adapters.parse_lane(bad)
@@ -1202,7 +1222,7 @@ class Capacity(unittest.TestCase):
     def test_capacity_command_and_run_count_pool_sharing_alike(self):
         from xcheck import capacity as c
         roster = adapters.DEFAULT_ROSTER
-        flash = Lane("agy", "gemini-3.8-flash-high")
+        flash = Lane("agy", "gemini-3.8-flash", "high")
         self.assertEqual(c.sharing(flash, roster), 2)
         self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 15)
 
@@ -1215,8 +1235,8 @@ class Capacity(unittest.TestCase):
 
     def test_agy_reserve_grows_with_lanes_sharing_a_family(self):
         from xcheck.capacity import reserve_for
-        self.assertEqual(reserve_for(Lane("agy", "gemini-3.8-flash-high"), 2), 15)
-        self.assertEqual(reserve_for(Lane("agy", "gemini-3.8-flash-high"), 30), 90)
+        self.assertEqual(reserve_for(Lane("agy", "gemini-3.8-flash", "high"), 2), 15)
+        self.assertEqual(reserve_for(Lane("agy", "gemini-3.8-flash", "high"), 30), 90)
         self.assertEqual(reserve_for(Lane("grok", "grok-4.7", "low"), 3), 10)
 
     def test_an_invalid_window_cannot_hide_behind_a_valid_one(self):
@@ -1309,7 +1329,7 @@ class Installation(unittest.TestCase):
              patch.object(adapters, "unavailable", return_value=None), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(agy, "registry_version", return_value=None), \
-             patch.object(agy, "inventory", return_value=[]), \
+             patch.object(agy, "inventory", side_effect=agy_offer(())), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(doctor.check(), 1)
         self.assertIn("FAIL opencode acp: help command exited 1", output.getvalue())
@@ -1339,7 +1359,7 @@ class Installation(unittest.TestCase):
                           return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(agy, "registry_version", return_value=None), \
-             patch.object(agy, "inventory", return_value=listed.splitlines()), \
+             patch.object(agy, "inventory", side_effect=agy_offer()), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(doctor.check(), 1)
         self.assertIn("FAIL installed copy stale != source", output.getvalue())
@@ -1353,7 +1373,7 @@ class Installation(unittest.TestCase):
                           return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(agy, "registry_version", return_value=None), \
-             patch.object(agy, "inventory", return_value=listed.splitlines()), \
+             patch.object(agy, "inventory", side_effect=agy_offer()), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(doctor.check(), 0)
 
@@ -1367,7 +1387,7 @@ class Installation(unittest.TestCase):
                           return_value=grok_probe_ok(Path(probe_tmp))), \
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(agy, "registry_version", return_value=None), \
-             patch.object(agy, "inventory", return_value=listed.splitlines()), \
+             patch.object(agy, "inventory", side_effect=agy_offer()), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(doctor.check(), 1)
         self.assertIn("grok: missing ['--sandbox']", output.getvalue())
@@ -1666,7 +1686,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_capacity_is_read_from_each_lanes_meter_before_spending(self):
         # The fake codex/agy answer the real meters (app-server, /usage).
-        lanes = "codex:gpt-6.2-sol:high,agy:gemini-3.8-flash-high"
+        lanes = "codex:gpt-6.2-sol:high,agy:gemini-3.8-flash:high"
         for reading, expected in (("reserve-low", "skipped"), ("eligible", "done")):
             base = self.second_base()
             p = self.xcheck("run", "--base", str(base), "--orch", "other", "--lanes", lanes,
@@ -1763,7 +1783,7 @@ class EndToEnd(unittest.TestCase):
         stale = {"PWD": str(Path.home()), "OLDPWD": str(Path.home())}
         env = {**os.environ, **leak, **keep, **stale, **live_socket, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok"}
-        lanes = "codex:gpt-6.2-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free,devin:swe-2-max"
+        lanes = "codex:gpt-6.2-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash:high,opencode:muse-spark-1.3-contributor-free,devin:swe-2-max"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
                            env=env, capture_output=True, text=True, timeout=60)
@@ -1839,7 +1859,7 @@ class EndToEnd(unittest.TestCase):
     def test_disjoint_pools_and_same_run_lanes_run_together(self):
         other = self.second_base()
         t0 = time.time()
-        self.detach(self.base, "agy:gemini-3.8-flash-high,agy:gemini-3.8-flash-medium", "slow")
+        self.detach(self.base, "agy:gemini-3.8-flash:high,agy:gemini-3.8-flash:medium", "slow")
         self.detach(other, "grok:grok-4.7:xhigh", "slow")
         for base, lane in ((self.base, "agy-gemini-3.8-flash-high"), (self.base, "agy-gemini-3.8-flash-medium"),
                            (other, "grok-4.7-xhigh")):
@@ -1902,7 +1922,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_every_lane_answers_in_its_final_message(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "agy:gemini-3.8-flash-high,grok:grok-4.7:xhigh,"
+                        "--skip-capacity", "--lanes", "agy:gemini-3.8-flash:high,grok:grok-4.7:xhigh,"
                         "claude:claude-opus-5-5:high")
         self.assertEqual(p.returncode, 0, p.stderr)
         rows = {r["lane"]: r for r in json.loads((self.base / "STATUS.json").read_text())["lanes"]}

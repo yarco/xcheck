@@ -209,8 +209,8 @@ class ReportStartup(unittest.TestCase):
                              return_value=session_probe or support.grok_probe_ok(Path(probe_tmp))), \
                 discovery_or_fetch, \
                 patch.object(agy, 'registry_version', return_value=registry), \
-                patch.object(agy, 'inventory', return_value=acp_models if acp_models is not None else
-                             [peer.model for peer in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN) if peer.kind == 'agy']), \
+                patch.object(agy, 'inventory', side_effect=support.agy_offer(*(
+                             () if acp_models is None else (acp_models,)))), \
                 redirect_stdout(io.StringIO()) as out:
             code = doctor.check()
         return code, out.getvalue()
@@ -222,7 +222,19 @@ class ReportStartup(unittest.TestCase):
         code, text = self.doctor(subprocess.CompletedProcess([], 0, self._version_json(), ''),
                                  acp_models=['gemini-3.8-flash-low'])
         self.assertEqual(code, 1, text)
-        self.assertIn('agy model gemini-3.8-flash NOT advertised by the ACP server', text)
+        self.assertIn('FAIL agy model gemini-3.8-flash: model-unavailable: gemini-3.8-flash is not advertised by the ACP server', text)
+
+    def test_doctor_checks_an_agy_pin_effort_against_the_model_offer(self):
+        ok = subprocess.CompletedProcess([], 0, self._version_json(), '')
+        code, text = self.doctor(ok)
+        self.assertEqual(code, 0, text)
+        self.assertIn('ok   agy model gemini-4-hydrogen advertised by the ACP server with thinking level xhigh', text)
+        capped = dict(support.AGY_LEVELS, **{"gemini-4-hydrogen": ("low", "medium", "high")})
+        with patch.object(support, 'AGY_LEVELS', capped):
+            code, text = self.doctor(ok)
+        self.assertEqual(code, 1, text)
+        self.assertIn('FAIL agy model gemini-4-hydrogen: model-unavailable: gemini-4-hydrogen does not offer '
+                      'thinking level xhigh (offers low, medium, high)', text)
 
     def test_doctor_compares_the_agy_server_with_the_acp_registry_as_advice(self):
         ok = subprocess.CompletedProcess([], 0, self._version_json(), '')

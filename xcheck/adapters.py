@@ -33,8 +33,8 @@ DEFAULT_ROSTER = (
     Lane("codex", "gpt-6.2-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
-    Lane("agy", "gemini-3.8-flash"),
-    Lane("agy", "gemini-4-argon"),
+    Lane("agy", "gemini-4-hydrogen", "xhigh"),
+    Lane("agy", "gemini-4-argon", "high"),
 )
 
 # Offers awaiting usable qualification, not excluded models. A deferral
@@ -44,7 +44,8 @@ DEFERRED = ()
 
 
 def parse_lane(spec: str) -> Lane:
-    """`kind:model[:effort]` → Lane. Agy and Devin take no effort.
+    """`kind:model[:effort]` → Lane. Devin takes no effort; Agy's effort is the
+    ACP thinking level, checked against the model's offer at admission.
     Opencode models may be `provider/model` (a slash is part of the model)."""
     parts = spec.split(":")
     # OpenRouter's :free is part of the model, never an effort. Preserve it
@@ -59,7 +60,7 @@ def parse_lane(spec: str) -> Lane:
     if kind == "agy" and not model.startswith("gemini-"):
         raise ValueError("Agy's ACP server supports only Gemini selectors")
     if kind == "agy" and "pro" in model.split("-"):
-        raise ValueError("Gemini Pro is never a cross-check lane (operator rule); use a Flash or Argon selector")
+        raise ValueError("Gemini Pro is never a cross-check lane (operator rule); use a Flash, Hydrogen or Argon selector")
     effort = parts[2] if len(parts) == 3 else ""
     ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind in ("opencode", "cline") else r"[A-Za-z0-9][A-Za-z0-9._-]*"
     for part in (model, effort):
@@ -67,8 +68,8 @@ def parse_lane(spec: str) -> Lane:
             raise ValueError(f"model and effort must be plain identifiers: {part!r}")
     if any(segment in ("", ".", "..") for segment in model.split("/")):
         raise ValueError("model must not contain empty or traversal path segments")
-    if kind in ("agy", "devin") and effort:
-        raise ValueError(f"{kind} selectors carry their own effort; drop ':{effort}'")
+    if kind == "devin" and effort:
+        raise ValueError(f"devin selectors carry their own effort; drop ':{effort}'")
     if kind == "cline" and effort and effort not in ("none", "low", "medium", "high", "xhigh"):
         raise ValueError("Cline thinking must be none, low, medium, high or xhigh")
     if kind not in ("agy", "opencode", "devin", "cline") and not effort:
@@ -100,10 +101,12 @@ def free_lanes(path: Path = FREE_ROSTER) -> tuple[Lane, ...]:
     return tuple(lanes)
 
 
-# Supported but never default (`run --add`): the operator's Devin default and
-# the free lanes the daily refresh verified. `xcheck models` marks a ready row
+# Supported but never default (`run --add`): the hand-pinned lanes, then the
+# free lanes the daily refresh verified. `xcheck models` marks a ready row
 # `pinned` when it is here, else `--add` until the next refresh adds it.
-OPT_IN = (Lane("devin", "swe-2-max"), *free_lanes())
+# Flash draws the same Gemini buckets as the default Hydrogen lane.
+PINNED_OPT_IN = (Lane("devin", "swe-2-max"), Lane("agy", "gemini-3.8-flash", "high"))
+OPT_IN = (*PINNED_OPT_IN, *free_lanes())
 
 
 # Zen's free tier limits each account (FreeUsageLimitError, HTTP 429), across
@@ -193,13 +196,26 @@ def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool,
 CODEX_DISABLED_FEATURES = ("plugins", "hooks", "apps", "computer_use", "browser_use")
 
 
+# `codex mcp list` derives auth_status on every read: a configured bearer
+# credential or a stored OAuth login first, and only when neither exists a
+# network OAuth-discovery probe. A probe error or its 5 s timeout reads
+# `unknown`, as does an unreadable credential store, so `unknown` is an
+# unobserved credential state, and it can differ between two reads.
+CODEX_KEYLESS_AUTH = ("unsupported", "not_logged_in")
+
+
 def _codex_review_mcp(server: dict, web: bool) -> bool:
     """One entry of `codex mcp list --json` that a review may keep: an approved
-    name in a keyless shape (the same rule as Claude's registrations) with no
-    stored login, which the shape cannot show (Codex keeps MCP OAuth tokens)."""
+    name in a keyless shape (the same rule as Claude's registrations) whose
+    auth_status shows no usable login, which the shape cannot show (Codex
+    keeps MCP OAuth tokens)."""
+    return server.get("auth_status") in CODEX_KEYLESS_AUTH and _codex_review_shape(server, web)
+
+
+def _codex_review_shape(server: dict, web: bool) -> bool:
+    """An approved name in a keyless transport shape, whatever its auth_status."""
     name, transport = server.get("name"), server.get("transport")
-    if not isinstance(name, str) or not isinstance(transport, dict) \
-            or server.get("auth_status") not in ("unsupported", "not_logged_in"):
+    if not isinstance(name, str) or not isinstance(transport, dict):
         return False
     if transport.get("type") == "stdio":
         env = transport.get("env") or {}
@@ -229,33 +245,47 @@ def _codex_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -
     """Codex's own headless form: `codex exec --json`, the message on stdin.
     `--ephemeral` keeps no session files and `--sandbox read-only` is the
     native sandbox (exec never asks for approval). MCP follows the review
-    rule: Codex's effective server list is read zero-turn, every server that
-    is not an approved keyless one is disabled by name, and the list is read
-    again to prove it; a lane whose list cannot be proved does not start.
+    rule: Codex's effective server list is read zero-turn and decides the
+    selection once. Every server that is not an approved keyless one is
+    disabled by name, including an approved shape whose credential state reads
+    `unknown` (reported as a lane diagnostic). A second read proves the
+    overrides: each disabled server is off, and every enabled one is a kept
+    server with its first-read transport and no credential status. Its
+    discovery probe may read `unknown` there, since the first read observed its
+    credentials. A lane whose list cannot be proved does not start.
     The installed binary is the runner's direct child and holds the pool
     itself. The ACP form of this lane (codex-acp) is kept on the `acp/codex`
     branch."""
     features = [arg for f in CODEX_DISABLED_FEATURES for arg in ("--disable", f)]
     env = lane_env(Launch([], message), work)
     try:
-        enabled = _codex_mcp_enabled(features, [], env, work)
-        refused = sorted(str(s.get("name") if isinstance(s, dict) else s) for s in enabled
-                         if not _codex_review_mcp(s if isinstance(s, dict) else {}, web))
+        enabled = [s if isinstance(s, dict) else {"name": s} for s in _codex_mcp_enabled(features, [], env, work)]
+        kept = {s["name"]: s["transport"] for s in enabled if _codex_review_mcp(s, web)}
+        refused = sorted(str(s.get("name")) for s in enabled if s.get("name") not in kept)
         if bad := [n for n in refused if not re.fullmatch(r"[A-Za-z0-9_-]+", n)]:
             raise ValueError(f"cannot disable MCP server(s) {bad} by name")
         overrides = [arg for n in refused for arg in ("--config", f"mcp_servers.{n}.enabled=false")]
-        left = [s.get("name") if isinstance(s, dict) else s for s in _codex_mcp_enabled(features, overrides, env, work)
-                if not _codex_review_mcp(s if isinstance(s, dict) else {}, web)]
+        proof = [s if isinstance(s, dict) else {"name": s} for s in _codex_mcp_enabled(features, overrides, env, work)]
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         raise Unavailable(f"startup-unavailable: Codex MCP selection could not be proved ({_clip(str(e), 200)})") from e
-    if left:
-        raise Unavailable(f"startup-unavailable: Codex still enables unapproved MCP server(s) {left} after disabling them")
+    still = sorted(str(s.get("name")) for s in proof if str(s.get("name")) in refused)
+    if still:
+        raise Unavailable(f"startup-unavailable: Codex ignored the override disabling MCP server(s) {still}")
+    changed = sorted(str(s.get("name")) for s in proof if not (
+        s.get("name") in kept and s.get("transport") == kept[s["name"]] and _codex_review_shape(s, web)
+        and s.get("auth_status") in (*CODEX_KEYLESS_AUTH, "unknown")))
+    if changed:
+        raise Unavailable(f"startup-unavailable: Codex enabled MCP server(s) {changed} outside the first read's "
+                          "keyless selection (new, changed or credentialed between reads)")
+    unobserved = [dict(kind="mcp_startup", server=s["name"],
+                       status="disabled: Codex could not determine its credential state (auth_status unknown)")
+                  for s in enabled if s.get("auth_status") == "unknown" and _codex_review_shape(s, web)]
     argv = [shutil.which("codex") or "codex", *features, "exec", "--skip-git-repo-check", "--ephemeral",
             "--sandbox", "read-only", "--cd", str(work), "--model", lane.model,
             "--config", f'model_reasoning_effort="{lane.effort}"',
             "--config", f'web_search="{"live" if web else "disabled"}"',
             "--config", "check_for_update_on_startup=false", *overrides, "--json", "-"]
-    return Launch(argv, message)
+    return Launch(argv, message, diagnostics=unobserved)
 
 
 def _opencode_model(lane: Lane) -> list[str]:
@@ -749,6 +779,7 @@ AGY_ACP_DIR = Path(os.environ.get("XCHECK_AGY_ACP_DIR") or Path.home() / ".local
 AGY_ACP_SERVER = AGY_ACP_DIR / "agy_acp_server.par"
 AGY_LOGIN = ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity-acp", "-w"]
 AGY_ENV = {"AGY_ACP_FORCE_FILE_STORAGE": "1"}
+AGY_EFFORT_OPTION = "thinking_level"  # the server's thought_level config option
 # The server's file credential store: <GEMINI_HOME>/antigravity-acp/acp_token.json.
 AGY_TOKEN = Path("antigravity-acp") / "acp_token.json"
 ACPX_CONFIG = Path.home() / ".acpx" / "config.json"
@@ -782,7 +813,11 @@ def _agy_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> 
         # The server refuses every write and tool without it; --no-terminal and
         # --no-fs leave only the server's own tools, inside the Seatbelt profile.
         "--approve-all", "--no-terminal", "--no-fs", "--prompt-retries", "0",
-        "--format", "json", "exec", "--file", str(message),
+        "--format", "json", "exec",
+        # acpx applies the model first, so the level is the applied model's.
+        # The server refuses a level that model does not offer, before the prompt.
+        *(["--config-option", f"{AGY_EFFORT_OPTION}={lane.effort}"] if lane.effort else []),
+        "--file", str(message),
     ]
     return Launch(argv, None, env_set={"GEMINI_HOME": str(home), "XCHECK_ROOT": str(ROOT),
                                        "TMPDIR": str(home / "tmp"), "UV_CACHE_DIR": str(uv),
@@ -967,6 +1002,30 @@ def _error_text(error: dict) -> str:
     return _clip(f"{'/'.join(codes)}: {text}" if codes else text, 300)
 
 
+def diagnostic_notes(diagnostics) -> list[str]:
+    """One operator note per diagnostic, in recorded order. Kinds noted
+    elsewhere (display, a native OpenCode failure) are skipped here."""
+    notes = []
+    for d in diagnostics:
+        if d["kind"] == "mcp_startup":
+            notes.append(f"MCP startup {d['server']}: {d['status']}")
+        elif d["kind"] == "auth":
+            notes.append(f"auth source: {d['label']}")
+        elif d["kind"] == "native_error":
+            notes.append(f"native error: {d['type']}")
+        elif d["kind"] == "provider_error":
+            detail = f" [{d['detail']}]" if "detail" in d else ""
+            correlation = "; ".join(f"{key.replace('_', ' ')}: {d[key]}"
+                                    for key in ("request_id", "message_id") if key in d)
+            notes.append(f"Claude provider error{detail}" + (f"; {correlation}" if correlation else ""))
+        elif d["kind"] == "mcp_policy":
+            outcome = d["outcome"]
+            label = "POLICY VIOLATION" if outcome == "succeeded" else "MCP policy warning"
+            notes.append(f"{label}: unapproved tool {d['tool']} {outcome}; "
+                         f"{'execution unconfirmed; ' if outcome == 'attempted' else ''}billing unknown")
+    return notes
+
+
 @dataclass
 class Reader:
     """One lane's stream. Codex and Claude read their native streams (the
@@ -1025,25 +1084,7 @@ class Reader:
         return reader
 
     def notes(self) -> list[str]:
-        notes = []
-        for d in self.diagnostics:
-            if d["kind"] == "mcp_startup":
-                notes.append(f"MCP startup {d['server']}: {d['status']}")
-            elif d["kind"] == "auth":
-                notes.append(f"auth source: {d['label']}")
-            elif d["kind"] == "native_error":
-                notes.append(f"native error: {d['type']}")
-            elif d["kind"] == "provider_error":
-                detail = f" [{d['detail']}]" if "detail" in d else ""
-                correlation = "; ".join(f"{key.replace('_', ' ')}: {d[key]}"
-                                        for key in ("request_id", "message_id") if key in d)
-                notes.append(f"Claude provider error{detail}" + (f"; {correlation}" if correlation else ""))
-            else:
-                outcome = d["outcome"]
-                label = "POLICY VIOLATION" if outcome == "succeeded" else "MCP policy warning"
-                notes.append(f"{label}: unapproved tool {d['tool']} {outcome}; "
-                             f"{'execution unconfirmed; ' if outcome == 'attempted' else ''}billing unknown")
-        return notes
+        return diagnostic_notes(self.diagnostics)
 
     def native(self):
         """The kind's own stream reader, for a harness whose first-party

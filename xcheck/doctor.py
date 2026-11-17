@@ -50,7 +50,7 @@ def check() -> int:
         problem = adapters.unavailable(adapters.Lane(kind, ""))
         print(f"FAIL {kind}: {problem}" if problem else f"ok   {kind}: {ok}")
         bad += bool(problem)
-    blocked = adapters.unavailable(adapters.Lane("agy", "gemini-3.8-flash"))
+    blocked = adapters.unavailable(adapters.Lane("agy", ""))
     stamp = adapters.AGY_ACP_DIR / "VERSION"
     installed = stamp.read_text().strip() if stamp.is_file() else None
     version = installed or "unknown (verify the installed ACP server)"
@@ -61,7 +61,6 @@ def check() -> int:
           f"ok   agy server: {listed} matches the ACP registry" if installed == listed else
           f"new     agy server: ACP registry lists {listed}, installed {installed or 'unknown'}; "
           f"replace agy_acp_server.par and localharness_external together from that release")
-    inventory = None if blocked else agy.inventory()
     pins = (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)
     providers = {"opencode"} | {p.model.split("/", 1)[0] for p in pins if p.kind == "opencode"}
     if any(p.kind == "cline" for p in pins):
@@ -78,11 +77,12 @@ def check() -> int:
     catalogs, listings = {}, {}
     for peer in pins:
         if peer.kind == "agy":
-            ok = inventory is not None and peer.model in inventory
-            print(f"{'ok  ' if ok else 'FAIL'} agy model {peer.model} " +
-                  ("advertised by the ACP server" if ok else "NOT advertised by the ACP server"
-                   if inventory is not None else "unchecked: no ACP model list"))
-            bad += not ok
+            # The same zero-turn check lane admission runs, per pinned selector.
+            problem = "unchecked: Agy startup is unavailable (above)" if blocked else agy.admission(peer)
+            print(f"FAIL agy model {peer.model}: {problem}" if problem else
+                  f"ok   agy model {peer.model} advertised by the ACP server" +
+                  (f" with thinking level {peer.effort}" if peer.effort else ""))
+            bad += bool(problem)
         elif peer.kind == "cline":
             problem = adapters.unavailable(peer)
             verdict = verdicts.get(f"cline:{peer.model}", "unknown")

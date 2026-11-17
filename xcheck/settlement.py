@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import activity, validate
+from . import activity, adapters, validate
 from .files import atomic_write, now
 
 
@@ -69,6 +69,7 @@ def publish(run, name: str, reader, outcome: Outcome, *, context: str = "") -> d
     if context and context != reason:
         notes.insert(0, context)
     diagnostics = [*reader.diagnostics, *outcome.diagnostics]
+    notes.extend(adapters.diagnostic_notes(outcome.diagnostics))
     notes.extend(f"display unavailable: {d['error']}" for d in outcome.diagnostics if d.get("kind") == "display")
     if status == "failed" and run.lane(name).kind == "opencode":
         try:

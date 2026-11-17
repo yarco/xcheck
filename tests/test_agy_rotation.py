@@ -84,7 +84,7 @@ class RotationBeforeAdmission(unittest.TestCase):
         cmd, log = rotator(self.root)
         cfg = self.root / "local.json"
         cfg.write_text(json.dumps({"agy_rotate_command": str(cmd)}))
-        result = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "agy:gemini-3.8-flash-high",
+        result = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "agy:gemini-3.8-flash:high",
                              "--mode", "headless", capacity="reserve-low", env_extra={"XCHECK_CONFIG": str(cfg)})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calls(log), [["auto", "--need", "gemini-5h,gemini-weekly", "--above", "10"]])
@@ -97,7 +97,7 @@ class RotationBeforeAdmission(unittest.TestCase):
         cmd, log = rotator(self.root)
         cfg = self.root / "local.json"
         cfg.write_text(json.dumps({"agy_rotate_command": str(cmd)}))
-        result = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "agy:gemini-3.8-flash-high",
+        result = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "agy:gemini-3.8-flash:high",
                              "--mode", "headless", "--skip-capacity", env_extra={"XCHECK_CONFIG": str(cfg)})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calls(log), [])

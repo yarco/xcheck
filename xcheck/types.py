@@ -44,3 +44,6 @@ class Launch:
     stdin: Path | None
     env_set: dict[str, str] = field(default_factory=dict)
     kind: str = ""
+    # Observations made while building the launch (e.g. an MCP server it disabled),
+    # recorded with the lane's other diagnostics.
+    diagnostics: list[dict] = field(default_factory=list)

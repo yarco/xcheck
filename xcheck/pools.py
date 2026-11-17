@@ -15,7 +15,7 @@ from pathlib import Path
 POLL = 0.2
 GATE_POLL = 0.05
 DEFAULT_LIMIT = 2
-# Two ordinary Flash + Argon reviews may overlap; no run gets special priority.
+# Two ordinary Hydrogen + Argon reviews may overlap; no run gets special priority.
 LIMITS = {"agy-gemini": 4}
 OWNER = "xcheck-lane-permits-v1"
 

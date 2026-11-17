@@ -418,7 +418,9 @@ def _agy(lane: Lane) -> dict[str, float]:
 
 
 def agy_buckets(model: str) -> tuple[str, ...]:
-    """The /usage buckets an Agy model draws on: Argon has its own weekly-only bucket."""
+    """The /usage buckets an Agy model draws on. Argon has its own weekly-only
+    bucket; every other Gemini model (Flash, Hydrogen) draws the shared 5 h and
+    weekly buckets, and /usage reports no per-model bucket for them."""
     return ("gemini-argon-wtu-weekly",) if "argon" in model else ("gemini-5h", "gemini-weekly")
 
 

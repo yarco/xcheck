@@ -107,7 +107,7 @@ class Controls(unittest.TestCase):
 
     def test_an_unprovable_mcp_selection_skips_before_spending(self):
         with patch.object(adapters, "_codex_mcp_enabled", return_value=SERVERS):  # overrides ignored
-            with self.assertRaisesRegex(adapters.Unavailable, "still enables unapproved"):
+            with self.assertRaisesRegex(adapters.Unavailable, r"ignored the override disabling MCP server\(s\) \['keenable', 'perplexity'\]"):
                 adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
         with patch.object(adapters, "_codex_mcp_enabled", side_effect=ValueError("exit 1")):
             with self.assertRaisesRegex(adapters.Unavailable, "could not be proved"):
@@ -130,6 +130,49 @@ class Controls(unittest.TestCase):
                 with self.assertRaises(adapters.Unavailable):
                     adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), True)
         self.assertFalse(adapters._codex_review_mcp({"name": "you-free", "transport": {"type": "streamable_http"}}, True))
+
+    def reads(self, first, proof, web=True):
+        """A launch over two listings: `first` decides, `proof` answers the re-read."""
+        def listing(features, overrides, env, work):
+            if not overrides:
+                return first
+            off = {o.split(".")[1] for o in overrides if o.startswith("mcp_servers.")}
+            return [s for s in proof if s["name"] not in off]
+        with patch.object(adapters, "_codex_mcp_enabled", side_effect=listing):
+            return adapters.launch(PEER, Path("/w"), Path("/m"), Path("/l"), web)
+
+    def test_a_probe_that_turns_unknown_on_the_proof_read_keeps_the_lane(self):
+        # Codex re-probes OAuth discovery on every read; a timeout reads
+        # `unknown`. The first read observed the credentials, so a kept server
+        # flipping to `unknown` is not a reason to drop the reviewer.
+        free = server("you-free", "streamable_http", url=adapters.REVIEW_FREE_MCP["you-free"], auth="not_logged_in")
+        spec = self.reads([*SERVERS, free], [*SERVERS, {**free, "auth_status": "unknown"}])
+        self.assertNotIn("mcp_servers.you-free.enabled=false", spec.argv)
+        self.assertEqual(spec.diagnostics, [])
+
+    def test_an_unknown_credential_state_on_the_first_read_disables_that_server_and_reports_it(self):
+        free = server("you-free", "streamable_http", url=adapters.REVIEW_FREE_MCP["you-free"], auth="unknown")
+        spec = self.reads([*SERVERS, free], [*SERVERS, {**free, "auth_status": "not_logged_in"}])
+        self.assertIn("mcp_servers.you-free.enabled=false", spec.argv)
+        self.assertEqual(spec.diagnostics, [dict(kind="mcp_startup", server="you-free", status=(
+            "disabled: Codex could not determine its credential state (auth_status unknown)"))])
+        self.assertEqual(adapters.diagnostic_notes(spec.diagnostics),
+                         ["MCP startup you-free: disabled: Codex could not determine its credential state "
+                          "(auth_status unknown)"])
+        # An unknown server the review would refuse anyway is not reported as dropped.
+        odd = server("exa", "streamable_http", url="https://mcp.exa.ai/mcp", auth="unknown")
+        self.assertEqual(self.reads([*SERVERS, odd], SERVERS).diagnostics, [])
+
+    def test_the_proof_read_refuses_anything_the_first_read_did_not_keep(self):
+        free = server("you-free", "streamable_http", url=adapters.REVIEW_FREE_MCP["you-free"])
+        for case, proof in (
+                ("new server", [*SERVERS, free, server("pond", command="pond")]),
+                ("credential appeared", [*SERVERS, {**free, "auth_status": "o_auth"}]),
+                ("bearer token", [*SERVERS, {**free, "auth_status": "bearer_token"}]),
+                ("transport changed", [*SERVERS, {**free, "transport": {**free["transport"], "url": "https://evil.example/mcp"}}]),
+                ("status vanished", [*SERVERS, {k: v for k, v in free.items() if k != "auth_status"}])):
+            with self.subTest(case=case), self.assertRaisesRegex(adapters.Unavailable, "outside the first read's"):
+                self.reads([*SERVERS, free], proof)
 
     def test_a_stored_login_disqualifies_an_approved_keyless_server(self):
         free = server("you-free", "streamable_http", url=adapters.REVIEW_FREE_MCP["you-free"])
@@ -182,6 +225,27 @@ class Lanes(unittest.TestCase):
                 self.assertEqual(row["status"], "skipped", row)
                 self.assertIn("MCP", row["reason"])
                 self.assertFalse((self.base / "lanes" / PEER.name / "stream.jsonl").exists())
+
+    def test_the_proof_read_tolerates_a_probe_flip_and_reports_a_dropped_server(self):
+        for auth, disabled, note in (("not_logged_in/unknown", False, None),
+                                     ("unknown/not_logged_in", True,
+                                      "MCP startup you-free: disabled: Codex could not determine its credential state")):
+            with self.subTest(auth=auth):
+                if (self.base / ".launched").exists():
+                    self.base = support.EndToEnd.second_base(self)
+                out = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "codex:gpt-6.2-sol:high",
+                                  "--mode", "headless", "--skip-capacity", mode="custody",
+                                  env_extra={"FAKE_CODEX_YOU_AUTH": auth})
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                row = json.loads((self.base / "lanes" / PEER.name / "exit.json").read_text())
+                self.assertEqual(row["status"], "done", row)
+                argv = json.loads((support.workpath(self.root, self.base, PEER) / "probe.json").read_text())["argv"]
+                self.assertEqual("mcp_servers.you-free.enabled=false" in argv, disabled)
+                if note:
+                    self.assertIn(note, row["reason"])
+                    self.assertEqual([d["server"] for d in row["diagnostics"] if d["kind"] == "mcp_startup"], ["you-free"])
+                else:
+                    self.assertNotIn("MCP startup", row["reason"])
 
     def test_the_native_child_holds_the_pool_and_reads_the_message_on_stdin(self):
         out = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes",

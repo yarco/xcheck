@@ -163,13 +163,9 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
             # remain visible without spending a model turn.
             from . import agy
             atomic_write(d / "phase.json", json.dumps(dict(phase="checking_models")))
-            models = agy.inventory()
-            if models is None:
-                return finish("skipped", "inventory-unknown: no ACP model list; availability is unconfirmed")
-            if lane.model not in models:
-                return finish("skipped",
-                              f"model-unavailable: {lane.model} is not advertised by the ACP server; "
-                              "no inference or automatic substitution; refresh the selector after an inventory check")
+            problem = agy.admission(lane)
+            if problem:
+                return finish("skipped", problem)
         started = time.time()  # when spending can start; exit.json records wall time
         outcome.started = started
         _stage(run, work)  # this run/lane alone owns the workspace
@@ -207,6 +203,7 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
             spec = adapters.launch(lane, work, message, log, run.web, run.store(name))
         except adapters.Unavailable as e:
             return finish("skipped", str(e))
+        outcome.diagnostics.extend(spec.diagnostics)
         env = lane_env(spec, work)
         if spec.kind == "grok":
             # Zero-inference admission gate: the resolved toolset, hooks, MCP

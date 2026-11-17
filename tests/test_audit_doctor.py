@@ -42,7 +42,7 @@ class ExactListedModels(unittest.TestCase):
                              return_value=support.grok_probe_ok(Path(probe_tmp))), \
                 patch.object(models, 'discover', return_value={"providers": {}, "models": []}), \
                 patch.object(agy, 'registry_version', return_value=None), \
-                patch.object(agy, 'inventory', return_value=['gemini-3.8-flash', 'gemini-4-argon']), \
+                patch.object(agy, 'inventory', side_effect=support.agy_offer()), \
                 redirect_stdout(io.StringIO()) as output:
             code = doctor.check()
         return (code, output.getvalue())

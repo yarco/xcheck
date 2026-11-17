@@ -748,6 +748,9 @@ class FreeRoster(unittest.TestCase):
             self.assertEqual([lane.model for lane in adapters.free_lanes(path)],
                              ["opencode/glm-5.3-flash-free", "openrouter/x/y:free"])
 
-    def test_opt_in_is_devin_plus_the_roster_file(self):
-        self.assertEqual(adapters.OPT_IN[0], adapters.Lane("devin", "swe-2-max"))
-        self.assertEqual(adapters.OPT_IN[1:], adapters.free_lanes())
+    def test_opt_in_is_the_hand_pins_plus_the_roster_file(self):
+        self.assertEqual(adapters.PINNED_OPT_IN,
+                         (adapters.Lane("devin", "swe-2-max"), adapters.Lane("agy", "gemini-3.8-flash", "high")))
+        n = len(adapters.PINNED_OPT_IN)
+        self.assertEqual(adapters.OPT_IN[:n], adapters.PINNED_OPT_IN)
+        self.assertEqual(adapters.OPT_IN[n:], adapters.free_lanes())

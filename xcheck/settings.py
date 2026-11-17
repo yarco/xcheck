@@ -98,4 +98,4 @@ def apply() -> None:
         claude_auth.LOGIN_COMMAND = data["claude_login_command"]
     if "free_roster" in data:
         adapters.FREE_ROSTER = data["free_roster"]
-        adapters.OPT_IN = (adapters.Lane("devin", "swe-2-max"), *adapters.free_lanes(adapters.FREE_ROSTER))
+        adapters.OPT_IN = (*adapters.PINNED_OPT_IN, *adapters.free_lanes(adapters.FREE_ROSTER))

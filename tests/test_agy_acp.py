@@ -17,7 +17,7 @@ from xcheck import adapters, pools  # noqa: E402
 
 FIX = support.FIX
 LANE = "agy-gemini-3.8-flash-high"
-PEER = adapters.Lane("agy", "gemini-3.8-flash-high")
+PEER = adapters.Lane("agy", "gemini-3.8-flash", "high")
 
 
 def read(lines) -> adapters.Reader:
@@ -30,6 +30,12 @@ def read(lines) -> adapters.Reader:
 
 def rpc(**fields):
     return {"jsonrpc": "2.0", **fields}
+
+
+def refusal(message):
+    """acpx's own error frame (no id), as `--format json` prints it."""
+    return json.dumps(rpc(id=None, error={"code": -32603, "message": message,
+                                           "data": {"acpxCode": "RUNTIME", "origin": "cli"}})) + "\n"
 
 
 def chunk(text):
@@ -194,7 +200,7 @@ class Lanes(unittest.TestCase):
     xcheck = support.EndToEnd.xcheck
     second_base = support.EndToEnd.second_base
 
-    def agy(self, mode="ok", env=None, lanes=f"agy:gemini-3.8-flash-high"):
+    def agy(self, mode="ok", env=None, lanes=f"agy:gemini-3.8-flash:high"):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--skip-capacity", mode=mode, env_extra=env)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
@@ -274,7 +280,7 @@ class Lanes(unittest.TestCase):
 
     def test_dead_runner_recovers_acp_completion_and_checks_acpx_cwd(self):
         from xcheck import files, run
-        peer = adapters.Lane("agy", "gemini-3.8-flash-high")
+        peer = adapters.Lane("agy", "gemini-3.8-flash", "high")
         good = f"1) VERDICT: The contract holds.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n"
         for complete in (False, True):
             with self.subTest(complete=complete):
@@ -340,7 +346,7 @@ class Lanes(unittest.TestCase):
             config.write_text(text)
             with patch.object(adapters, "ACPX_CONFIG", config), \
                     patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}"}):
-                self.assertIn(expected, adapters.unavailable(adapters.Lane("agy", "gemini-3.8-flash-high")))
+                self.assertIn(expected, adapters.unavailable(adapters.Lane("agy", "gemini-3.8-flash", "high")))
 
     def test_acpx_config_must_be_an_object(self):
         config = self.root / "acpx-config.json"
@@ -357,8 +363,8 @@ class Lanes(unittest.TestCase):
                 patch.dict(os.environ, {"ACPX_AUTH_TOKEN": "synthetic", "TEST_API_KEY": "synthetic"}), \
                 patch.object(adapters, "agy_login"), \
                 patch.object(agy.subprocess, "run") as execute:
-            execute.return_value = subprocess.CompletedProcess([], 1, "Available models: gemini-flash-agent\n", "")
-            self.assertEqual(agy.inventory(), ["gemini-flash-agent"])
+            execute.return_value = subprocess.CompletedProcess([], 1, refusal("Available models: gemini-flash-agent"), "")
+            self.assertEqual(agy.inventory(), agy.Inventory(("gemini-flash-agent",)))
         argv = execute.call_args.args[0]
         self.assertEqual(shlex.split(argv[argv.index("--agent") + 1]), [str(server)])
         env = execute.call_args.kwargs["env"]
@@ -370,7 +376,130 @@ class Lanes(unittest.TestCase):
         from xcheck import agy
         with patch.object(adapters, "AGY_ACP_SERVER", self.root / "agy-acp" / "agy_acp_server.par"), \
                 patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}"}):
-            self.assertEqual(agy.inventory(), ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"])
+            self.assertEqual(agy.inventory(), agy.Inventory(tuple(support.AGY_LEVELS)))
+
+    def test_a_model_probe_reads_its_thinking_levels_and_ends_before_any_prompt(self):
+        # Hydrogen is applied (it is not the server's default); Flash is the
+        # default, so acpx sends no model option and the levels come from
+        # session/new. Either way the refused probe option ends the session.
+        from xcheck import agy
+        calls = []
+        real = subprocess.run
+
+        def run(cmd, **kwargs):
+            out = real(cmd, **kwargs)
+            calls.append(out.stdout)
+            return out
+        with patch.object(adapters, "AGY_ACP_SERVER", self.root / "agy-acp" / "agy_acp_server.par"), \
+                patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}"}), \
+                patch.object(agy.subprocess, "run", side_effect=run):
+            for model in ("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-4-argon"):
+                with self.subTest(model=model):
+                    self.assertEqual(agy.inventory(model),
+                                     agy.Inventory(tuple(support.AGY_LEVELS), support.AGY_LEVELS[model]))
+            self.assertEqual(agy.inventory("gemini-unadvertised"), agy.Inventory(tuple(support.AGY_LEVELS)))
+        self.assertTrue(calls)
+        self.assertFalse([c for c in calls if '"session/prompt"' in c], "a probe must never send a prompt")
+
+    def test_a_model_probe_fails_closed_on_any_unexpected_ending(self):
+        from xcheck import agy
+        def frames(*items):
+            return "\n".join(i if isinstance(i, str) else json.dumps(i) for i in items)
+        options = [{"id": "model", "category": "model", "currentValue": "gemini-4-hydrogen",
+                    "options": [{"value": "gemini-4-hydrogen"}]},
+                   {"id": "thinking_level", "category": "thought_level", "currentValue": "high",
+                    "options": [{"value": "high"}, {"value": "xhigh"}]}]
+        applied = rpc(id=2, result={"configOptions": options})
+        probe = rpc(id=3, method="session/set_config_option",
+                    params={"sessionId": "s", "configId": agy.PROBE_OPTION, "value": "none"})
+        refused = rpc(id=3, error={"code": -32602, "message": f"Unknown config option id: {agy.PROBE_OPTION}"})
+        good = frames(applied, probe, refused)
+        self.assertEqual(agy.parse(good, 1, "gemini-4-hydrogen"),
+                         agy.Inventory(("gemini-4-hydrogen",), ("high", "xhigh")))
+        other = [dict(options[0], currentValue="gemini-3.8-flash"), options[1]]
+        cases = {
+            "prompt sent": (frames(applied, probe, PROMPT, refused), 1),
+            "prompt result only": (frames(applied, probe, rpc(id=4, result={"stopReason": "end_turn"}), refused), 1),
+            "acpx exited 0": (good, 0),
+            "probe option accepted": (frames(applied, probe, rpc(id=3, result={})), 1),
+            "refusal of another request": (frames(applied, probe, rpc(id=9, error={
+                "code": -32602, "message": f"bad {agy.PROBE_OPTION}"})), 1),
+            "refusal with another code": (frames(applied, probe, rpc(id=3, error={"code": -32603, "message": "x"})), 1),
+            "model not applied": (frames(rpc(id=2, result={"configOptions": other}), probe, refused), 1),
+            "later empty snapshot": (frames(applied, rpc(id=2, result={"configOptions": []}), probe, refused), 1),
+            "no config options": (frames(probe, refused), 1),
+            "level option renamed": (frames(rpc(id=2, result={"configOptions": [
+                options[0], dict(options[1], id="effort")]}), probe, refused), 1),
+            "bad level id": (frames(rpc(id=2, result={"configOptions": [
+                options[0], dict(options[1], options=[{"value": "x y"}])]}), probe, refused), 1),
+            "catalog lists the named model": (refusal("Available models: gemini-4-hydrogen"), 1),
+        }
+        for case, (stdout, code) in cases.items():
+            with self.subTest(case=case):
+                self.assertIsNone(agy.parse(stdout, code, "gemini-4-hydrogen"))
+        # Unrelated text never counts as acpx's refusal, and odd frames never raise.
+        noise = frames("server log: Available models: gemini-4-argon", rpc(id=5, error={
+            "code": -32603, "message": "Available models: gemini-4-argon"}),
+            rpc(method="session/update", params=["not", "an", "object"]), applied, probe, refused)
+        self.assertEqual(agy.parse(noise, 1, "gemini-4-hydrogen"), agy.Inventory(("gemini-4-hydrogen",), ("high", "xhigh")))
+        self.assertIsNone(agy.parse(good, 1, None), "the catalog read names no model")
+
+    def test_admission_reads_the_catalog_for_a_bare_selector_and_levels_for_an_effort(self):
+        from xcheck import agy
+        calls = []
+        def inventory(model=None):
+            calls.append(model)
+            return support.agy_offer()(model)
+        with patch.object(agy, "inventory", side_effect=inventory):
+            self.assertIsNone(agy.admission(adapters.Lane("agy", "gemini-4-argon")))
+            self.assertIsNone(agy.admission(adapters.Lane("agy", "gemini-4-hydrogen", "xhigh")))
+            self.assertIn("does not offer thinking level xhigh (offers low, medium, high)",
+                          agy.admission(adapters.Lane("agy", "gemini-4-argon", "xhigh")))
+        self.assertEqual(calls, [None, "gemini-4-hydrogen", "gemini-4-argon"])
+        with patch.object(agy, "inventory", return_value=agy.Inventory(("gemini-4-hydrogen",))):
+            self.assertIn("inventory-unknown: no ACP thinking-level list",
+                          agy.admission(adapters.Lane("agy", "gemini-4-hydrogen", "xhigh")))
+        with patch.object(agy, "inventory", return_value=None):
+            self.assertIn("inventory-unknown", agy.admission(adapters.Lane("agy", "gemini-4-argon")))
+
+    def test_a_lane_effort_reaches_the_server_after_its_model(self):
+        peer = adapters.Lane("agy", "gemini-4-hydrogen", "xhigh")
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "agy:gemini-4-hydrogen:xhigh",
+                        "--mode", "headless", "--skip-capacity", mode="custody")
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        row = json.loads((self.base / "lanes" / peer.name / "exit.json").read_text())
+        self.assertEqual(row["status"], "done", row)
+        probe = json.loads((support.workpath(self.root, self.base, peer) / "probe.json").read_text())
+        self.assertEqual(probe["config"], {"model": "gemini-4-hydrogen", "thinking_level": "xhigh"})
+        # What the server holds when the prompt arrives, not just what was sent.
+        self.assertEqual(probe["agy_effective"], {"model": "gemini-4-hydrogen", "thinking_level": "xhigh"})
+        run = json.loads((self.base / "run.json").read_text())
+        self.assertEqual(run["lanes"][peer.name], {"kind": "agy", "model": "gemini-4-hydrogen", "effort": "xhigh"})
+
+    def test_an_effort_the_model_does_not_offer_skips_without_inference(self):
+        peer = adapters.Lane("agy", "gemini-4-argon", "xhigh")
+        p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "agy:gemini-4-argon:xhigh",
+                        "--mode", "headless", "--skip-capacity")
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        d = self.base / "lanes" / peer.name
+        row = json.loads((d / "exit.json").read_text())
+        self.assertEqual(row["status"], "skipped", row)
+        self.assertIn("model-unavailable: gemini-4-argon does not offer thinking level xhigh "
+                      "(offers low, medium, high)", row["reason"])
+        self.assertFalse((d / "staged").exists())
+
+    def test_the_launch_sets_the_level_only_when_the_lane_names_one(self):
+        work, log = self.root / "w", self.root / "l" / "harness.log"
+        work.mkdir()
+        log.parent.mkdir()
+        for lane, expected in ((adapters.Lane("agy", "gemini-4-hydrogen", "xhigh"), ["thinking_level=xhigh"]),
+                               (adapters.Lane("agy", "gemini-4-argon"), [])):
+            with self.subTest(lane=lane.name), patch.object(adapters, "agy_login"):
+                argv = adapters.launch(lane, work, self.root / "m.txt", log, True).argv
+                tail = argv[argv.index("exec") + 1:]
+                self.assertEqual([tail[i + 1] for i, a in enumerate(tail) if a == "--config-option"], expected)
+                self.assertEqual(tail[-2:], ["--file", str(self.root / "m.txt")])
+                self.assertEqual(argv[argv.index("--model") + 1], lane.model)
 
     def test_unknown_inventory_skips_without_claiming_model_disappearance(self):
         row = self.agy("models-unavailable")
@@ -397,19 +526,19 @@ class Lanes(unittest.TestCase):
     def test_advertised_model_sentence_ignores_trailing_prose_and_space(self):
         from xcheck import agy
         for tail in [". Use --model to choose.", ".   "]:
-            text = "Available models: gemini-3.8-flash-high, gemini-3.8-flash-low" + tail
+            text = refusal("Available models: gemini-3.8-flash-high, gemini-3.8-flash-low" + tail)
             with self.subTest(tail=tail), patch.object(adapters, "agy_login"), \
                     patch.object(agy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
-                self.assertEqual(agy.inventory(), ["gemini-3.8-flash-high", "gemini-3.8-flash-low"])
+                self.assertEqual(agy.inventory(), agy.Inventory(("gemini-3.8-flash-high", "gemini-3.8-flash-low")))
 
     def test_advertised_model_list_drops_the_sentence_period(self):
         from xcheck import agy
-        text = ('Cannot apply --model "x": the ACP agent did not advertise that model. '
-                'Available models: gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-3.8-flash-low.')
+        text = refusal('Cannot apply --model "x": the ACP agent did not advertise that model. '
+                       'Available models: gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-3.8-flash-low.')
         with patch.object(adapters, "agy_login"), \
                     patch.object(agy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, text, "")):
             self.assertEqual(agy.inventory(),
-                             ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"])
+                             agy.Inventory(("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low")))
 
 
 if __name__ == "__main__":
