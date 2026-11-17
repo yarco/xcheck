@@ -25,7 +25,7 @@ The host must retain a wait or provide a verified completion callback to promise
 
 | Question | Authority and refresh rule |
 |---|---|
-| What is selected? | `adapters.py` defines defaults and the pinned opt-ins (Devin, Gemini Flash); optional OpenCode/Cline lanes come from the configured local free-roster file (default `~/.local/state/xcheck/free-roster.json`); `BASE/run.json` records this run's exact selectors, efforts and settings. Default-roster edits are deliberate |
+| What is selected? | `adapters.py` defines defaults and the pinned opt-ins (Devin, Gemini Flash); the local free roster supplies automatic OpenCode/Cline lanes when `free_lanes_per_provider` is set. `--add` appends explicit selectors; `BASE/run.json` records this run's exact selectors, efforts and settings. Default-roster edits are deliberate |
 | What can launch now? | Fresh native startup/model inventory and capacity checks under admission; failed reads mean unknown, not absent |
 | What is free now? | Live provider prices and served IDs from `xcheck models`; no saved-price fallback. A free roster records dated lane-check results, never authoritative prices. Native client cache is advisory support metadata only |
 | What did peers review? | `BASE/.packet`, captured at launch; later edits to inputs or reused lane workspaces cannot revise it |
@@ -87,11 +87,15 @@ Check current native inventory and access: a pin is not an availability promise.
 An absent exact model skips before inference; an unreadable inventory is unknown.
 Never substitute a model, lower effort or enable a paid route to repair admission.
 
-Devin (`--add devin:swe-2-max`), Gemini Flash (`--add agy:gemini-3.8-flash:high`),
-OpenCode and Cline are opt-in. Flash and Hydrogen draw the same Gemini quota
-buckets, so adding Flash adds to that drain without another allowance. `--add` selects an
-extra lane; `--lanes` replaces the roster. A configured local free-roster file can
-supply optional selectors, but xcheck installs no producer or scheduler. Live
+Devin (`--add devin:swe-2-max`) and Gemini Flash
+(`--add agy:gemini-3.8-flash:high`) are pinned add-ons. Flash and Hydrogen draw
+from the same Gemini quota buckets. Set `free_lanes_per_provider` to draw up to
+that many OpenCode/Cline lanes per provider from the local roster's latest
+successful observations. The selector rotates choices per run and avoids
+model families already selected with `--add`. Each automatic lane needs
+current zero-price confirmation before inference. Keep recognized free offers
+out of `default_lanes`. Both default runs and `doctor` reject a recognized
+free pin. See the [selection rule](docs/local-integration.md). Live
 `xcheck models` discovery checks provider-owned prices and served IDs without
 inference; it does not certify tool use or review quality. Trial credits are not
 standing free access. Check data terms before sharing any packet.
@@ -103,19 +107,21 @@ launching every available offer; same-family routes remain correlated.
 
 ### Cline free models
 
-Cline uses its native headless stream, not ACP, and remains opt-in. It requires
-native login and exact free-route admission; it has no non-inference quota meter.
+Cline uses its native headless stream. Select it explicitly or from the
+configured automatic free roster. It requires native login and exact
+free-route admission and has no non-inference quota meter.
 See [Cline discovery and completion](docs/reference.md#cline-free-models).
 
 ### Additional free providers through OpenCode
 
 Kilo uses the native OpenCode ACP lane with an isolated store and no credential.
-It is opt-in and is rechecked for free eligibility before launch. Other providers
-retain their own access requirements. See [provider and optional-roster contracts](docs/reference.md#additional-free-providers-through-opencode).
+Select it explicitly or from the automatic free roster. Admission rechecks free
+eligibility. Other providers retain their own access requirements.
+See [provider and optional-roster contracts](docs/reference.md#additional-free-providers-through-opencode).
 
 ## Routine review planning and qualification
 
-A routine code review uses Codex, Claude, Grok, Gemini Hydrogen and Gemini Argon, excluding its orchestrator. Add Devin explicitly when another independent code reviewer is wanted and its selected offer and access are verified. xcheck reads no Devin quota (its daily and weekly plan windows show only in Herdr's Agent Usage sidebar and the Devin header), so it remains opt-in. Keep all supported adapters and the free roster available; routine roster membership is a review-quality decision, separate from endpoint availability. Keep OpenCode in use when its models fit the task: select one or two qualified models for a focused question rather than launching every free offer on the same broad audit. Stage the complete relevant files, focused delta and existing test results; use packet mode when no current external evidence is needed, and ask for targeted checks only. One review prompt can cause many inference requests as the agent reads and uses tools; a successful maintenance ping does not reserve capacity for that review. A model-specific 429 is a coverage gap for that lane, not evidence that every OpenCode model should be dropped. Preserve each selected model's pinned/default effort; do not lower it to repair output formatting.
+A routine code review uses Codex, Claude, Grok, Gemini Hydrogen and Gemini Argon, excluding its orchestrator. Add Devin explicitly when another independent code reviewer is wanted and its selected offer and access are verified. xcheck reads no Devin quota (its daily and weekly plan windows show only in Herdr's Agent Usage sidebar and the Devin header), so it remains opt-in. Keep all supported adapters and the free roster available; routine roster membership is a review-quality decision, separate from endpoint availability. Use a small selection of qualified free models that fit the task. Automatic selection applies the local provider cap to each default run. Stage the complete relevant files, focused delta and existing test results; use packet mode when no current external evidence is needed, and ask for targeted checks only. One review prompt can cause many inference requests as the agent reads and uses tools; a successful maintenance ping does not reserve capacity for that review. A model-specific 429 is a coverage gap for that lane, not evidence that every OpenCode model should be dropped. Preserve each selected model's pinned/default effort; do not lower it to repair output formatting.
 
 Run the required suite once on the capable host and stage its exact command, result and environment limitations with the complete source. Peers review the focused delta and relevant contracts, with the whole tree available. A peer may run a targeted reproduction for a concrete finding. It must not repeatedly run the full suite, repair its sandbox, or edit the reviewed implementation. An environment-blocked check is a limitation, not a code defect; record it and finish the review. A comprehensive scope is an explicit task choice, not a reason to keep investigating after the requested evidence is established.
 

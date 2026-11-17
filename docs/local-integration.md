@@ -20,7 +20,8 @@ Optional `~/.config/xcheck/config.json` is read at each command invocation. `XCH
     "a": "/absolute/path/to/opencode-a.db",
     "b": "/absolute/path/to/opencode-b.db"
   },
-  "opencode_lanes_per_account": 5
+  "opencode_lanes_per_account": 5,
+  "free_lanes_per_provider": 2
 }
 ```
 
@@ -44,7 +45,34 @@ drain. Prefer installing between runs, and do not relaunch pending work.
 
 The helper path and optional roster path preserve the existing default locations when omitted. Existing `XCHECK_AGY_ACP_DIR` and `XCHECK_GROK_HOME` overrides remain supported; they are local installation/test settings, not credentials. Native login stores remain native. Do not put tokens in this JSON or commit an environment dump.
 
-`free_roster` points to an optional JSON object such as `{"lanes":["opencode:provider/model"]}`. Missing/unreadable roster files produce no optional free lanes. The file is a selection aid, not proof of current price, availability or quality. `xcheck models` checks provider sources live; an external qualification job is not bundled. `doctor` checks optional roster pins as well as defaults.
+`free_roster` points to an optional JSON file with a `lanes` array of exact
+selectors. The default path is `~/.local/state/xcheck/free-roster.json`.
+An external qualification job owns that file. A missing or unreadable file
+contributes zero automatic lanes.
+
+`free_lanes_per_provider` sets the maximum number of automatic free lanes per
+provider in a run without `--lanes`. The default is `0`. Selection reads one
+snapshot at launch and requires a ready entry in `client_readiness.states` and a
+matching record in `models`. The record must have zero `ping_strikes` and a
+`last_probe_at` matching `updated_at`, plus an answered `last_ping` or first
+qualification (`onboarded`) in that refresh. A file with only the `lanes` array
+still supplies explicit roster suggestions.
+
+Selection gives each provider a slot before offering it a second and
+rotates candidate order using the canonical run path. Maximum matching fills as
+many slots as possible without repeating a model family across providers.
+Families compare the final model ID segment after dropping the free-route
+suffix. Explicit `--add` lanes are kept and reserve their families before
+automatic selection. The exact selectors and the automatic lane names
+(`roster_free`) are frozen in `run.json`.
+
+Keep free offers out of `default_lanes`. Default runs and `doctor` reject
+recognizable free selectors and pins present in the current free roster.
+`doctor` reports eligible counts and fails when automatic selection is enabled
+but the file supplies no eligible lanes. Price admission uses current
+provider-owned metadata. An automatic lane whose zero-price offer cannot be
+confirmed skips before inference. The qualification roster does not establish
+current price, local account capacity, or review quality.
 
 `agy_rotate_command` names an optional executable that owns the operator's Antigravity accounts. When a run reads any selected, non-forced Agy lane below its reserve, the supervisor calls it once, before any lane is admitted, as `<cmd> auto --need <bucket,…> --above <pct>`. The needed buckets are the union over every selected Agy lane (Argon's weekly bucket plus the Gemini 5 h and weekly buckets that Flash and Hydrogen share), and the threshold is the run's Agy reserve. The command keeps the current account when it already covers them, otherwise switches the whole account. It receives buckets, not models, so a helper that serves Hydrogen or Argon lanes must itself qualify only accounts that advertise them (see the [reference](reference.md#capacity)); lane admission re-verifies each model and level after any rotation. The switch covers both logins: the ACP server's Keychain login and the `agy` CLI login that answers `/usage` must change together. Exit 0 means a qualifying account is current. Its exit status and last output lines go to `BASE/agy-rotation.json`. Each lane still reads its own pool at admission, so a rotation that failed, found no account, or was refused because another run's Agy lane held the pool leaves the ordinary `reserve-low` skip. `--skip-capacity` never rotates. Without the key nothing rotates.
 

@@ -199,6 +199,10 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
             if blocked:
                 return finish("skipped", blocked)
         atomic_write(d / "phase.json", json.dumps(dict(phase="starting")))
+        if name in run.roster_free and lane.kind == "opencode":
+            from . import models
+            if problem := models.roster_price_problem(lane):
+                return finish("skipped", problem)
         try:
             spec = adapters.launch(lane, work, message, log, run.web, run.store(name))
         except adapters.Unavailable as e:

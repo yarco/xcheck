@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import adapters, agy, grok, install, models
+from . import adapters, agy, freeroster, grok, install, models
 
 MODEL_LISTS = {"grok": ["grok", "models"], "devin": ["devin", "models", "list"]}
 
@@ -61,6 +61,21 @@ def check() -> int:
           f"ok   agy server: {listed} matches the ACP registry" if installed == listed else
           f"new     agy server: ACP registry lists {listed}, installed {installed or 'unknown'}; "
           f"replace agy_acp_server.par and localharness_external together from that release")
+    # Free lanes come from the roster at launch; a default that names one goes
+    # stale the moment the refresh drops it.
+    declared, eligible = freeroster.load(adapters.FREE_ROSTER)
+    for lane in adapters.DEFAULT_ROSTER:
+        if problem := freeroster.default_pin_problem(lane, declared):
+            print(f"FAIL {problem}")
+            bad += 1
+    if freeroster.PER_PROVIDER:
+        counts: dict[str, int] = {}
+        for lane in eligible:
+            counts[freeroster.provider(lane)] = counts.get(freeroster.provider(lane), 0) + 1
+        print(f"{'ok  ' if counts else 'FAIL'} free lanes: {freeroster.PER_PROVIDER} per provider from "
+              f"{adapters.FREE_ROSTER} (eligible: " +
+              (", ".join(f"{p} {n}" for p, n in sorted(counts.items())) or "none") + ")")
+        bad += not counts
     pins = (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)
     providers = {"opencode"} | {p.model.split("/", 1)[0] for p in pins if p.kind == "opencode"}
     if any(p.kind == "cline" for p in pins):

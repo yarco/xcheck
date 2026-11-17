@@ -300,6 +300,27 @@ def native_env(model: str) -> dict[str, str]:
     return {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
 
 
+def roster_price_problem(lane) -> str | None:
+    """Require fresh provider-owned zero pricing for automatic OpenCode lanes."""
+    provider, _, ident = lane.model.partition("/") if "/" in lane.model else ("opencode", "", lane.model)
+    if provider in NATIVE_FREE_PROVIDERS:
+        return None  # launch builds the provider config from its live free inventory
+    source = SOURCES.get(provider)
+    if source is None or source["format"] == "cline":
+        return "inventory-unknown: no trusted price source for this OpenCode provider"
+    try:
+        payload = fetch(source["models_url"])
+        if source["format"] == "zen":
+            rows = zen_join(payload, fetch(source["docs_url"], as_json=False))
+            free = any(row["model"] == ident for row in zen_offers(rows))
+        else:
+            data_rows(payload)
+            free = any(row["model"] == ident for row in priced_candidates(payload, source["models_url"]))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return "inventory-unknown: could not verify live free pricing"
+    return None if free else "free-offer-unconfirmed: provider did not confirm an eligible zero-price offer"
+
+
 def fetch(url: str, *, as_json: bool = True):
     req = urllib.request.Request(url, headers={"User-Agent": "xcheck-models/2", "Cache-Control": "no-cache"})
     with urllib.request.urlopen(req, timeout=20) as response:

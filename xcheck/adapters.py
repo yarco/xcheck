@@ -87,9 +87,13 @@ FREE_ROSTER = Path.home() / ".local" / "state" / "xcheck" / "free-roster.json"
 
 def free_lanes(path: Path = FREE_ROSTER) -> tuple[Lane, ...]:
     try:
-        selectors = json.loads(path.read_text(encoding="utf-8"))["lanes"]
-    except (OSError, ValueError, KeyError, TypeError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return ()
+    return parse_free_lanes(data.get("lanes")) if isinstance(data, dict) else ()
+
+
+def parse_free_lanes(selectors) -> tuple[Lane, ...]:
     lanes = []
     for selector in selectors if isinstance(selectors, list) else ():
         try:
@@ -101,8 +105,8 @@ def free_lanes(path: Path = FREE_ROSTER) -> tuple[Lane, ...]:
     return tuple(lanes)
 
 
-# Supported but never default (`run --add`): the hand-pinned lanes, then the
-# free lanes the daily refresh verified. `xcheck models` marks a ready row
+# Pinned add-ons and the externally maintained free roster. Free lanes may
+# also be selected per default run. `xcheck models` marks a ready row
 # `pinned` when it is here, else `--add` until the next refresh adds it.
 # Flash draws the same Gemini buckets as the default Hydrogen lane.
 PINNED_OPT_IN = (Lane("devin", "swe-2-max"), Lane("agy", "gemini-3.8-flash", "high"))

@@ -22,7 +22,8 @@ def load() -> dict:
         # Config contents and OS error strings can contain private data.
         raise ValueError("cannot read xcheck local configuration as JSON") from error
     paths = {"caller_context_helper", "free_roster", "agy_rotate_command", "claude_login_command"}
-    keys = paths | {"default_lanes", "opencode_accounts", "opencode_lanes_per_account", "pool_concurrency"}
+    keys = paths | {"default_lanes", "free_lanes_per_provider", "opencode_accounts", "opencode_lanes_per_account",
+                    "pool_concurrency"}
     if not isinstance(data, dict) or data.keys() - keys:
         raise ValueError("xcheck local configuration has unknown keys or is not an object")
     for key in paths:
@@ -59,6 +60,10 @@ def load() -> dict:
         limit = data["opencode_lanes_per_account"]
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
             raise ValueError("opencode_lanes_per_account must be a positive integer")
+    if "free_lanes_per_provider" in data:
+        count = data["free_lanes_per_provider"]
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("free_lanes_per_provider must be a non-negative integer")
     if "default_lanes" in data:
         lanes = data["default_lanes"]
         if not isinstance(lanes, list) or not lanes or not all(isinstance(x, str) for x in lanes):
@@ -74,7 +79,7 @@ def load() -> dict:
 
 def apply() -> None:
     """Apply only explicit overrides; absent config keeps the existing setup."""
-    from . import adapters, capacity, claude_auth, herdr, pools
+    from . import adapters, capacity, claude_auth, freeroster, herdr, pools
 
     data = load()
     pools.LIMITS.update(data.get("pool_concurrency", {}))
@@ -86,6 +91,8 @@ def apply() -> None:
         if len({lane.name for lane in lanes}) != len(lanes):
             raise ValueError("default_lanes contains duplicate lane names")
         adapters.DEFAULT_ROSTER = lanes
+    if "free_lanes_per_provider" in data:
+        freeroster.PER_PROVIDER = data["free_lanes_per_provider"]
     if "caller_context_helper" in data:
         herdr.CONTEXT_HELPER = data["caller_context_helper"]
     if "opencode_accounts" in data:

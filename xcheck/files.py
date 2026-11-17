@@ -11,7 +11,7 @@ import signal
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .types import Lane
@@ -137,6 +137,8 @@ class Run:
     accounts: dict = None        # Zen lane → {"name", "store"}: its OpenCode account, fixed at launch
     workspaces: dict = None      # actual paths, retained for settled records from earlier layouts
 
+    roster_free: list[str] = field(default_factory=list)
+
     def lane(self, name: str) -> Lane:
         return self.lanes[name]
 
@@ -162,6 +164,7 @@ class Run:
             "herdr": self.herdr, "capacity": self.capacity,
             "forced": self.forced or [], "epoch": self.epoch, "accounts": self.accounts or {},
             "workspaces": {n: str(self.workspace(n)) for n in self.lanes},
+            "roster_free": self.roster_free,
         }, indent=2))
 
     @classmethod
@@ -175,6 +178,7 @@ class Run:
             orch=d["orch"], started=d["started"], panes=d.get("panes", {}),
             herdr=d.get("herdr", {}), capacity=d.get("capacity", True),
             forced=d.get("forced", []), epoch=d.get("epoch", 0.0), accounts=d.get("accounts", {}),
+            roster_free=d.get("roster_free", []),
             workspaces=d.get("workspaces", {
                 n: str(Path(os.path.realpath(ROOT)) / ".lanes" / Lane.from_json(v).pool / n)
                 for n, v in d["lanes"].items()

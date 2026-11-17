@@ -66,7 +66,8 @@ class RunError(Exception):
 
 
 def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: bool,
-          idle: int | None, cap: int | None, force_lanes: set[str], skip_capacity: bool) -> int:
+          idle: int | None, cap: int | None, force_lanes: set[str], skip_capacity: bool, *,
+          roster_free: list[str] | None = None) -> int:
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
         raise RunError(f"BASE must live under {ROOT} (got {base}); stage it as {ROOT}/<slug>")
@@ -121,7 +122,7 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
     run = Run(base=base, lanes={l.name: l for l in lanes}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
               herdr=ctx or {}, capacity=not skip_capacity, forced=sorted(force_lanes),
-              epoch=time.time(),
+              epoch=time.time(), roster_free=roster_free or [],
               accounts={n: {"name": a, "store": str(adapters.OPENCODE_ACCOUNTS[a])} for n, a in assigned.items()})
     try:
         for name in run.lanes:
