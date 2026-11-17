@@ -9,7 +9,7 @@ Optional `~/.config/xcheck/config.json` is read at each command invocation. `XCH
 ```json
 {
   "default_lanes": [
-    "codex:gpt-6.1-sol:high",
+    "codex:gpt-6.2-sol:high",
     "claude:claude-opus-5-5:high"
   ],
   "caller_context_helper": "~/.local/libexec/xcheck-caller-context",

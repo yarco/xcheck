@@ -12,7 +12,7 @@ import test_xcheck as support
 from xcheck import adapters, capacity
 
 FLASH, ARGON = adapters.Lane("agy", "gemini-3.8-flash"), adapters.Lane("agy", "gemini-4-argon")
-CODEX = adapters.Lane("codex", "gpt-6.1-sol", "high")
+CODEX = adapters.Lane("codex", "gpt-6.2-sol", "high")
 
 
 def rotator(root: Path, code: int = 0) -> tuple[Path, Path]:

@@ -65,7 +65,7 @@ Example for a Claude orchestrator using an existing Codex subscription:
 
 ```bash
 xcheck run --base /tmp/agent-offload/preferences-review-1 --orch claude \
-  --lanes codex:gpt-6.1-sol:high --web packet
+  --lanes codex:gpt-6.2-sol:high --web packet
 ```
 
 Leave placement unset: auto chooses verified Herdr panes when available, otherwise headless. `--mode headless` is an explicit operator choice or placement smoke. The toy packet needs no retrieval. Packet mode is not a firewall; general MCP/shell access differs by lane.

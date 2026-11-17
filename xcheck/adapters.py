@@ -30,7 +30,7 @@ KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin", "cline")
 NATIVE_FREE_PROVIDERS = ("kilo",)
 
 DEFAULT_ROSTER = (
-    Lane("codex", "gpt-6.1-sol", "high"),
+    Lane("codex", "gpt-6.2-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
     Lane("agy", "gemini-3.8-flash"),

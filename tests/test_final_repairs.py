@@ -244,7 +244,7 @@ class FinalSettlementRepairs(unittest.TestCase):
     def current(self, two=False):
         lanes = [adapters.parse_lane('opencode:opencode/space-bunny-free')]
         if two:
-            lanes.append(adapters.parse_lane('codex:gpt-6.1-sol:high'))
+            lanes.append(adapters.parse_lane('codex:gpt-6.2-sol:high'))
         current = files.Run(self.base, {lane.name: lane for lane in lanes}, support.CONTRACT, False, 0, None,
                             'headless', 'other', 'now', {}, {})
         for name in current.lanes:
@@ -341,7 +341,7 @@ class CapBeforeCompletion(unittest.TestCase):
     def test_a_completion_read_after_the_cap_is_a_timeout(self):
         from types import SimpleNamespace
         from xcheck import lane
-        peer = adapters.parse_lane('codex:gpt-6.1-sol:high')
+        peer = adapters.parse_lane('codex:gpt-6.2-sol:high')
         snapshot = self.base / '.packet'
         snapshot.mkdir()
         for name in ('PACKET.md', 'PROMPT.md'):

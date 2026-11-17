@@ -151,8 +151,8 @@ class FixtureTranscripts(unittest.TestCase):
 
     def test_unseen_answer_prints_its_opening_lines(self):
         pane = Pane(tty=False, width=40)
-        lines = pane.answer("codex-gpt-6.1-sol-high", "VERDICT: the claim holds\n" + "\n".join(f"line {i}" for i in range(20)))
-        self.assertIn("answer: RESULT-codex-gpt-6.1-sol-high.md", lines)
+        lines = pane.answer("codex-gpt-6.2-sol-high", "VERDICT: the claim holds\n" + "\n".join(f"line {i}" for i in range(20)))
+        self.assertIn("answer: RESULT-codex-gpt-6.2-sol-high.md", lines)
         self.assertIn("VERDICT: the claim holds", lines)
         self.assertIn("…", lines)
         self.assertNotIn("line 19", lines)

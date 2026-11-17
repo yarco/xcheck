@@ -141,7 +141,7 @@ class Discovery(unittest.TestCase):
 
     def test_captured_deployed_prices_admit_free_and_reject_paid_models(self):
         docs = (pathlib.Path(__file__).parent / "fixtures/zen-production-models.html").read_text()
-        rows = models.zen_candidates({"data": [{"id": "space-bunny-free"}, {"id": "gpt-6.1-sol"}]}, docs)
+        rows = models.zen_candidates({"data": [{"id": "space-bunny-free"}, {"id": "gpt-6.2-sol"}]}, docs)
         self.assertEqual([r["model"] for r in rows], ["space-bunny-free"])
         for changed in [docs.replace("<td>Free</td>", "<td>$1</td>"), docs + docs,
                         docs.replace("<th>Input</th>", "<th>Unknown</th>")]:
@@ -744,7 +744,7 @@ class FreeRoster(unittest.TestCase):
                 self.assertEqual(adapters.free_lanes(path), ())
             path.write_text(json.dumps({"lanes": [
                 "opencode:opencode/glm-5.3-flash-free", "opencode:opencode/glm-5.3-flash-free",
-                "opencode:openrouter/x/y:free", "codex:gpt-6.1-sol:high", "opencode:../evil", 7]}))
+                "opencode:openrouter/x/y:free", "codex:gpt-6.2-sol:high", "opencode:../evil", 7]}))
             self.assertEqual([lane.model for lane in adapters.free_lanes(path)],
                              ["opencode/glm-5.3-flash-free", "openrouter/x/y:free"])
 

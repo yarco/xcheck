@@ -20,7 +20,7 @@ observations are evidence from that version, not current availability promises.
 
 | Lane | Pool |
 |---|---|
-| `codex-gpt-6.1-sol-high` | codex |
+| `codex-gpt-6.2-sol-high` | codex |
 | `claude-opus-5-5-high` | claude |
 | `grok-4.7-xhigh` | grok |
 | `agy-gemini-3.8-flash` | agy-gemini |

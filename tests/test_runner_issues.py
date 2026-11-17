@@ -641,11 +641,11 @@ class ReportRuntime(unittest.TestCase):
 
     def test_authorized_grok_mode_finishes_with_orbstack_socket(self):
         result = self.xcheck('run', '--base', str(self.base), '--orch', 'other', '--lanes',
-                             'grok:grok-4.7:xhigh,codex:gpt-6.1-sol:high', '--mode', 'headless',
+                             'grok:grok-4.7:xhigh,codex:gpt-6.2-sol:high', '--mode', 'headless',
                              '--skip-capacity', mode='socket-symlink', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         rows = {row['lane']: row for row in json.loads((self.base / 'STATUS.json').read_text())['lanes']}
-        for name in ('grok-4.7-xhigh', 'codex-gpt-6.1-sol-high'):
+        for name in ('grok-4.7-xhigh', 'codex-gpt-6.2-sol-high'):
             row = rows[name]
             self.assertEqual(row['status'], 'done', row)
             self.assertEqual(row['reason'], 'RESULT_COMPLETE')

@@ -124,7 +124,7 @@ class ConfiguredRun(unittest.TestCase):
 
     def test_local_roster_excludes_orchestrator_and_cli_override_wins(self):
         cfg = self.root / "local.json"
-        cfg.write_text(json.dumps({"default_lanes": ["codex:gpt-6.1-sol:high",
+        cfg.write_text(json.dumps({"default_lanes": ["codex:gpt-6.2-sol:high",
                                                     "claude:claude-opus-5-5:high"]}))
         result = self.xcheck("run", "--base", str(self.base), "--orch", "codex",
                              "--mode", "headless", "--skip-capacity",
@@ -135,8 +135,8 @@ class ConfiguredRun(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "done")
         other = self.second_base()
         result = self.xcheck("run", "--base", str(other), "--orch", "other",
-                             "--lanes", "codex:gpt-6.1-sol:high", "--mode", "headless",
+                             "--lanes", "codex:gpt-6.2-sol:high", "--mode", "headless",
                              "--skip-capacity", env_extra={"XCHECK_CONFIG": str(cfg)})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         rows = json.loads((other / "STATUS.json").read_text())["lanes"]
-        self.assertEqual([row["lane"] for row in rows], ["codex-gpt-6.1-sol-high"])
+        self.assertEqual([row["lane"] for row in rows], ["codex-gpt-6.2-sol-high"])

@@ -12,7 +12,7 @@ class RealDuration(unittest.TestCase):
         case.setUp()
         self.addCleanup(case.doCleanups)
         result = case.xcheck("run", "--base", str(case.base), "--orch", "other",
-                             "--lanes", "codex:gpt-6.1-sol:high", "--mode", "headless",
+                             "--lanes", "codex:gpt-6.2-sol:high", "--mode", "headless",
                              "--skip-capacity",
                              mode="buffered-work", delay=185, timeout=265)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

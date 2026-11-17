@@ -320,7 +320,7 @@ class AccountPool(unittest.TestCase):
                 adapters.Lane("opencode", "openrouter/qwen/qwen3.8-27b:free"),
                 adapters.Lane("opencode", "zai-coding-plan/glm-5.3"),
                 adapters.Lane("opencode", "space-bunny-free"),
-                adapters.Lane("codex", "gpt-6.1-sol", "high"),
+                adapters.Lane("codex", "gpt-6.2-sol", "high"),
                 adapters.Lane("opencode", "opencode/mimo-v2.6-flash-free"),
                 adapters.Lane("opencode", "glm-5.3-flash-free"),
             ]

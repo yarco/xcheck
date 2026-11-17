@@ -48,7 +48,7 @@ export PATH="$HOME/.local/bin:$PATH"
 xcheck doctor
 python3 examples/stage_demo.py /tmp/agent-offload/my-first-review
 xcheck run --base /tmp/agent-offload/my-first-review --orch claude \
-  --lanes codex:gpt-6.1-sol:high --web packet
+  --lanes codex:gpt-6.2-sol:high --web packet
 ```
 
 Use your actual orchestrator kind and a fresh BASE each time. The model ID above is a repository pin, not a promise of current account availability. Admission checks the selected lane again before inference. `doctor` checks the whole supported roster and can report gaps unrelated to your chosen lane.

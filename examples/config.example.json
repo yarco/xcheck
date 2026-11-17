@@ -1,6 +1,6 @@
 {
   "default_lanes": [
-    "codex:gpt-6.1-sol:high",
+    "codex:gpt-6.2-sol:high",
     "claude:claude-opus-5-5:high"
   ],
   "opencode_accounts": {

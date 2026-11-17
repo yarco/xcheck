@@ -10,7 +10,7 @@ from unittest.mock import patch
 import test_xcheck as support
 from xcheck import adapters, pools
 
-PEER = adapters.Lane("codex", "gpt-6.1-sol", "high")
+PEER = adapters.Lane("codex", "gpt-6.2-sol", "high")
 
 
 class Reader(unittest.TestCase):
@@ -74,7 +74,7 @@ class Controls(unittest.TestCase):
             self.assertIn("--ephemeral", argv)
             self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
             self.assertEqual(argv[argv.index("--cd") + 1], "/w")
-            self.assertEqual(argv[argv.index("--model") + 1], "gpt-6.1-sol")
+            self.assertEqual(argv[argv.index("--model") + 1], "gpt-6.2-sol")
             self.assertIn('model_reasoning_effort="high"', argv)
             self.assertIn(value, argv)
             self.assertIn("check_for_update_on_startup=false", argv)
@@ -175,7 +175,7 @@ class Lanes(unittest.TestCase):
             with self.subTest(state=state):
                 if (self.base / ".launched").exists():
                     self.base = support.EndToEnd.second_base(self)
-                out = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "codex:gpt-6.1-sol:high",
+                out = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", "codex:gpt-6.2-sol:high",
                                   "--mode", "headless", "--skip-capacity", env_extra={"FAKE_CODEX_MCP": state})
                 self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
                 row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
@@ -185,7 +185,7 @@ class Lanes(unittest.TestCase):
 
     def test_the_native_child_holds_the_pool_and_reads_the_message_on_stdin(self):
         out = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes",
-                          "codex:gpt-6.1-sol:high", "--mode", "headless", "--skip-capacity", mode="custody")
+                          "codex:gpt-6.2-sol:high", "--mode", "headless", "--skip-capacity", mode="custody")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         row = json.loads((self.base / "lanes" / PEER.name / "exit.json").read_text())
         self.assertEqual(row["status"], "done", row)

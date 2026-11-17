@@ -153,7 +153,7 @@ class RuntimeHandoff(unittest.TestCase):
         self.assertEqual(row["status"], "done", row)
 
     def test_native_failure_excludes_every_supported_stream_harness(self):
-        lanes = ("codex:gpt-6.1-sol:high", "claude:claude-opus-5-5:high",
+        lanes = ("codex:gpt-6.2-sol:high", "claude:claude-opus-5-5:high",
                  "grok:grok-4.7:xhigh", "opencode:opencode/space-bunny-free")
         for index, lane in enumerate(lanes):
             with self.subTest(lane=lane):
@@ -171,7 +171,7 @@ class RuntimeHandoff(unittest.TestCase):
 
     def test_codex_reconnect_notice_can_recover_to_a_valid_review(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "other",
-                             "--lanes", "codex:gpt-6.1-sol:high", "--mode", "headless",
+                             "--lanes", "codex:gpt-6.2-sol:high", "--mode", "headless",
                              "--skip-capacity", "--cap", "8", mode="reconnect")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row = json.loads((self.base / "STATUS.json").read_text())["lanes"][0]
@@ -219,7 +219,7 @@ class RuntimeHandoff(unittest.TestCase):
         self.assert_settled(row)
 
     def test_native_final_event_finishes_without_waiting_for_cli_exit(self):
-        for index, lane in enumerate(("codex:gpt-6.1-sol:high", "claude:claude-opus-5-5:high",
+        for index, lane in enumerate(("codex:gpt-6.2-sol:high", "claude:claude-opus-5-5:high",
                                       "grok:grok-4.7:xhigh", "opencode:opencode/space-bunny-free")):
             with self.subTest(lane=lane):
                 if index:
@@ -271,9 +271,9 @@ class RuntimeHandoff(unittest.TestCase):
 
     def test_different_lane_durations_do_not_change_slower_lane_lifetime(self):
         lane_dir = self.launch_detached(mode="mixed-duration", delay=6,
-                                        lanes="codex:gpt-6.1-sol:high,opencode:opencode/space-bunny-free")
+                                        lanes="codex:gpt-6.2-sol:high,opencode:opencode/space-bunny-free")
         original = json.loads((lane_dir / "pids.json").read_text())
-        fast = self.base / "lanes" / "codex-gpt-6.1-sol-high" / "exit.json"
+        fast = self.base / "lanes" / "codex-gpt-6.2-sol-high" / "exit.json"
         until = time.monotonic() + 8
         while not fast.exists() and time.monotonic() < until:
             time.sleep(0.1)

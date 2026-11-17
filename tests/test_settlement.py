@@ -26,7 +26,7 @@ class Settlement(unittest.TestCase):
         self.assertEqual(outcome.diagnostics, [{'kind': 'display', 'error': 'OSError'}])
 
     def current(self):
-        peer = adapters.parse_lane('codex:gpt-6.1-sol:high')
+        peer = adapters.parse_lane('codex:gpt-6.2-sol:high')
         current = files.Run(self.base, {peer.name: peer}, support.CONTRACT, False, 0, None,
                             'headless', 'other', 'now', {}, {}, capacity=False)
         current.lane_dir(peer.name).mkdir(parents=True)
@@ -56,7 +56,7 @@ class Settlement(unittest.TestCase):
         self.assertEqual(original, [(self.base / f).read_bytes() for f in ('STATUS.md', 'STATUS.json')])
 
     def test_failed_spawn_is_settled_and_independent_peer_is_attempted(self):
-        peers = [adapters.parse_lane(s) for s in ('codex:gpt-6.1-sol:high', 'claude:claude-opus-5-5:high')]
+        peers = [adapters.parse_lane(s) for s in ('codex:gpt-6.2-sol:high', 'claude:claude-opus-5-5:high')]
         with patch.object(run, 'ROOT', self.root), \
              patch.object(run.subprocess, 'Popen', side_effect=OSError('cannot spawn')) as spawn, \
              patch.object(run.signal, 'signal'):

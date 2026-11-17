@@ -78,12 +78,12 @@ def grok_probe_ok(root: Path, log=None, session=None) -> tuple:
 
 class LaneNames(unittest.TestCase):
     def test_provenance_names(self):
-        self.assertEqual(Lane("codex", "gpt-6.1-sol", "high").name, "codex-gpt-6.1-sol-high")
+        self.assertEqual(Lane("codex", "gpt-6.2-sol", "high").name, "codex-gpt-6.2-sol-high")
         self.assertEqual(Lane("grok", "grok-4.7", "xhigh").name, "grok-4.7-xhigh")
         self.assertEqual(Lane("claude", "claude-opus-5-5", "high").name, "claude-opus-5-5-high")
         self.assertEqual(Lane("agy", "gemini-3.8-flash-high").name, "agy-gemini-3.8-flash-high")
         self.assertEqual(Lane("devin", "swe-2-max").name, "devin-swe-2-max")
-        self.assertEqual(Lane("codex", "gpt-6.1-sol-high", "high").name, "codex-gpt-6.1-sol-high")
+        self.assertEqual(Lane("codex", "gpt-6.2-sol-high", "high").name, "codex-gpt-6.2-sol-high")
 
     def test_pools(self):
         self.assertEqual(Lane("agy", "gemini-3.8-flash-high").pool, "agy-gemini")
@@ -101,7 +101,7 @@ class LaneNames(unittest.TestCase):
         self.assertEqual(glm.pool, glm_high.pool)  # one account's models share its limits
 
     def test_parse_lane(self):
-        self.assertEqual(adapters.parse_lane("codex:gpt-6.1-sol:high"), Lane("codex", "gpt-6.1-sol", "high"))
+        self.assertEqual(adapters.parse_lane("codex:gpt-6.2-sol:high"), Lane("codex", "gpt-6.2-sol", "high"))
         self.assertEqual(adapters.parse_lane("opencode:muse-spark-1.3-contributor-free"),
                          Lane("opencode", "muse-spark-1.3-contributor-free"))
         self.assertEqual(adapters.parse_lane("opencode:nemotron-3-ultra-free:high").name,
@@ -115,7 +115,7 @@ class LaneNames(unittest.TestCase):
         bunny = adapters.parse_lane("opencode:openrouter/stealth/space-bunny-alpha")
         self.assertEqual(bunny.name, "opencode-openrouter-stealth-space-bunny-alpha")
         self.assertEqual(bunny.pool, "opencode-openrouter")
-        for bad in ("codex:gpt-6.1-sol", "agy:gemini-3.8-flash:high", "nope:x:y", "codex",
+        for bad in ("codex:gpt-6.2-sol", "agy:gemini-3.8-flash:high", "nope:x:y", "codex",
                     "devin:swe-2-max:high"):  # selector carries effort
             with self.assertRaises(ValueError):
                 adapters.parse_lane(bad)
@@ -671,7 +671,7 @@ class GrokLane(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         d = Path(tmp.name)
-        for kind, model, effort in (("codex", "gpt-6.1-sol", "low"),
+        for kind, model, effort in (("codex", "gpt-6.2-sol", "low"),
                                     ("claude", "claude-sonnet-5", "low"),
                                     ("grok", "grok-4.7", "low")):
             lane = Lane(kind, model, effort)
@@ -997,7 +997,7 @@ class HerdrOwnership(unittest.TestCase):
         with patch.object(runmod, "ROOT", root), \
                 patch.object(runmod.herdr, "resolve_caller", return_value=(None, reason)):
             with self.assertRaises(runmod.RunError) as cm:
-                runmod.start(base, [Lane("codex", "gpt-6.1-sol", "high")], "herdr", "grok",
+                runmod.start(base, [Lane("codex", "gpt-6.2-sol", "high")], "herdr", "grok",
                              False, None, None, set(), True)
         text = str(cm.exception)
         self.assertIn("insufficient_evidence", text)
@@ -1511,7 +1511,7 @@ class EndToEnd(unittest.TestCase):
                               capture_output=True, text=True, timeout=timeout)
 
     def run_lanes(self, mode="ok", extra=()):
-        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,opencode:muse-spark-1.3-contributor-free"  # stream view
+        lanes = "codex:gpt-6.2-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,opencode:muse-spark-1.3-contributor-free"  # stream view
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", lanes,
                         "--mode", "headless", "--skip-capacity", *extra, mode=mode)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
@@ -1526,7 +1526,7 @@ class EndToEnd(unittest.TestCase):
     def test_structured_errors_fail_with_cause(self):
         rows = self.run_lanes("error")
         self.assertEqual({r["status"] for r in rows.values()}, {"failed"})
-        self.assertIn("usage limit", rows["codex-gpt-6.1-sol-high"]["reason"])
+        self.assertIn("usage limit", rows["codex-gpt-6.2-sol-high"]["reason"])
         self.assertIn("hit your limit", rows["claude-opus-5-5-high"]["reason"])
         self.assertIn("402", rows["grok-4.7-xhigh"]["reason"])
 
@@ -1541,7 +1541,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_a_descendant_holding_stdout_does_not_keep_an_exited_harness_pending(self):
         started = time.monotonic()
-        native = [s for s in ("codex:gpt-6.1-sol:high", "claude:claude-opus-5-5:high")
+        native = [s for s in ("codex:gpt-6.2-sol:high", "claude:claude-opus-5-5:high")
                   if adapters.Reader(s.split(":")[0]).native()]  # the harness is the runner's direct child
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--lanes", ",".join(native),
                         "--mode", "headless", "--skip-capacity", mode="stdout-leak")
@@ -1557,13 +1557,13 @@ class EndToEnd(unittest.TestCase):
     def test_launch_once(self):
         self.run_lanes()
         p = self.xcheck("run", "--base", str(self.base), "--orch", "other", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.2-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("already launched", p.stderr)
 
     def test_a_missing_base_is_refused_before_launch(self):
         p = self.xcheck("run", "--base", str(self.base / "missing"), "--orch", "other", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.2-sol:high")
         self.assertEqual(p.returncode, 2, p.stderr)
         self.assertIn("does not exist", p.stderr)
         self.assertNotIn("Traceback", p.stderr)
@@ -1577,7 +1577,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_a_refused_first_invocation_does_not_burn_the_base(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.2-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertFalse((self.base / ".launched").exists())
         self.assertEqual({r["status"] for r in self.run_lanes().values()}, {"done"})
@@ -1592,7 +1592,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_orchestrator_kind_is_never_a_peer(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.2-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("must not launch", p.stderr)
 
@@ -1609,7 +1609,7 @@ class EndToEnd(unittest.TestCase):
             with self.subTest(extra=extra):
                 base = self.second_base()
                 result = self.xcheck("run", "--base", str(base), "--orch", "other", "--mode", "headless",
-                                     "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high", *extra)
+                                     "--skip-capacity", "--lanes", "codex:gpt-6.2-sol:high", *extra)
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn(reason, result.stderr)
                 self.assertFalse((base / ".launched").exists())
@@ -1653,7 +1653,7 @@ class EndToEnd(unittest.TestCase):
             base = Path(tmp) / "outside base"
             shutil.copytree(self.base, base)
             p = self.xcheck("run", "--base", str(base), "--orch", "other", "--mode", "headless",
-                            "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
+                            "--skip-capacity", "--lanes", "codex:gpt-6.2-sol:high")
             self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
             self.assertIn("BASE must live under", p.stderr)
             self.assertIn("outside base", p.stderr)
@@ -1666,7 +1666,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_capacity_is_read_from_each_lanes_meter_before_spending(self):
         # The fake codex/agy answer the real meters (app-server, /usage).
-        lanes = "codex:gpt-6.1-sol:high,agy:gemini-3.8-flash-high"
+        lanes = "codex:gpt-6.2-sol:high,agy:gemini-3.8-flash-high"
         for reading, expected in (("reserve-low", "skipped"), ("eligible", "done")):
             base = self.second_base()
             p = self.xcheck("run", "--base", str(base), "--orch", "other", "--lanes", lanes,
@@ -1679,13 +1679,13 @@ class EndToEnd(unittest.TestCase):
 
     def test_grok_orchestrator_is_refused_headless(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "grok", "--mode", "headless",
-                        "--skip-capacity", "--lanes", "codex:gpt-6.1-sol:high")
+                        "--skip-capacity", "--lanes", "codex:gpt-6.2-sol:high")
         self.assertEqual(p.returncode, 2)
         self.assertIn("Herdr mode", p.stderr)
 
     def test_detach_then_bounded_wait(self):
         common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
-                  "--lanes", "codex:gpt-6.1-sol:high,grok:grok-4.7:xhigh")
+                  "--lanes", "codex:gpt-6.2-sol:high,grok:grok-4.7:xhigh")
         p = self.xcheck("run", *common, "--detach", mode="slow")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("xcheck wait", p.stdout)
@@ -1699,7 +1699,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_detach_on_a_launched_base_reports_the_refusal(self):
         common = ("--base", str(self.base), "--orch", "other", "--mode", "headless", "--skip-capacity",
-                  "--lanes", "codex:gpt-6.1-sol:high")
+                  "--lanes", "codex:gpt-6.2-sol:high")
         self.assertEqual(self.xcheck("run", *common, "--detach", mode="slow").returncode, 0)
         p = self.xcheck("run", *common, "--detach", mode="slow")
         self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
@@ -1763,7 +1763,7 @@ class EndToEnd(unittest.TestCase):
         stale = {"PWD": str(Path.home()), "OLDPWD": str(Path.home())}
         env = {**os.environ, **leak, **keep, **stale, **live_socket, "FAKE_ENV_DUMP": str(dump), "XCHECK_ROOT": str(self.root),
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_MODE": "ok"}
-        lanes = "codex:gpt-6.1-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free,devin:swe-2-max"
+        lanes = "codex:gpt-6.2-sol:high,claude:claude-opus-5-5:high,grok:grok-4.7:xhigh,agy:gemini-3.8-flash-high,opencode:muse-spark-1.3-contributor-free,devin:swe-2-max"
         p = subprocess.run([sys.executable, str(REPO / "bin" / "xcheck"), "run", "--base", str(self.base),
                             "--orch", "other", "--lanes", lanes, "--mode", "headless", "--skip-capacity"],
                            env=env, capture_output=True, text=True, timeout=60)
@@ -1823,18 +1823,18 @@ class EndToEnd(unittest.TestCase):
         other, third = self.second_base(), self.second_base()
         second_token = "MANIFEST_TAIL_TOKEN: second-packet"
         (other / "evidence/manifest-tail.txt").write_text(second_token)
-        self.detach(self.base, "codex:gpt-6.1-sol:high", "slow")
-        self.detach(other, "codex:gpt-6.1-sol:high", "slow")
-        self.detach(third, "codex:gpt-6.1-sol:high", "ok")
-        first = self.lane_exit(self.base, "codex-gpt-6.1-sol-high")
-        second = self.lane_exit(other, "codex-gpt-6.1-sol-high")
-        last = self.lane_exit(third, "codex-gpt-6.1-sol-high")
+        self.detach(self.base, "codex:gpt-6.2-sol:high", "slow")
+        self.detach(other, "codex:gpt-6.2-sol:high", "slow")
+        self.detach(third, "codex:gpt-6.2-sol:high", "ok")
+        first = self.lane_exit(self.base, "codex-gpt-6.2-sol-high")
+        second = self.lane_exit(other, "codex-gpt-6.2-sol-high")
+        last = self.lane_exit(third, "codex-gpt-6.2-sol-high")
         self.assertEqual((first["status"], second["status"], last["status"]), ("done", "done", "done"))
         self.assertLess(max(first["started"], second["started"]), min(first["ended"], second["ended"]))
         self.assertGreaterEqual(last["started"], min(first["ended"], second["ended"]))
-        self.assertIn("2 lane permits occupied", (third / "lanes" / "codex-gpt-6.1-sol-high" / "view.log").read_text())
-        self.assertIn(TOKEN, (self.base / "RESULT-codex-gpt-6.1-sol-high.md").read_text())
-        self.assertIn(second_token, (other / "RESULT-codex-gpt-6.1-sol-high.md").read_text())
+        self.assertIn("2 lane permits occupied", (third / "lanes" / "codex-gpt-6.2-sol-high" / "view.log").read_text())
+        self.assertIn(TOKEN, (self.base / "RESULT-codex-gpt-6.2-sol-high.md").read_text())
+        self.assertIn(second_token, (other / "RESULT-codex-gpt-6.2-sol-high.md").read_text())
 
     def test_disjoint_pools_and_same_run_lanes_run_together(self):
         other = self.second_base()
@@ -1963,13 +1963,13 @@ class EndToEnd(unittest.TestCase):
         os.utime(self.base / "evidence" / "manifest-tail.txt")  # staged last
         rows = self.run_lanes()
         self.assertEqual({r["status"] for r in rows.values()}, {"done"}, rows)
-        work = workpath(self.root, self.base, adapters.parse_lane("codex:gpt-6.1-sol:high")) / "evidence"
+        work = workpath(self.root, self.base, adapters.parse_lane("codex:gpt-6.2-sol:high")) / "evidence"
         for n in names:
             self.assertEqual((work / n).read_text(), n)
 
     def test_lane_workspace_holds_only_the_packet(self):
         self.run_lanes()
-        work = workpath(self.root, self.base, adapters.parse_lane("codex:gpt-6.1-sol:high"))
+        work = workpath(self.root, self.base, adapters.parse_lane("codex:gpt-6.2-sol:high"))
         self.assertEqual(sorted(p.name for p in work.iterdir()), ["PACKET.md", "PROMPT.md", "evidence"])
 
 
