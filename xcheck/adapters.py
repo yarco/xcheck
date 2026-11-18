@@ -347,8 +347,8 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
     import os
     if lane.model.split("/", 1)[0] in NATIVE_FREE_PROVIDERS:
         from .models import native_env
-        try:
-            return native_env(lane.model)
+        try:  # an operator's Kilo account key, if exported, reaches Kilo lanes only
+            return native_env(lane.model, os.environ.get("KILO_API_KEY") or None)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             raise Unavailable(f"inventory-unknown: free-provider admission failed ({_clip(str(error), 200)})") from error
     env = {}

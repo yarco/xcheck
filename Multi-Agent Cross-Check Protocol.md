@@ -114,7 +114,7 @@ See [Cline discovery and completion](docs/reference.md#cline-free-models).
 
 ### Additional free providers through OpenCode
 
-Kilo uses the native OpenCode ACP lane with an isolated store and no credential.
+Kilo uses the native OpenCode ACP lane with an isolated store, anonymously or with the operator's `KILO_API_KEY` account token when exported.
 Select it explicitly or from the automatic free roster. Admission rechecks free
 eligibility. Other providers retain their own access requirements.
 See [provider and optional-roster contracts](docs/reference.md#additional-free-providers-through-opencode).

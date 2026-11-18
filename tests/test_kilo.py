@@ -104,11 +104,29 @@ class Catalog(unittest.TestCase):
             spec = adapters._opencode_launch(peer, self.work, self.work / "message", log)
             env = lane.lane_env(spec, self.work)
         self.assertEqual(env["OPENCODE_DB"], str(log.parent / "opencode.db"))
-        self.assertNotIn("KILO_API_KEY", env)
+        self.assertEqual(env["KILO_API_KEY"], "secret")  # the Kilo account key reaches the Kilo lane
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(config["providers"]["kilo"]["env"], ["KILO_API_KEY"])
+        self.assertNotIn("apiKey", config["providers"]["kilo"]["settings"])
         self.assertEqual(config["agents"]["title"]["model"], {"providerID": "kilo", "model": "vendor/model:free"})
         self.assertEqual(spec.argv[spec.argv.index("--model") + 1], peer.model)
         self.assertEqual(peer.pool, "opencode-kilo")
+
+    def test_launch_without_a_kilo_key_stays_anonymous_and_other_keys_never_reach_it(self):
+        peer = adapters.parse_lane("opencode:kilo/vendor/model:free")
+        metadata = {peer.model: {"variants": []}}
+        with patch.object(models, "fetch", return_value={"data": [item()]}), \
+                patch.object(models, "client_metadata", return_value=metadata), \
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "paid", "OPENCODE_API_KEY": "zen"}, clear=False):
+            os.environ.pop("KILO_API_KEY", None)
+            log = self.work / "anon" / "stderr.log"
+            spec = adapters._opencode_launch(peer, self.work, self.work / "message", log)
+            env = lane.lane_env(spec, self.work)
+        self.assertNotIn("KILO_API_KEY", env)
+        self.assertNotIn("OPENROUTER_API_KEY", env)
+        self.assertNotIn("OPENCODE_API_KEY", env)
+        settings = json.loads(env["OPENCODE_CONFIG_CONTENT"])["providers"]["kilo"]["settings"]
+        self.assertEqual(settings["apiKey"], "")
 
     def test_isolated_native_diagnostics_preserve_quota_type_without_response_secrets(self):
         peer = adapters.parse_lane("opencode:kilo/vendor/model:free")

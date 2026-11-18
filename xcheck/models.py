@@ -257,8 +257,13 @@ def native_candidates(provider: str, payload: dict) -> list[dict]:
     return kilo_candidates(payload)
 
 
-def native_config(provider: str, payload: dict) -> dict:
-    """Native V2 configuration, generated only from this live free inventory."""
+def native_config(provider: str, payload: dict, *, authenticated: bool = False) -> dict:
+    """Native V2 configuration, generated only from this live free inventory.
+
+    Anonymous by default. With `authenticated`, the provider reads its account key
+    from the environment variable KILO_API_KEY (account rate limits instead of the
+    anonymous per-IP cap); the offer set is the same zero-price inventory either way.
+    """
     items = {item["id"]: item for item in data_rows(payload)}
     definitions = {}
     for offer in native_candidates(provider, payload):
@@ -283,21 +288,24 @@ def native_config(provider: str, payload: dict) -> dict:
             model["limit"] = limits
         definitions[ident] = model
     base = KILO.removesuffix("/models")
-    return {"providers": {provider: {"name": f"{provider} verified free", "env": SOURCES[provider]["auth_env"],
+    settings = {"baseURL": base} if authenticated else {"baseURL": base, "apiKey": ""}
+    return {"providers": {provider: {"name": f"{provider} verified free",
+            "env": ["KILO_API_KEY"] if authenticated else SOURCES[provider]["auth_env"],
             "package": "@opencode/ai/providers/openai-compatible",
-            "settings": {"baseURL": base, "apiKey": ""},
+            "settings": settings,
             "models": definitions}}}
 
 
-def native_env(model: str) -> dict[str, str]:
+def native_env(model: str, key: str | None = None) -> dict[str, str]:
+    """Lane environment for a native free provider; `key` is its account key, if any."""
     provider, ident = model.split("/", 1)
     payload = fetch(SOURCES[provider]["models_url"])
-    config = native_config(provider, payload)
+    config = native_config(provider, payload, authenticated=bool(key))
     if ident not in config["providers"][provider]["models"]:
         raise ValueError(f"{model} is not currently an eligible zero-price {provider} offer")
     selection = {"providerID": provider, "model": ident}
     config.update(model=selection, agents={"title": {"model": selection}})
-    return {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
+    return {"OPENCODE_CONFIG_CONTENT": json.dumps(config), **({"KILO_API_KEY": key} if key else {})}
 
 
 def roster_price_problem(lane) -> str | None:
