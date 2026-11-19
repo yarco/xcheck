@@ -228,13 +228,13 @@ class ReportStartup(unittest.TestCase):
         ok = subprocess.CompletedProcess([], 0, self._version_json(), '')
         code, text = self.doctor(ok)
         self.assertEqual(code, 0, text)
-        self.assertIn('ok   agy model gemini-4-hydrogen advertised by the ACP server with thinking level xhigh', text)
-        capped = dict(support.AGY_LEVELS, **{"gemini-4-hydrogen": ("low", "medium", "high")})
+        self.assertIn('ok   agy model gemini-4-neon advertised by the ACP server with thinking level high', text)
+        capped = dict(support.AGY_LEVELS, **{"gemini-4-neon": ("low", "medium")})
         with patch.object(support, 'AGY_LEVELS', capped):
             code, text = self.doctor(ok)
         self.assertEqual(code, 1, text)
-        self.assertIn('FAIL agy model gemini-4-hydrogen: model-unavailable: gemini-4-hydrogen does not offer '
-                      'thinking level xhigh (offers low, medium, high)', text)
+        self.assertIn('FAIL agy model gemini-4-neon: model-unavailable: gemini-4-neon does not offer '
+                      'thinking level high (offers low, medium)', text)
 
     def test_doctor_compares_the_agy_server_with_the_acp_registry_as_advice(self):
         ok = subprocess.CompletedProcess([], 0, self._version_json(), '')

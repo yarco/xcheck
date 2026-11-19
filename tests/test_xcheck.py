@@ -63,7 +63,8 @@ def grok_probe_log(tools=("read_file", "grep", "list_dir", "run_terminal_cmd",
             f"config_count=3 config_names={mcps}\n")
 
 
-AGY_LEVELS = {"gemini-4-argon": ("low", "medium", "high"),
+AGY_LEVELS = {"gemini-4-neon": ("low", "medium", "high", "xhigh"),
+              "gemini-4-argon": ("low", "medium", "high"),
               "gemini-4-hydrogen": ("low", "medium", "high", "xhigh"),
               "gemini-3.8-flash": ("low", "medium", "high")}
 
@@ -1223,8 +1224,11 @@ class Capacity(unittest.TestCase):
         from xcheck import capacity as c
         roster = adapters.DEFAULT_ROSTER
         flash = Lane("agy", "gemini-3.8-flash", "high")
-        self.assertEqual(c.sharing(flash, roster), 2)
-        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 15)
+        self.assertEqual([lane for lane in roster if lane.kind == "agy"],
+                         [Lane("agy", "gemini-4-neon", "high")])
+        self.assertEqual(c.sharing(flash, roster), 1)
+        self.assertEqual(c.reserve_for(flash, c.sharing(flash, roster)), 10)
+        self.assertEqual(c.reserve_for(flash, c.sharing(flash, (*roster, flash))), 15)
 
     def test_tightest_window_must_exceed_the_reserve(self):
         from xcheck.capacity import judge

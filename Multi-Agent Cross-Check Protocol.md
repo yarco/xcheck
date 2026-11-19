@@ -78,8 +78,7 @@ Exit codes: 0 every lane settled (read the table); 2 refused before any spend; 3
 | `codex-gpt-6.2-sol-high` | codex |
 | `claude-opus-5-5-high` | claude |
 | `grok-4.7-xhigh` | grok |
-| `agy-gemini-4-hydrogen-xhigh` | agy-gemini |
-| `agy-gemini-4-argon-high` | agy-gemini |
+| `agy-gemini-4-neon-high` | agy-gemini |
 
 The orchestrator's harness is excluded. `xcheck/adapters.py` owns default pins;
 `run.json` records exact selectors and efforts, not merely normalized lane names.
@@ -121,7 +120,7 @@ See [provider and optional-roster contracts](docs/reference.md#additional-free-p
 
 ## Routine review planning and qualification
 
-A routine code review uses Codex, Claude, Grok, Gemini Hydrogen and Gemini Argon, excluding its orchestrator. Add Devin explicitly when another independent code reviewer is wanted and its selected offer and access are verified. xcheck reads no Devin quota (its daily and weekly plan windows show only in Herdr's Agent Usage sidebar and the Devin header), so it remains opt-in. Keep all supported adapters and the free roster available; routine roster membership is a review-quality decision, separate from endpoint availability. Use a small selection of qualified free models that fit the task. Automatic selection applies the local provider cap to each default run. Stage the complete relevant files, focused delta and existing test results; use packet mode when no current external evidence is needed, and ask for targeted checks only. One review prompt can cause many inference requests as the agent reads and uses tools; a successful maintenance ping does not reserve capacity for that review. A model-specific 429 is a coverage gap for that lane, not evidence that every OpenCode model should be dropped. Preserve each selected model's pinned/default effort; do not lower it to repair output formatting.
+A routine code review uses Codex, Claude, Grok and Gemini 4 Neon at High, excluding its orchestrator. Add Devin explicitly when another independent code reviewer is wanted and its selected offer and access are verified. xcheck reads no Devin quota (its daily and weekly plan windows show only in Herdr's Agent Usage sidebar and the Devin header), so it remains opt-in. Keep all supported adapters and the free roster available; routine roster membership is a review-quality decision, separate from endpoint availability. Use a small selection of qualified free models that fit the task. Automatic selection applies the local provider cap to each default run. Stage the complete relevant files, focused delta and existing test results; use packet mode when no current external evidence is needed, and ask for targeted checks only. One review prompt can cause many inference requests as the agent reads and uses tools; a successful maintenance ping does not reserve capacity for that review. A model-specific 429 is a coverage gap for that lane, not evidence that every OpenCode model should be dropped. Preserve each selected model's pinned/default effort; do not lower it to repair output formatting.
 
 Run the required suite once on the capable host and stage its exact command, result and environment limitations with the complete source. Peers review the focused delta and relevant contracts, with the whole tree available. A peer may run a targeted reproduction for a concrete finding. It must not repeatedly run the full suite, repair its sandbox, or edit the reviewed implementation. An environment-blocked check is a limitation, not a code defect; record it and finish the review. A comprehensive scope is an explicit task choice, not a reason to keep investigating after the requested evidence is established.
 
@@ -243,8 +242,8 @@ locked-Keychain handling and explicitly supplied usage readings.
 ## Locking and liveness
 
 Cooperating runs share host-local pools with bounded **lane** concurrency, not
-run-level exclusion. The default is two lanes per pool, four for `agy-gemini`
-so two ordinary Hydrogen + Argon reviews can overlap. Optional `pool_concurrency`
+run-level exclusion. The default is two lanes per pool and four for
+`agy-gemini`. Optional `pool_concurrency`
 settings override these operating limits; they are not measured provider ceilings.
 Every lane consumes one permit, including siblings in the same run. A free permit
 and successful admission checks allow another run's same model to start immediately.

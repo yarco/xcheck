@@ -379,6 +379,7 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
     # Antigravity's ACP server 1.5.0: bare model ids in a `model` option, and a
     # thinking level per model that it validates (FAKE_AGY_LEVELS overrides).
     agy_levels = json.loads(os.environ.get("FAKE_AGY_LEVELS") or "null") or {
+        "gemini-4-neon": ["low", "medium", "high", "xhigh"],
         "gemini-4-argon": ["low", "medium", "high"], "gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
         "gemini-3.8-flash": ["low", "medium", "high"]}
     agy_state = {"model": "gemini-3.8-flash", "thinking_level": "high"}

@@ -29,7 +29,7 @@ All keys are optional. Path values must be absolute or start with `~/`; a helper
 
 `pool_concurrency` optionally maps pool names to positive integer lane limits,
 for example `{"grok": 3, "claude": 2}`. Omitted pools allow two simultaneous
-lanes, except `agy-gemini`, which allows four (two Hydrogen + Argon reviews).
+lanes, except `agy-gemini`, which allows four.
 These limits apply across runs, not separately to each run. They are operating
 policy, not a provider quota guarantee. Same-run siblings consume permits too.
 Capacity still fails closed on unknown or insufficient quota; opt-in meterless

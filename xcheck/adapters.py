@@ -33,8 +33,7 @@ DEFAULT_ROSTER = (
     Lane("codex", "gpt-6.2-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
-    Lane("agy", "gemini-4-hydrogen", "xhigh"),
-    Lane("agy", "gemini-4-argon", "high"),
+    Lane("agy", "gemini-4-neon", "high"),
 )
 
 # Offers awaiting usable qualification, not excluded models. A deferral
@@ -60,7 +59,7 @@ def parse_lane(spec: str) -> Lane:
     if kind == "agy" and not model.startswith("gemini-"):
         raise ValueError("Agy's ACP server supports only Gemini selectors")
     if kind == "agy" and "pro" in model.split("-"):
-        raise ValueError("Gemini Pro is never a cross-check lane (operator rule); use a Flash, Hydrogen or Argon selector")
+        raise ValueError("Gemini Pro is never a cross-check lane (operator rule); use a supported non-Pro Gemini selector")
     effort = parts[2] if len(parts) == 3 else ""
     ident = r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::free)?" if kind in ("opencode", "cline") else r"[A-Za-z0-9][A-Za-z0-9._-]*"
     for part in (model, effort):
@@ -108,7 +107,6 @@ def parse_free_lanes(selectors) -> tuple[Lane, ...]:
 # Pinned add-ons and the externally maintained free roster. Free lanes may
 # also be selected per default run. `xcheck models` marks a ready row
 # `pinned` when it is here, else `--add` until the next refresh adds it.
-# Flash draws the same Gemini buckets as the default Hydrogen lane.
 PINNED_OPT_IN = (Lane("devin", "swe-2-max"), Lane("agy", "gemini-3.8-flash", "high"))
 OPT_IN = (*PINNED_OPT_IN, *free_lanes())
 
