@@ -25,7 +25,7 @@ Optional `~/.config/xcheck/config.json` is read at each command invocation. `XCH
 }
 ```
 
-All keys are optional. Path values must be absolute or start with `~/`; a helper is an executable path, not a shell command. Lane selectors use the ordinary parser; duplicate normalized names and empty lists are refused. An explicit `--lanes` replaces the configured default roster for that run; `--orch` exclusion still applies. `--add` appends normally. The selected lanes/efforts are frozen in `run.json`. Do not change local integration settings while a run is active.
+All keys are optional. Path values must be absolute or start with `~/`; a helper is an executable path, not a shell command. Lane selectors use the ordinary parser; duplicate normalized names and empty lists are refused. Devin is opt-in. Remove Devin entries from `default_lanes` and use `--add` or an explicit `--lanes` selection when the model and account are available. An explicit `--lanes` replaces the configured default roster for that run; `--orch` exclusion still applies. `--add` appends normally. The selected lanes/efforts are frozen in `run.json`. Do not change local integration settings while a run is active.
 
 `pool_concurrency` optionally maps pool names to positive integer lane limits,
 for example `{"grok": 3, "claude": 2}`. Omitted pools allow two simultaneous

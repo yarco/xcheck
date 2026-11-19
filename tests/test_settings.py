@@ -60,6 +60,16 @@ class LocalConfiguration(unittest.TestCase):
                 self.assertNotIn("private-secret", result.stdout + result.stderr)
                 self.assertFalse((Path(tmp) / "runs/demo/.launched").exists())
 
+    def test_devin_is_opt_in_even_with_a_local_default_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.json"
+            cfg.write_text(json.dumps({"default_lanes": ["codex:example:high", "devin:swe-2-max"]}))
+            with patch.dict(os.environ, XCHECK_CONFIG=str(cfg)):
+                with self.assertRaisesRegex(ValueError, "Devin is opt-in"):
+                    settings.apply()
+            self.assertNotIn("devin", {lane.kind for lane in adapters.DEFAULT_ROSTER})
+            self.assertEqual(adapters.parse_lane("devin:swe-2-max").kind, "devin")
+
     def test_local_paths_are_consumed_without_installing_the_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

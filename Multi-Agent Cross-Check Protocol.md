@@ -87,7 +87,9 @@ An absent exact model skips before inference; an unreadable inventory is unknown
 Never substitute a model, lower effort or enable a paid route to repair admission.
 
 Devin (`--add devin:swe-2-max`) and Gemini Flash
-(`--add agy:gemini-3.8-flash:high`) are pinned add-ons. Flash and Hydrogen draw
+(`--add agy:gemini-3.8-flash:high`) are pinned add-ons. Devin is explicitly
+selected for a run. Local `default_lanes` rejects every Devin selector.
+Flash and Hydrogen draw
 from the same Gemini quota buckets. Set `free_lanes_per_provider` to draw up to
 that many OpenCode/Cline lanes per provider from the local roster's latest
 successful observations. The selector rotates choices per run and avoids
