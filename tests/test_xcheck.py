@@ -1730,6 +1730,15 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("DEFAULT-ROSTER PROBLEM — codex-gpt-6.2-sol-high skipped: reserve-low:", p.stdout)
         self.assertEqual(self.xcheck("wait", "--base", str(base), mode="slow").returncode, 0)
 
+    def test_run_persists_roster_default_in_run_json(self):
+        base = self.second_base()
+        p = self.xcheck("run", "--base", str(base), "--orch", "other",
+                        "--lanes", "codex:gpt-6.2-sol:high,agy:gemini-3.8-flash:high",
+                        "--mode", "headless", "--skip-capacity")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        saved = json.loads((base / "run.json").read_text())
+        self.assertEqual(saved.get("roster_default"), ["codex-gpt-6.2-sol-high"])
+
     def test_grok_orchestrator_is_refused_headless(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "grok", "--mode", "headless",
                         "--skip-capacity", "--lanes", "codex:gpt-6.2-sol:high")

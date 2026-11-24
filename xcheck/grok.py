@@ -2,18 +2,12 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import selectors
-import signal
 import subprocess
-import time
 from pathlib import Path
-from functools import partial
 
-from . import adapters
+from . import acp_probe, adapters
 from .environment import lane_env
-from .files import defer_stop, end_group
 
 PROBE_TIMEOUT = 45
 
@@ -58,72 +52,31 @@ def probe_session(work: Path, spec: adapters.Launch):
         err = log_path.with_suffix(".stderr").open("w")
     except OSError as exc:
         return argv, None, log_path, f"startup-unavailable: probe log: {exc}"
-    proc, sel = None, None
     try:
-        with defer_stop() as previous:
-            proc = subprocess.Popen(argv, cwd=work, env=lane_env(spec, work), stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE, stderr=err, start_new_session=True,
-                                    preexec_fn=partial(signal.pthread_sigmask, signal.SIG_SETMASK, previous))
-        sel = selectors.DefaultSelector()
-        sel.register(proc.stdout, selectors.EVENT_READ)
-
-        def send(obj):
-            proc.stdin.write(json.dumps(obj).encode() + b"\n")
-            proc.stdin.flush()
-
-        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-              "params": {"protocolVersion": 1, "clientCapabilities": {},
-                         "clientInfo": {"name": "xcheck-admission", "version": "1"}}})
-        deadline = time.monotonic() + PROBE_TIMEOUT
-        pending, eof = b"", False
-        while not eof and time.monotonic() < deadline:
-            for key, _ in sel.select(0.3):
-                chunk = os.read(key.fd, 65536)
-                if not chunk:
-                    eof = True
-                    break
-                *lines, pending = (pending + chunk).split(b"\n")
-                for raw in lines:
-                    try:
-                        msg = json.loads(raw)
-                    except ValueError:
-                        continue
-                    if not isinstance(msg, dict):
-                        continue
-                    if msg.get("method") and "id" in msg:
-                        # Refuse requests like acpx does for unsupported methods.
-                        send({"jsonrpc": "2.0", "id": msg["id"],
-                              "error": {"code": -32601, "message": "Method not found"}})
-                    elif msg.get("id") == 1 and "result" in msg:
-                        send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
-                              "params": {"cwd": str(work), "mcpServers": []}})
-                    elif msg.get("id") == 2:
-                        if "result" in msg and isinstance(msg["result"], dict):
-                            return argv, msg["result"], log_path, None
-                        return argv, None, log_path, f"native-unverified: session/new refused: {json.dumps(msg.get('error'))[:400]}"
-        if not eof:
-            return argv, None, log_path, f"native-unverified: no session/new result within {PROBE_TIMEOUT}s"
-        try:
-            code = proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            code = None
-        return argv, None, log_path, (f"startup-unavailable: Grok agent "
-                                      f"{'closed its output' if code is None else f'exited {code}'} before session/new")
+        with err, acp_probe.Probe(argv, work, lane_env(spec, work), PROBE_TIMEOUT, stderr=err) as rpc:
+            init = rpc.request(1, "initialize", {
+                "protocolVersion": 1, "clientCapabilities": {},
+                "clientInfo": {"name": "xcheck-admission", "version": "1"},
+            })
+            if init.state == "ok":
+                reply = rpc.request(2, "session/new", {"cwd": str(work), "mcpServers": []})
+                if reply.state == "ok":
+                    return argv, reply.result, log_path, None
+                if reply.state == "rpc_error":
+                    return argv, None, log_path, f"native-unverified: session/new refused: {json.dumps(reply.error)[:400]}"
+            elif init.state == "rpc_error":
+                return argv, None, log_path, f"native-unverified: initialize refused: {json.dumps(init.error)[:400]}"
+            else:
+                reply = init
+            if reply.state == "timeout":
+                return argv, None, log_path, f"native-unverified: no session/new result within {PROBE_TIMEOUT}s"
+            if reply.state == "eof":
+                code = rpc.exit_code(timeout=5)
+                return argv, None, log_path, (f"startup-unavailable: Grok agent "
+                                              f"{'closed its output' if code is None else f'exited {code}'} before session/new")
+            return argv, None, log_path, "startup-unavailable: Grok contract probe disconnected"
     except OSError:
         return argv, None, log_path, "startup-unavailable: Grok contract probe disconnected"
-    finally:
-        with defer_stop():
-            try:
-                if sel is not None:
-                    sel.close()
-                if proc is not None:
-                    end_group(proc.pid, reap=proc.poll)
-                    proc.wait()
-            finally:
-                if proc is not None:
-                    proc.stdin.close()
-                    proc.stdout.close()
-                err.close()
 
 
 def contract(argv: list[str], session: dict, log_path: Path | None) -> str | None:

@@ -18,14 +18,12 @@ from __future__ import annotations
 
 import json
 import os
-import selectors
 import shutil
-import signal
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
+from . import acp_probe
 from .environment import lane_env
 from .types import Lane, Launch
 
@@ -126,52 +124,6 @@ def problem() -> str | None:
     return None
 
 
-class _Probe:
-    """Bounded JSON-RPC over the server's stdio. Raw reads avoid buffered-line select stalls."""
-
-    def __init__(self, proc: subprocess.Popen, deadline: float):
-        self.proc, self.deadline, self.pending, self.lines = proc, deadline, b"", []
-        self.sel = selectors.DefaultSelector()
-        self.sel.register(proc.stdout, selectors.EVENT_READ)
-
-    def send(self, message: dict) -> bool:
-        try:
-            self.proc.stdin.write(json.dumps(message).encode() + b"\n")
-            self.proc.stdin.flush()
-            return True
-        except OSError:
-            return False
-
-    def call(self, rid: int, method: str, params: dict):
-        if not self.send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}):
-            return None
-        while True:
-            while self.lines:
-                try:
-                    message = json.loads(self.lines.pop(0))
-                except ValueError:
-                    continue
-                if not isinstance(message, dict):
-                    continue
-                if message.get("method") and "id" in message:  # a server request: refuse, as acpx would
-                    self.send({"jsonrpc": "2.0", "id": message["id"],
-                               "error": {"code": -32601, "message": "Method not found"}})
-                elif message.get("id") == rid:
-                    result = message.get("result")
-                    return result if isinstance(result, dict) else None
-            left = self.deadline - time.monotonic()
-            if left <= 0:
-                return None
-            for key, _ in self.sel.select(min(left, 0.5)):
-                chunk = os.read(key.fd, 65536)
-                if not chunk:
-                    return None
-                *lines, self.pending = (self.pending + chunk).split(b"\n")
-                self.lines.extend(lines)
-                if len(self.pending) > 4 << 20:
-                    return None
-
-
 def _selected(result: dict, option: str) -> str | None:
     for o in result.get("configOptions") or []:
         if isinstance(o, dict) and o.get("id") == option:
@@ -195,36 +147,27 @@ def inventory(model: str | None = None, timeout: float = PROBE_TIMEOUT) -> dict 
         work.mkdir()
         spec = Launch([exe], None, env_set=home(Path(tmp) / "home", True, account_env), kind="vibe")
         try:
-            proc = subprocess.Popen([exe], cwd=work, env=lane_env(spec, work), stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+            with acp_probe.Probe([exe], work, lane_env(spec, work), timeout) as rpc:
+                if rpc.call(1, "initialize", {"protocolVersion": 1, "clientCapabilities": {
+                        "fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}}) is None:
+                    return None
+                new = {"cwd": str(work), "mcpServers": []}
+                result = rpc.call(2, "session/new", new)
+                offer = options(result) if isinstance(result, dict) else None
+                if offer and model and model not in offer["model"]:
+                    # A cold catalog cache serves only the built-in models to the first session,
+                    # which fetches the account's catalog; a second session reads it.
+                    again = rpc.call(3, "session/new", new)
+                    if isinstance(again, dict) and options(again):
+                        result, offer = again, options(again)
+                if offer and model and model in offer["model"]:
+                    chosen = rpc.call(4, "session/set_config_option", {
+                        "sessionId": result.get("sessionId"), "configId": "model", "value": model})
+                    if not isinstance(chosen, dict) or _selected(chosen, "model") != model:
+                        return None
+                    result = {**result, **chosen}
         except OSError:
             return None
-        try:
-            rpc = _Probe(proc, time.monotonic() + timeout)
-            if rpc.call(1, "initialize", {"protocolVersion": 1, "clientCapabilities": {
-                    "fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}}) is None:
-                return None
-            new = {"cwd": str(work), "mcpServers": []}
-            result = rpc.call(2, "session/new", new)
-            offer = options(result) if isinstance(result, dict) else None
-            if offer and model and model not in offer["model"]:
-                # A cold catalog cache serves only the built-in models to the first session,
-                # which fetches the account's catalog; a second session reads it.
-                again = rpc.call(3, "session/new", new)
-                if isinstance(again, dict) and options(again):
-                    result, offer = again, options(again)
-            if offer and model in offer["model"]:
-                chosen = rpc.call(4, "session/set_config_option", {
-                    "sessionId": result.get("sessionId"), "configId": "model", "value": model})
-                if not isinstance(chosen, dict) or _selected(chosen, "model") != model:
-                    return None
-                result = {**result, **chosen}
-        finally:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            proc.wait()
     return options(result) if isinstance(result, dict) else None
 
 

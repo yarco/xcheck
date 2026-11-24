@@ -755,3 +755,10 @@ class FreeRoster(unittest.TestCase):
         n = len(adapters.PINNED_OPT_IN)
         self.assertEqual(adapters.OPT_IN[:n], adapters.PINNED_OPT_IN)
         self.assertEqual(adapters.OPT_IN[n:], adapters.free_lanes())
+
+    def test_every_pinned_opt_in_selector_is_documented_in_reference(self):
+        reference = (pathlib.Path(__file__).resolve().parent.parent / "docs" / "reference.md").read_text(encoding="utf-8")
+        for lane in adapters.PINNED_OPT_IN:
+            selector = f"{lane.kind}:{lane.model}" + (f":{lane.effort}" if lane.effort else "")
+            with self.subTest(selector=selector):
+                self.assertIn(selector, reference)

@@ -30,6 +30,7 @@ native sign-in must also stop when the runner dies.
 | `types.py` | Lane identity, pool identity, launch value | Availability, liveness, review validity |
 | `environment.py` | Scrub inherited control/routing; apply deliberate launch environment | Account recovery or process lifetime |
 | `adapters.py`, `cline.py` | Explicit native launch policy, roster, stream semantics | Supervisor lifecycle or review merit |
+| `acp_probe.py` | Bounded raw-stdio JSON-RPC probe and process-group teardown shared by ACP admission checks | Vendor semantics or lane execution |
 | `grok.py`, `agy.py`, `devin.py`, `vibe.py` | Vendor-specific, inference-free admission observations, lane homes and pure native error parsers | Generic lane termination |
 | `models.py` | Provider-owned price/access observations and client metadata | Reviewer quality or stale-price authorization |
 | `capacity.py`, `claude_auth.py` | Quota admission and owned pre-inference authentication | Retrying a reviewer turn |

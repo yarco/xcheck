@@ -7,6 +7,7 @@ request, never a recipe for repeated master-model turns.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from .files import ROOT, Run, atomic_write, end_group, hold_life, is_alive, now
 BIN = Path(__file__).resolve().parent.parent / "bin" / "xcheck"
 STILL_RUNNING = 3
 POLL = 0.2  # seconds between local file/lock checks; no model is involved
+ADMIT_WAIT = 5.0  # bounded launch-time window to surface fast default-roster admission failures
 REVIEW_ALERT_AFTER = 3600  # owner-requested diagnostic warning, never a termination limit
 
 DELIVER = (
@@ -67,7 +69,7 @@ class RunError(Exception):
 
 def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: bool,
           idle: int | None, cap: int | None, force_lanes: set[str], skip_capacity: bool, *,
-          roster_free: list[str] | None = None) -> int:
+          roster_free: list[str] | None = None, roster_default: list[str] | None = None) -> int:
     base = base.resolve()
     if not base.is_relative_to(ROOT.resolve()):
         raise RunError(f"BASE must live under {ROOT} (got {base}); stage it as {ROOT}/<slug>")
@@ -119,10 +121,13 @@ def start(base: Path, lanes: list[adapters.Lane], mode: str, orch: str, web: boo
         shutil.rmtree(base / ".packet", ignore_errors=True)
         (base / ".launched").rmdir()
         raise
+    if roster_default is None:
+        default_names = {l.name for l in adapters.DEFAULT_ROSTER}
+        roster_default = [l.name for l in lanes if l.name in default_names]
     run = Run(base=base, lanes={l.name: l for l in lanes}, contract=contract,
               web=web, idle=idle, cap=cap, mode=mode, orch=orch, started=now(), panes={},
               herdr=ctx or {}, capacity=not skip_capacity, forced=sorted(force_lanes),
-              epoch=time.time(), roster_free=roster_free or [],
+              epoch=time.time(), roster_free=roster_free or [], roster_default=roster_default,
               accounts={n: {"name": a, "store": str(adapters.OPENCODE_ACCOUNTS[a])} for n, a in assigned.items()})
     try:
         for name in run.lanes:
@@ -201,6 +206,9 @@ def _message(web: bool, kind: str) -> str:
 
 
 def _is_default_lane(run: Run, name: str) -> bool:
+    saved = getattr(run, "roster_default", None)
+    if saved is not None:
+        return name in saved
     default_names = {lane.name for lane in adapters.DEFAULT_ROSTER}
     return name in default_names
 
@@ -208,44 +216,62 @@ def _is_default_lane(run: Run, name: str) -> bool:
 def _report_default_problems(run: Run, seen: set[str] | None = None, *, persist: bool = True) -> list[str]:
     """Immediately print any non-done exit on a default-roster lane once per run."""
     reported_file = run.base / ".reported-defaults.json"
-    if seen is not None:
-        reported = seen
-    elif persist:
+    lock_fh = None
+    if persist:
         try:
-            reported = set(json.loads(reported_file.read_text()))
-        except (OSError, ValueError, TypeError):
-            reported = set()
-    else:
-        reported = set()
-    newly_reported: list[str] = []
-    for name in run.lanes:
-        if name in reported or not _is_default_lane(run, name):
-            continue
-        p = _exit_path(run, name)
-        if not p.exists():
-            continue
-        try:
-            e = json.loads(p.read_text())
-        except (OSError, ValueError):
-            continue
-        status = e.get("status", "failed")
-        reported.add(name)
-        if status != "done":
-            reason = (e.get("reason") or "no reason recorded").replace("\n", " ")
-            msg = f"xcheck: DEFAULT-ROSTER PROBLEM — {name} {status}: {reason}"
-            print(msg, flush=True)
-            newly_reported.append(msg)
+            lock_fh = open(run.base / ".reported-defaults.lock", "a+")
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        except OSError:
+            if lock_fh is not None:
+                lock_fh.close()
+                lock_fh = None
+    try:
         if persist:
+            try:
+                disk = set(json.loads(reported_file.read_text()))
+            except (OSError, ValueError, TypeError):
+                disk = set()
+            reported = seen if seen is not None else set()
+            reported.update(disk)
+        else:
+            reported = seen if seen is not None else set()
+        newly_reported: list[str] = []
+        changed = False
+        for name in run.lanes:
+            if name in reported or not _is_default_lane(run, name):
+                continue
+            p = _exit_path(run, name)
+            if not p.exists():
+                continue
+            try:
+                e = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            status = e.get("status", "failed")
+            reported.add(name)
+            changed = True
+            if status != "done":
+                reason = (e.get("reason") or "no reason recorded").replace("\n", " ")
+                msg = f"xcheck: DEFAULT-ROSTER PROBLEM — {name} {status}: {reason}"
+                print(msg, flush=True)
+                newly_reported.append(msg)
+        if persist and changed:
             try:
                 atomic_write(reported_file, json.dumps(sorted(reported)))
             except OSError:
                 pass
-    return newly_reported
+        return newly_reported
+    finally:
+        if lock_fh is not None:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            finally:
+                lock_fh.close()
 
 
-def _default_lanes_admitted(run: Run) -> bool:
-    """True once every selected default-roster lane has passed pre-spend admission
-    (either started its harness/stream, queued on an occupied pool, or wrote exit.json)."""
+def _unadmitted_default_lanes(run: Run) -> list[tuple[str, str | None]]:
+    """Selected default-roster lanes still before spend/queue/exit, with their recorded phase."""
+    pending: list[tuple[str, str | None]] = []
     for name in run.lanes:
         if not _is_default_lane(run, name):
             continue
@@ -263,14 +289,23 @@ def _default_lanes_admitted(run: Run) -> bool:
                 continue
         except (OSError, ValueError):
             pass
+        phase = None
         try:
-            phase = json.loads((d / "phase.json").read_text()).get("phase")
-            if phase in ("running", "waiting_for_login", "waiting_for_pool"):
-                continue
+            raw_phase = json.loads((d / "phase.json").read_text()).get("phase")
+            if isinstance(raw_phase, str) and raw_phase:
+                phase = raw_phase
         except (OSError, ValueError):
             pass
-        return False
-    return True
+        if phase in ("running", "waiting_for_login", "waiting_for_pool"):
+            continue
+        pending.append((name, phase))
+    return pending
+
+
+def _default_lanes_admitted(run: Run) -> bool:
+    """True once every selected default-roster lane has passed pre-spend admission
+    (either started its harness/stream, queued on an occupied pool, or wrote exit.json)."""
+    return not _unadmitted_default_lanes(run)
 
 
 def detach(argv: list[str], base: Path) -> int:
@@ -297,10 +332,14 @@ def detach(argv: list[str], base: Path) -> int:
         if not reused and (base / "run.json").exists():
             try:
                 run = Run.load(base)
-                admit_deadline = min(deadline, time.time() + 5.0)
-                while time.time() < admit_deadline and not _default_lanes_admitted(run):
+                admit_deadline = min(deadline, time.time() + ADMIT_WAIT)
+                while time.time() < admit_deadline and _unadmitted_default_lanes(run):
                     time.sleep(POLL)
                 _report_default_problems(run)
+                if pending := _unadmitted_default_lanes(run):
+                    details = ", ".join(f"{name} ({phase})" if phase else name for name, phase in pending)
+                    print(f"xcheck: default-roster admission still in progress ({details}); "
+                          "xcheck wait will report any failure.", flush=True)
             except Exception:
                 pass
             print(f"xcheck: supervisor pid {p.pid} running.\n"
@@ -341,7 +380,7 @@ def wait(base: Path, timeout: int | None) -> int:
             except BlockingIOError:
                 pass  # another wait took over first; watch it instead
             else:
-                return _wait(run, {}, until)
+                return _wait(run, {}, until, persist_reports=True)
         if until and time.time() >= until:
             return _still_running(run)
         time.sleep(POLL)
@@ -355,7 +394,8 @@ def _still_running(run: Run) -> int:
     return STILL_RUNNING
 
 
-def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None = None) -> int:
+def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None = None, *,
+          persist_reports: bool = False) -> int:
     interrupted: list[str] = []
 
     def on_signal(signum, _frame):
@@ -386,7 +426,10 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
                 if _exit_path(run, name).exists():
                     pending.discard(name)
             # Unknown startup remains pending; elapsed time cannot prove a failed launch.
-        _report_default_problems(run, reported_local, persist=False)
+        if persist_reports:
+            _report_default_problems(run)
+        else:
+            _report_default_problems(run, reported_local, persist=False)
         if pending:
             if not warned and warn_at is not None and time.time() >= warn_at:
                 warned = True

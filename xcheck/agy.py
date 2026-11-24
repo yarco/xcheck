@@ -221,18 +221,35 @@ def _match_end_turn_shape(text: str) -> str | None:
 def stream_error(chunks: Sequence[str]) -> str | None:
     """Recognize server-wrapped error notices emitted on an `end_turn` stream.
 
-    Checks the joined answer first, then the final non-empty chunk so partial
-    prose followed by a standalone server error notice is caught even without
-    `harness.log`. A contract-valid review ends with `RESULT_COMPLETE`, so
-    neither match can classify a valid review.
+    Checks the joined answer, the final non-empty chunk, and the final non-empty
+    paragraph/line (including Go-style `: ` continuations and two-paragraph quota
+    notices) so partial prose followed by a standalone or split server error
+    notice is caught even without `harness.log`. A contract-valid review ends
+    with `RESULT_COMPLETE`, and quoted prose never full-matches a standalone
+    server error shape.
     """
     raw_chunks = [c for c in chunks if isinstance(c, str)]
-    if matched := _match_end_turn_shape("".join(raw_chunks)):
+    joined = "".join(raw_chunks)
+    lines = [line.strip() for line in joined.splitlines() if line.strip()]
+    if not lines or lines[-1] == "RESULT_COMPLETE":
+        return None
+    if matched := _match_end_turn_shape(joined):
         return matched
     non_empty = [c for c in raw_chunks if c.strip()]
     if len(non_empty) > 1:
-        return _match_end_turn_shape(non_empty[-1])
-    return None
+        if matched := _match_end_turn_shape(non_empty[-1]):
+            return matched
+    paragraphs = [p.strip() for p in re.split(r"\n[ \t]*\n+", joined.strip()) if p.strip()]
+    if len(paragraphs) >= 2 and paragraphs[-2] == "Usage Limit Reached":
+        if matched := _match_end_turn_shape(f"{paragraphs[-2]}\n\n{paragraphs[-1]}"):
+            return matched
+    if paragraphs:
+        if matched := _match_end_turn_shape(paragraphs[-1]):
+            return matched
+    start = len(lines) - 1
+    while start > 0 and lines[start].startswith(": "):
+        start -= 1
+    return _match_end_turn_shape("\n".join(lines[start:]))
 
 
 def proxy_502_kind(text: str) -> str | None:

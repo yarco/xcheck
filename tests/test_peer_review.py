@@ -78,16 +78,17 @@ class PeerReview(unittest.TestCase):
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
         previous = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGTERM, lane._raise_stop)
-        original = grok.end_group
+        from xcheck import acp_probe
+        original = files.end_group
         def interrupted_cleanup(pid, **kw):
             signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
             return original(pid, **kw)
         try:
             with patch.object(adapters, 'grok_probe_command', return_value=(['fake'], self.base / 'probe.log')), \
                  patch.object(grok, 'lane_env', return_value={}), \
-                 patch.object(grok.subprocess, 'Popen', return_value=child), \
-                 patch.object(grok.selectors, 'DefaultSelector', return_value=Mock(register=Mock(side_effect=OSError))), \
-                 patch.object(grok, 'end_group', side_effect=interrupted_cleanup):
+                 patch.object(acp_probe.subprocess, 'Popen', return_value=child), \
+                 patch.object(acp_probe.selectors, 'DefaultSelector', return_value=Mock(register=Mock(side_effect=OSError))), \
+                 patch.object(files, 'end_group', side_effect=interrupted_cleanup):
                 with self.assertRaises(lane._Stop):
                     grok.probe_session(self.base, None)
             self.assertIsNotNone(child.returncode)

@@ -173,6 +173,57 @@ class Reader(unittest.TestCase):
         self.assertEqual(r_partial.text, "")
         self.assertTrue(r_partial.error.startswith("Agent execution error: model unreachable: Error 502"))
 
+    def test_split_server_error_after_prose_is_recognized(self):
+        split_cases = (
+            ("exec-blank-line", ["Checking the files.\n\n", "Agent execution error: ", "model unreachable: Error 502"],
+             "Agent execution error: model unreachable: Error 502"),
+            ("exec-single-nl", ["Checking the files.\n", "Agent execution error: ", "upstream 503"],
+             "Agent execution error: upstream 503"),
+            ("exec-go-wrap", ["Checking the files.\n", "Agent execution error: upstream failure",
+                              "\n: connection reset by peer"],
+             "Agent execution error: upstream failure"),
+            ("quota-split", ["Checking the files.\n\n", "Usage Limit Reached\n\n",
+                             "You have reached your current quota for this period."],
+             "Usage Limit Reached"),
+            ("mcp-split", ["Checking the files.\n", "The MCP server 'fff' ", "failed to initialize: boom"],
+             "The MCP server 'fff' failed to initialize: boom"),
+        )
+        for name, parts, expected in split_cases:
+            with self.subTest(case=name):
+                r = read([PROMPT, *(chunk(p) for p in parts), rpc(id=3, result={"stopReason": "end_turn"})])
+                self.assertTrue(r.end_turn_error)
+                self.assertFalse(r.completed)
+                self.assertEqual(r.text, "")
+                self.assertIsNotNone(r.error)
+                self.assertIn(expected, r.error)
+
+    def test_split_quoted_error_text_in_review_is_never_classified_as_server_error(self):
+        # 1) Contract-valid review quoting a standalone error line split across chunks, ending with RESULT_COMPLETE.
+        valid = read([
+            PROMPT,
+            chunk("1) VERDICT: Found a native error pattern.\n\n"),
+            chunk("Agent execution error: "),
+            chunk("model unreachable: Error 502\n\n"),
+            chunk(f"6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n"),
+            rpc(id=3, result={"stopReason": "end_turn"}),
+        ])
+        self.assertIsNone(valid.error)
+        self.assertFalse(valid.end_turn_error)
+        self.assertTrue(valid.completed)
+        self.assertEqual(support.validate.check(valid.text, support.CONTRACT)[0], "done")
+
+        # 2) Review quoting error text inline or in a markdown blockquote on its last line (even without RESULT_COMPLETE).
+        for name, parts in (
+            ("inline-quote", ["The log showed: ", "Agent execution error: ", "upstream 503"]),
+            ("blockquote", ["Finding:\n", "> Agent execution error: ", "upstream 503"]),
+            ("backtick-quote", ["Finding:\n", "`Agent execution error: ", "upstream 503`"]),
+        ):
+            with self.subTest(case=name):
+                r = read([PROMPT, *(chunk(p) for p in parts), rpc(id=3, result={"stopReason": "end_turn"})])
+                self.assertIsNone(r.error)
+                self.assertFalse(r.end_turn_error)
+                self.assertTrue(r.completed)
+
     def test_end_turn_fallback_never_displaces_incomplete_or_rpc_failures(self):
         # Incomplete turn with a recognizable error line + id-null disconnect keeps the id-null error & draft.
         r_incomplete = read([PROMPT, chunk("Agent execution error: transient draft"),

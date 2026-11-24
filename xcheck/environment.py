@@ -12,8 +12,8 @@ from pathlib import Path
 # API route. ACPX_AUTH_* is promoted by acpx into the agent environment.
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "CLINE_", "OPENCODE", "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_",
-                  "ANTHROPIC_", "AGENT_PROXY_", "CCR_")
-SCRUB_KIND = {"grok": ("GROK_",), "vibe": ("VIBE_",)}  # a lane restores only its own account binding
+                  "ANTHROPIC_", "AGENT_PROXY_", "CCR_", "VIBE_")
+SCRUB_KIND = {"grok": ("GROK_",)}  # Grok rebuilds its full env; Vibe restores only its account binding
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
 SCRUB_NAMES = {
     "OLDPWD", "CREDENTIALS_DIRECTORY", "MAX_THINKING_TOKENS", "IS_SANDBOX",

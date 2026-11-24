@@ -138,6 +138,7 @@ class Run:
     workspaces: dict = None      # actual paths, retained for settled records from earlier layouts
 
     roster_free: list[str] = field(default_factory=list)
+    roster_default: list[str] | None = None
 
     def lane(self, name: str) -> Lane:
         return self.lanes[name]
@@ -156,7 +157,7 @@ class Run:
         return workspace(self.lane(name), self.base)
 
     def save(self) -> None:
-        atomic_write(self.base / "run.json", json.dumps({
+        payload = {
             "lanes": {n: l.to_json() for n, l in self.lanes.items()},
             "contract": vars(self.contract),
             "web": self.web, "idle": self.idle, "cap": self.cap, "mode": self.mode,
@@ -165,11 +166,15 @@ class Run:
             "forced": self.forced or [], "epoch": self.epoch, "accounts": self.accounts or {},
             "workspaces": {n: str(self.workspace(n)) for n in self.lanes},
             "roster_free": self.roster_free,
-        }, indent=2))
+        }
+        if self.roster_default is not None:
+            payload["roster_default"] = self.roster_default
+        atomic_write(self.base / "run.json", json.dumps(payload, indent=2))
 
     @classmethod
     def load(cls, base: Path) -> "Run":
         d = json.loads((base / "run.json").read_text(encoding="utf-8"))
+        saved_default = d.get("roster_default")
         return cls(
             base=base,
             lanes={n: Lane.from_json(v) for n, v in d["lanes"].items()},
@@ -179,6 +184,7 @@ class Run:
             herdr=d.get("herdr", {}), capacity=d.get("capacity", True),
             forced=d.get("forced", []), epoch=d.get("epoch", 0.0), accounts=d.get("accounts", {}),
             roster_free=d.get("roster_free", []),
+            roster_default=saved_default if isinstance(saved_default, list) else None,
             workspaces=d.get("workspaces", {
                 n: str(Path(os.path.realpath(ROOT)) / ".lanes" / Lane.from_json(v).pool / n)
                 for n, v in d["lanes"].items()
