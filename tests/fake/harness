@@ -338,6 +338,7 @@ def review_turn(pid, server):
               "data": {"message": message, "service": "session", "errorName": "APIError"}}})
         return
     text = {"mcp-fail": "The MCP server 'semble' failed to initialize: connection closed",
+            "exec-error": "Agent execution error: model unreachable: Error 502, Message: Bad Gateway: Failed to connect to backend API, Status: 502 Bad Gateway",
             "echo-upstream-limit": good.replace("The claim holds", "The packet quotes " + UPSTREAM_LIMIT),
             "echo402": good.replace("The claim holds", "The packet quotes `HTTP 402 payment required`, "
                                     "`You've hit your limit · resets 7pm` and `session limit reached`; "
@@ -345,6 +346,17 @@ def review_turn(pid, server):
             "draft-rewrite": good.replace("The claim holds", "FINAL reviewed answer"),
             "invalid": "### 1) VERDICT\nfine but no proof and no marker\n",
             "declined": "I cannot do this review.\nRESULT_INVALID\n"}.get(mode, good)
+    if mode == "exec-error":
+        print("I0101 00:00:00.900000 1 proxy_server.py:106] Proxy extracted model from path: gemini-3.8-flash-high",
+              file=sys.stderr, flush=True)
+        print("E0101 00:00:01.000000 1 proxy_server.py:222] Proxy failed to connect to CCPA API: "
+              "Socket operation failed to CCPA API: Remote end closed connection without response",
+              file=sys.stderr, flush=True)
+        print("E0101 00:00:01.005000 1 server.py:6675] Antigravity SDK error processing prompt for session s",
+              file=sys.stderr, flush=True)
+        print("google.antigravity.types.AntigravityExecutionError: model unreachable: Error 502, "
+              "Message: Bad Gateway: Failed to connect to backend API, Status: 502 Bad Gateway, Details: []",
+              file=sys.stderr, flush=True)
     chunks(text)
     if mode == "text-only":
         sys.exit(0)

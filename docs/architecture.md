@@ -30,7 +30,7 @@ native sign-in must also stop when the runner dies.
 | `types.py` | Lane identity, pool identity, launch value | Availability, liveness, review validity |
 | `environment.py` | Scrub inherited control/routing; apply deliberate launch environment | Account recovery or process lifetime |
 | `adapters.py`, `cline.py` | Explicit native launch policy, roster, stream semantics | Supervisor lifecycle or review merit |
-| `grok.py`, `agy.py` | Vendor-specific, inference-free admission observations | Generic lane termination |
+| `grok.py`, `agy.py` | Vendor-specific, inference-free admission observations and pure native error parsers | Generic lane termination |
 | `models.py` | Provider-owned price/access observations and client metadata | Reviewer quality or stale-price authorization |
 | `capacity.py`, `claude_auth.py` | Quota admission and owned pre-inference authentication | Retrying a reviewer turn |
 | `lane.py` | Stage after pool admission, own child, read stream, enforce requested cancellation policy | Pane text as completion |
@@ -131,6 +131,7 @@ into failure unless the operator requested a cancellation limit.
 | A hardcoded free lane outlives the refresh that dropped it | `freeroster.default_lanes` selects from one roster snapshot and refuses recognized free pins. `doctor` uses the same pin check. Lane admission rechecks zero pricing | `test_freeroster.py` eligibility, matching, rotation and doctor tests | The roster producer and runner share one admission service |
 | Grok renamed tool IDs fail its allowlist open | Zero-turn resolved-toolset contract | `test_runner_issues.py` Grok probes | Native allowlists fail closed and their result remains observable |
 | Agy's server rewrites Keychain ACLs | Canonical read, isolated 0600 file credential, cleanup | `test_agy_acp.py`; protocol Agy facts | Verified native Keychain custody no longer causes prompts |
+| Agy's server reports prompt errors as `agent_message_chunk` + `end_turn` | Pure `agy.stream_error` on completed `Reader.finish()` plus `agy.log_abort` in shared `settlement.publish()` only after contract validation fails and with no durable stop; scrubbed errors and bounded-enum `ccpa_proxy` diagnostics | `test_agy_acp.py` end-turn, privacy, precedence, log-abort and fake-harness e2e tests | The ACP server reports prompt failures as JSON-RPC errors or a non-`end_turn` stop reason |
 
 For changes, identify the affected rows and native fixtures first. Preserve the
 requirements even when deleting the mechanisms. Run focused failing-before

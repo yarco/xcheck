@@ -71,6 +71,29 @@ def publish(run, name: str, reader, outcome: Outcome, *, context: str = "") -> d
     diagnostics = [*reader.diagnostics, *outcome.diagnostics]
     notes.extend(adapters.diagnostic_notes(outcome.diagnostics))
     notes.extend(f"display unavailable: {d['error']}" for d in outcome.diagnostics if d.get("kind") == "display")
+    text = reader.text
+    error = reader.error
+    if outcome.status is None and run.lane(name).kind == "agy":
+        from . import agy
+        if reader.completed and not error and status != "done":
+            abort = agy.log_abort(directory / "harness.log", getattr(reader, "session_id", None))
+            if abort is not None:
+                status = "failed"
+                error = abort.error
+                reason = error
+                text = ""
+                if diag := agy.proxy_diagnostic(abort.proxy_kind, abort.proxy_cause):
+                    diagnostics.append(diag)
+                    notes.extend(adapters.diagnostic_notes([diag]))
+        elif status == "failed" and getattr(reader, "end_turn_error", False) and error:
+            if pkind := agy.proxy_502_kind(error):
+                abort = agy.log_abort(directory / "harness.log", getattr(reader, "session_id", None))
+                cause = "proxy_internal" if pkind == "proxy_internal" else (
+                    abort.proxy_cause if abort and abort.proxy_kind == "connect" else None
+                )
+                if diag := agy.proxy_diagnostic(pkind, cause):
+                    diagnostics.append(diag)
+                    notes.extend(adapters.diagnostic_notes([diag]))
     if status == "failed" and run.lane(name).kind == "opencode":
         try:
             native = activity.opencode_failure(run, name)
@@ -81,7 +104,6 @@ def publish(run, name: str, reader, outcome: Outcome, *, context: str = "") -> d
             http = f" (HTTP {native['status']})" if "status" in native else ""
             notes.append(f"native {native['type']}{http}: {native['message']}")
     result = run.base / f"RESULT-{name}.md"
-    text = reader.text
     if text.strip():
         atomic_write(result, text if text.endswith("\n") else text + "\n")
     elif result.exists() and not reader.completed:
@@ -90,12 +112,12 @@ def publish(run, name: str, reader, outcome: Outcome, *, context: str = "") -> d
         stderr = (directory / "stderr.log").read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         stderr = []
-    if outcome.status is None and not reader.error and reader.completed and not text.strip():
+    if outcome.status is None and not error and reader.completed and not text.strip():
         first = next((line.strip() for line in stderr if line.strip()), "")
         if first:
             reason = "stderr: " + " ".join(first.split())[:240]
     record = dict(lane=name, status=status, reason="; ".join([reason, *notes]),
-                  exit_code=outcome.code, error=reader.error, ended=now(),
+                  exit_code=outcome.code, error=error, ended=now(),
                   result_bytes=len(text.encode()), stderr_tail=stderr[-40:], diagnostics=diagnostics)
     if outcome.started is not None:
         record.update(started=now(outcome.started), seconds=round(time.time() - outcome.started))

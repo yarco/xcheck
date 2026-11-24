@@ -382,7 +382,7 @@ def _kill(proc: subprocess.Popen) -> None:
 def _finish(run: Run, name: str, reader, outcome: settlement.Outcome, pane) -> int:
     record = settlement.publish(run, name, reader, outcome)
     pane.show([f"xcheck lane {name}: {record['status']} — {record['reason']}"])
-    pane.answer(name, reader.text)
+    pane.answer(name, reader.text if record.get("result_bytes") else "")
     return 0
 
 

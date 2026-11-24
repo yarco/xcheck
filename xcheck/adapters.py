@@ -1017,7 +1017,8 @@ def diagnostic_notes(diagnostics) -> list[str]:
         elif d["kind"] == "auth":
             notes.append(f"auth source: {d['label']}")
         elif d["kind"] == "native_error":
-            notes.append(f"native error: {d['type']}")
+            cause = f" ({d['cause']})" if isinstance(d.get("cause"), str) and d["cause"] else ""
+            notes.append(f"native error: {d['type']}{cause}")
         elif d["kind"] == "provider_error":
             detail = f" [{d['detail']}]" if "detail" in d else ""
             correlation = "; ".join(f"{key.replace('_', ' ')}: {d[key]}"
@@ -1059,6 +1060,8 @@ class Reader:
     completed: bool = False
     diagnostics: list[dict] = field(default_factory=list)
     expected_model: str = ""
+    session_id: str | None = None
+    end_turn_error: bool = False
     _buf: list[str] = field(default_factory=list)
     _mcp_calls: dict[str, dict] = field(default_factory=dict)  # Claude: tool_use id → policy diagnostic
     _prompt_id: object = None
@@ -1102,12 +1105,13 @@ class Reader:
                 self.error = self._failure
             return
         self.text = "".join(self._buf)
-        head = self.text.strip()
-        # Agy's server reports an MCP server that will not start as the whole
-        # answer of a turn that still ends end_turn.
-        if self.kind == "agy" and re.fullmatch(r"The MCP server '[^'\n]+' failed to initialize[^\n]*", head):
-            self.error = _clip(head.splitlines()[0], 300)
-        elif not self.completed and not self.error and (self._held or self._failure):
+        if self.kind == "agy" and self.completed and not self.error:
+            from . import agy
+            if server_error := agy.stream_error(self._buf):
+                self.error = server_error
+                self.completed, self.text, self.end_turn_error = False, "", True
+                return
+        if not self.completed and not self.error and (self._held or self._failure):
             self.error = self._held or self._failure
 
     def feed(self, o: dict) -> None:
@@ -1120,6 +1124,7 @@ class Reader:
                     # acpx sends one prompt (--prompt-retries 0); session/prompt
                     # is client-to-agent, so a later one is an ordinary request.
                     self._prompt_id = o["id"]
+                    self._record_session(o.get("params"))
                 else:
                     key = _id_key(o["id"])
                     if self._held is not None and self._open.get(key) and o["id"] == self._prompt_id:
@@ -1134,6 +1139,13 @@ class Reader:
         if "result" in o or "error" in o:
             return self._response(o)
         return None
+
+    def _record_session(self, container) -> None:
+        if self.session_id or not isinstance(container, dict):
+            return
+        sid = container.get("sessionId")
+        if isinstance(sid, str) and sid and not any(c.isspace() for c in sid):
+            self.session_id = sid
 
     def _response(self, o: dict) -> None:
         rid, result, error = o.get("id"), o.get("result"), o.get("error")
@@ -1183,6 +1195,8 @@ class Reader:
                 and params.get("status") not in (None, "ready", "initialized")):
             self.diagnostics.append(dict(kind="mcp_startup", server=params.get("name"),
                                          status=params.get("reason") or params.get("status")))
+            return None
+        if self.session_id and isinstance(params.get("sessionId"), str) and params["sessionId"] != self.session_id:
             return None
         update = params.get("update")
         update = update if isinstance(update, dict) else {}

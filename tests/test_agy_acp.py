@@ -140,6 +140,325 @@ class Reader(unittest.TestCase):
         r = read([PROMPT, chunk("The MCP server 'fff' failed to initialize: Error: expect initialized request"),
                   rpc(id=3, result={"stopReason": "end_turn"})])
         self.assertTrue(r.error.startswith("The MCP server 'fff' failed to initialize"))
+        self.assertFalse(r.completed)
+        self.assertEqual(r.text, "")
+
+    def test_server_wrapped_end_turn_errors_fail_without_publishing_an_answer(self):
+        cases = (
+            ("exec-502", "Agent execution error: model unreachable: Error 502, Message: Bad Gateway: "
+                         "Failed to connect to backend API, Status: 502 Bad Gateway"),
+            ("exec-go-wrap", "Agent execution error: model unreachable: upstream failure\n: connection reset by peer"),
+            ("conn-lost", "Agent connection was lost and could not be re-established: connection closed"),
+            ("quota", "Usage Limit Reached\n\nYou have reached your current quota for this period. "
+                      "Your limit will reset in 2 hours."),
+            ("browser-mcp", "Browser automation could not start (the chrome-devtools-mcp tool provider "
+                            "failed to launch), so this request could not be completed. Other functionality is unaffected."),
+        )
+        for name, message in cases:
+            with self.subTest(case=name):
+                r = read([PROMPT, TOOL, chunk(message), rpc(id=3, result={"stopReason": "end_turn"})])
+                self.assertIsNotNone(r.error)
+                self.assertTrue(r.end_turn_error)
+                self.assertIn(message.splitlines()[0], r.error)
+                self.assertFalse(r.completed)
+                self.assertEqual(r.text, "")
+
+        # Partial prose followed by a standalone vendor error chunk also classifies stream-only.
+        r_partial = read([PROMPT, chunk("Partial draft before failure."),
+                          chunk("Agent execution error: model unreachable: Error 502, "
+                                "Message: Bad Gateway: Failed to connect to backend API, Status: 502 Bad Gateway"),
+                          rpc(id=3, result={"stopReason": "end_turn"})])
+        self.assertTrue(r_partial.end_turn_error)
+        self.assertFalse(r_partial.completed)
+        self.assertEqual(r_partial.text, "")
+        self.assertTrue(r_partial.error.startswith("Agent execution error: model unreachable: Error 502"))
+
+    def test_end_turn_fallback_never_displaces_incomplete_or_rpc_failures(self):
+        # Incomplete turn with a recognizable error line + id-null disconnect keeps the id-null error & draft.
+        r_incomplete = read([PROMPT, chunk("Agent execution error: transient draft"),
+                             rpc(id=None, error={"code": -32070, "message": "agent disconnected"})])
+        self.assertFalse(r_incomplete.completed)
+        self.assertFalse(r_incomplete.end_turn_error)
+        self.assertEqual(r_incomplete.error, "agent disconnected")
+        self.assertEqual(r_incomplete.text, "Agent execution error: transient draft")
+
+        # Real correlated RPC error stays authoritative even if a server error chunk preceded it.
+        r_rpc = read([PROMPT, chunk("Agent execution error: shadow"),
+                      rpc(id=3, error={"code": -32603, "message": "upstream refused"})])
+        self.assertFalse(r_rpc.end_turn_error)
+        self.assertEqual(r_rpc.error, "upstream refused")
+
+    def test_stream_and_log_errors_scrub_urls_emails_tokens_and_details(self):
+        from xcheck import agy
+        dirty = ("The MCP server 'broken' failed to initialize: auth failed for user@example.com "
+                 "at https://accounts.google.com/v3/signin?tok=secret Bearer abc123 ya29.secret_tok "
+                 "1//refresh_tok, Details: [map[secret:xyz]]")
+        r = read([PROMPT, chunk(dirty), rpc(id=3, result={"stopReason": "end_turn"})])
+        self.assertIsNotNone(r.error)
+        self.assertTrue(r.error.startswith("The MCP server 'broken' failed to initialize"))
+        for leaked in ("user@example.com", "https://", "accounts.google.com", "abc123", "ya29.", "1//refresh_tok", "Details:"):
+            self.assertNotIn(leaked, r.error)
+        self.assertIn("<email>", r.error)
+        self.assertIn("<url>", r.error)
+        self.assertIn("Bearer <token>", r.error)
+
+        # diagnostic_notes renders bounded cause only and never leaks arbitrary native_error message text.
+        self.assertEqual(
+            adapters.diagnostic_notes([{"kind": "native_error", "type": "provider.auth", "message": "secret opencode note"}]),
+            ["native error: provider.auth"],
+        )
+        self.assertEqual(
+            adapters.diagnostic_notes([agy.proxy_diagnostic("connect", "remote_disconnect")]),
+            ["native error: ccpa_proxy (remote_disconnect)"],
+        )
+        self.assertEqual(
+            adapters.diagnostic_notes([agy.proxy_diagnostic("connect", None)]),
+            ["native error: ccpa_proxy"],
+        )
+
+    def test_session_id_binds_strictly_to_prompt_and_ignores_other_session_updates(self):
+        r = read([
+            rpc(id=1, result={"sessionId": "sid-unrelated"}),
+            rpc(method="session/update", params={"sessionId": "sid-unrelated", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "stale"},
+            }}),
+            rpc(id=3, method="session/prompt", params={"sessionId": "sid-real", "prompt": []}),
+            rpc(method="session/update", params={"sessionId": "sid-unrelated", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "noise"},
+            }}),
+            rpc(method="session/update", params={"sessionId": "sid-real", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "real answer"},
+            }}),
+            rpc(id=3, result={"stopReason": "end_turn"}),
+        ])
+        self.assertEqual(r.session_id, "sid-real")
+        self.assertEqual(r.text, "stale" + "real answer")  # pre-prompt had no session_id yet; post-prompt filtered
+
+    def test_a_review_quoting_server_errors_is_not_a_native_failure(self):
+        for quoted in (
+            "Agent execution error: model unreachable: Error 502, Status: 502 Bad Gateway",
+            "Agent connection was lost and could not be re-established: EOF",
+            "Usage Limit Reached\n\nYou have reached your current quota for this period.",
+        ):
+            with self.subTest(quoted=quoted[:30]):
+                text = (f"{quoted}\n"
+                        "1) VERDICT: The lane failed with a native proxy 502 error.\n"
+                        f"6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n")
+                r = read([PROMPT, chunk(text), rpc(id=3, result={"stopReason": "end_turn"})])
+                self.assertIsNone(r.error)
+                self.assertTrue(r.completed)
+                self.assertEqual(support.validate.check(r.text, support.CONTRACT)[0], "done")
+
+    def test_settlement_corroborates_harness_log_with_contract_and_precedence_guards(self):
+        import tempfile
+        from xcheck import files, settlement
+
+        def publish_case(events, log_text, *, outcome=None, termination=None):
+            with tempfile.TemporaryDirectory(prefix="xcheck-agy-settle-") as tmp:
+                base = Path(tmp)
+                peer = adapters.Lane("agy", "gemini-4-neon", "high")
+                current = files.Run(base, {peer.name: peer}, support.CONTRACT, False, 0, None,
+                                    "headless", "codex", "now", {}, {})
+                d = current.lane_dir(peer.name)
+                d.mkdir(parents=True)
+                stream = d / "stream.jsonl"
+                stream.write_text("\n".join(map(json.dumps, events)) + "\n")
+                if log_text is not None:
+                    (d / "harness.log").write_text(log_text)
+                if termination is not None:
+                    (d / "termination.json").write_text(json.dumps(termination))
+                reader = adapters.Reader.replay("agy", stream, False, peer.model)
+                rec = settlement.publish(current, peer.name, reader, outcome or settlement.Outcome(directory=d))
+                result_exists = (base / f"RESULT-{peer.name}.md").exists()
+                return rec, result_exists
+
+        good = f"1) VERDICT: The reviewed contract holds.\n6) PROOF: {support.TOKEN}\nRESULT_COMPLETE\n"
+
+        # 1) Prefix-stripped Google RPC error (with verification URL) corroborated by session abort;
+        # uses scrubbed exception text (never raw URL or unmatched chunk).
+        events_rpc = [
+            rpc(id=1, result={"sessionId": "sid-rpc"}),
+            rpc(id=3, method="session/prompt", params={"sessionId": "sid-rpc", "prompt": []}),
+            rpc(method="session/update", params={"sessionId": "sid-rpc", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Verify your account\n\nVerify your account: https://accounts.google.com/v3/verify?tok=abc"},
+            }}),
+            rpc(id=3, result={"stopReason": "end_turn"}),
+        ]
+        log_rpc = (
+            "E0101 00:00:01.000000 1 server.py:6675] Antigravity SDK error processing prompt for session sid-rpc\n"
+            "google.antigravity.types.AntigravityExecutionError: Error 403, Message: Verify your account at "
+            "https://accounts.google.com/v3/verify?tok=abc, Status: PERMISSION_DENIED, Details: [internal]\n"
+        )
+        rec, has_result = publish_case(events_rpc, log_rpc)
+        self.assertEqual(rec["status"], "failed")
+        self.assertFalse(has_result)
+        self.assertEqual(rec["result_bytes"], 0)
+        self.assertIn("AntigravityExecutionError: Error 403", rec["error"])
+        self.assertIn("<url>", rec["error"])
+        self.assertNotIn("https://", rec["error"])
+        self.assertNotIn("Details:", rec["error"])
+        self.assertEqual(rec["diagnostics"], [])
+
+        # 2) Contract-valid review stays DONE even if opening with a quoted 502 AND a same-session log abort exists!
+        good_quoting = ("Agent execution error: model unreachable: Error 502, Message: Bad Gateway: "
+                        "Failed to connect to backend API, Status: 502 Bad Gateway\n" + good)
+        events_valid = [
+            rpc(id=3, method="session/prompt", params={"sessionId": "sid-valid", "prompt": []}),
+            rpc(method="session/update", params={"sessionId": "sid-valid", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": good_quoting},
+            }}),
+            rpc(id=3, result={"stopReason": "end_turn"}),
+        ]
+        log_same_sid = (
+            "I0101 00:00:00.500000 1 proxy_server.py:106] Proxy extracted model from path: gemini-4-neon-high\n"
+            "E0101 00:00:01.000000 1 proxy_server.py:222] Proxy failed to connect to CCPA API: "
+            "Socket operation failed to CCPA API: Remote end closed connection without response\n"
+            "E0101 00:00:02.000000 1 server.py:6675] Antigravity SDK error processing prompt for session sid-valid\n"
+        )
+        rec, has_result = publish_case(events_valid, log_same_sid)
+        self.assertEqual(rec["status"], "done")
+        self.assertTrue(has_result)
+        self.assertIsNone(rec["error"])
+        self.assertEqual(rec["diagnostics"], [])
+
+        # 3) Local proxy 502 maps to strictly bounded cause enum (remote_disconnect / read_timeout / network / proxy_internal).
+        proxy_cases = (
+            ("remote_disconnect", "E0101 00:00:01.000000 1 proxy_server.py:222] Proxy failed to connect to CCPA API: "
+                                  "Socket operation failed to CCPA API: Remote end closed connection without response"),
+            ("read_timeout", "E0101 00:00:01.000000 1 proxy_server.py:222] Proxy failed to connect to CCPA API: "
+                             "Socket operation failed to CCPA API: The read operation timed out"),
+            ("network", "E0101 00:00:01.000000 1 proxy_server.py:222] Proxy failed to connect to CCPA API: "
+                        "Network connection failed to CCPA API: [Errno 8] nodename nor servname provided"),
+        )
+        for expected_cause, proxy_line in proxy_cases:
+            with self.subTest(cause=expected_cause):
+                events_502 = [
+                    rpc(id=3, method="session/prompt", params={"sessionId": "sid-502", "prompt": []}),
+                    rpc(method="session/update", params={"sessionId": "sid-502", "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "Agent execution error: model unreachable: Error 502, "
+                                                            "Message: Bad Gateway: Failed to connect to backend API, "
+                                                            "Status: 502 Bad Gateway"},
+                    }}),
+                    rpc(id=3, result={"stopReason": "end_turn"}),
+                ]
+                log_502 = (
+                    "I0101 00:00:00.500000 1 proxy_server.py:106] Proxy extracted model from path: gemini-4-neon-high\n"
+                    f"{proxy_line}\n"
+                    "E0101 00:00:02.000000 1 server.py:6675] Antigravity SDK error processing prompt for session sid-502\n"
+                    "google.antigravity.types.AntigravityExecutionError: model unreachable: Error 502, "
+                    "Message: Bad Gateway: Failed to connect to backend API, Status: 502 Bad Gateway, Details: []\n"
+                )
+                rec, has_result = publish_case(events_502, log_502)
+                self.assertEqual(rec["status"], "failed")
+                self.assertFalse(has_result)
+                self.assertEqual(rec["diagnostics"], [{"kind": "native_error", "type": "ccpa_proxy", "cause": expected_cause}])
+                self.assertIn(f"native error: ccpa_proxy ({expected_cause})", rec["reason"])
+
+        # Missing request marker omits guessed cause while keeping ccpa_proxy type from the exact proxy 502 body.
+        log_no_marker = (
+            "E0101 00:00:01.000000 1 proxy_server.py:222] Proxy failed to connect to CCPA API: "
+            "Socket operation failed to CCPA API: Remote end closed connection without response\n"
+            "E0101 00:00:02.000000 1 server.py:6675] Antigravity SDK error processing prompt for session sid-502\n"
+            "google.antigravity.types.AntigravityExecutionError: model unreachable: Error 502, "
+            "Message: Bad Gateway: Failed to connect to backend API, Status: 502 Bad Gateway, Details: []\n"
+        )
+        rec, _ = publish_case(events_502, log_no_marker)
+        self.assertEqual(rec["diagnostics"], [{"kind": "native_error", "type": "ccpa_proxy"}])
+
+        # Internal Proxy Error 502 maps to cause="proxy_internal".
+        events_internal = [
+            rpc(id=3, method="session/prompt", params={"sessionId": "sid-int", "prompt": []}),
+            rpc(method="session/update", params={"sessionId": "sid-int", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Agent execution error: Error 502, Message: Internal Proxy Error, Status: 502 Bad Gateway"},
+            }}),
+            rpc(id=3, result={"stopReason": "end_turn"}),
+        ]
+        rec, _ = publish_case(events_internal, None)
+        self.assertEqual(rec["diagnostics"], [{"kind": "native_error", "type": "ccpa_proxy", "cause": "proxy_internal"}])
+
+        # 4) Unmatched prose chunk + log abort (failed error-chunk delivery) never copies model prose into error.
+        events_prose = [
+            rpc(id=3, method="session/prompt", params={"sessionId": "sid-prose", "prompt": []}),
+            rpc(method="session/update", params={"sessionId": "sid-prose", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "PRIVATE MODEL DRAFT PROSE THAT MUST NOT BECOME ERROR"},
+            }}),
+            rpc(id=3, result={"stopReason": "end_turn"}),
+        ]
+        log_prose = (
+            "E0101 00:00:02.000000 1 server.py:6675] Antigravity SDK error processing prompt for session sid-prose\n"
+            "google.antigravity.types.AntigravityExecutionError: Error 503, Message: Overloaded, Status: UNAVAILABLE\n"
+        )
+        rec, has_result = publish_case(events_prose, log_prose)
+        self.assertEqual(rec["status"], "failed")
+        self.assertFalse(has_result)
+        self.assertNotIn("PRIVATE MODEL DRAFT", rec["error"])
+        self.assertIn("AntigravityExecutionError: Error 503", rec["error"])
+
+        # Empty text end_turn + log abort also recovers the true failure.
+        events_empty = [
+            rpc(id=3, method="session/prompt", params={"sessionId": "sid-prose", "prompt": []}),
+            rpc(id=3, result={"stopReason": "end_turn"}),
+        ]
+        rec, _ = publish_case(events_empty, log_prose)
+        self.assertEqual(rec["status"], "failed")
+        self.assertIn("AntigravityExecutionError: Error 503", rec["error"])
+
+        # 5) Chained traceback takes outermost exception and stops at next glog record; >64 KiB trailing noise still works.
+        log_chained = (
+            "E0101 00:00:01.000000 1 server.py:6675] Antigravity SDK error processing prompt for session sid-prose\n"
+            "google.antigravity.types.AntigravityConnectionError: inner socket error\n"
+            "The above exception was the direct cause of the following exception:\n"
+            "google.antigravity.types.AntigravityExecutionError: outer prompt error\n"
+            "I0101 00:00:02.000000 1 server.py:7000] Cleanup started\n"
+            "google.antigravity.types.AntigravityValidationError: unrelated later record\n"
+            + ("I0101 00:00:03.000000 1 server.py:7001] " + ("x" * 100) + "\n") * 800
+        )
+        rec, _ = publish_case(events_prose, log_chained)
+        self.assertEqual(rec["error"], "AntigravityExecutionError: outer prompt error")
+
+        # 6) Recovered mid-turn 502 followed by non-proxy 503 (even mentioning "Bad Gateway" or line 502) attaches NO ccpa_proxy diagnostic.
+        log_no_stale = (
+            "I0101 00:00:01.000000 1 proxy_server.py:106] Proxy extracted model from path: gemini-4-neon-high\n"
+            "E0101 00:01:01.000000 1 proxy_server.py:222] Proxy failed to connect to CCPA API: "
+            "Socket operation failed to CCPA API: Remote end closed connection without response\n"
+            "I0101 00:01:05.000000 1 proxy_server.py:106] Proxy extracted model from path: gemini-4-neon-high\n"
+            "E0101 00:01:10.000000 1 server.py:6675] Antigravity SDK error processing prompt for session sid-prose\n"
+            '  File "/pkg/local_connection.py", line 502, in receive_steps\n'
+            "google.antigravity.types.AntigravityExecutionError: Error 503, Message: Upstream Bad Gateway note, Status: UNAVAILABLE\n"
+        )
+        rec, _ = publish_case(events_prose, log_no_stale)
+        self.assertEqual(rec["status"], "failed")
+        self.assertEqual(rec["diagnostics"], [])
+
+        # 7) Durable timeout/cancel stop wins over harness.log abort, preserving draft and keeping diagnostics clean.
+        rec, has_result = publish_case(events_prose, log_502.replace("sid-502", "sid-prose"),
+                                       termination={"status": "timeout", "reason": "exceeded the 10s cap"})
+        self.assertEqual(rec["status"], "timeout")
+        self.assertEqual(rec["reason"], "exceeded the 10s cap")
+        self.assertTrue(has_result)
+        self.assertEqual(rec["diagnostics"], [])
+
+        # 8) Exact session-id boundary and server.py anchoring prevent prefix/stderr spoofing.
+        events_short_sid = [
+            rpc(id=3, method="session/prompt", params={"sessionId": "s", "prompt": []}),
+            rpc(method="session/update", params={"sessionId": "s", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "invalid short draft"},
+            }}),
+            rpc(id=3, result={"stopReason": "end_turn"}),
+        ]
+        log_spoof = (
+            "E0101 00:00:01.000000 1 server.py:6675] Antigravity SDK error processing prompt for session sid-other\n"
+            "I0101 00:00:02.000000 1 local_connection.py:553] harness stderr: "
+            "E0101 00:00:02.000000 1 server.py:6675] Antigravity SDK error processing prompt for session s\n"
+        )
+        rec, has_result = publish_case(events_short_sid, log_spoof)
+        self.assertEqual(rec["status"], "invalid")
+        self.assertTrue(has_result)
+        self.assertIsNone(rec["error"])
 
 
 class Quoting(unittest.TestCase):
@@ -323,6 +642,7 @@ class Lanes(unittest.TestCase):
     def test_native_failures_end_the_lane_with_their_reason(self):
         for mode, status, reason in (("error", "failed", "Individual quota reached"),
                                      ("mcp-fail", "failed", "The MCP server 'semble' failed to initialize"),
+                                     ("exec-error", "failed", "Agent execution error: model unreachable: Error 502"),
                                      ("refusal", "failed", "refusal"),
                                      ("invalid", "invalid", "")):
             with self.subTest(mode=mode):
@@ -330,6 +650,15 @@ class Lanes(unittest.TestCase):
                 row = self.agy(mode)
                 self.assertEqual(row["status"], status, row)
                 self.assertIn(reason, row["reason"])
+                if mode in ("mcp-fail", "exec-error"):
+                    self.assertFalse((self.base / f"RESULT-{LANE}.md").exists())
+                if mode == "exec-error":
+                    self.assertIn("native error: ccpa_proxy (remote_disconnect)", row["reason"])
+                    self.assertEqual(row["diagnostics"], [{
+                        "kind": "native_error",
+                        "type": "ccpa_proxy",
+                        "cause": "remote_disconnect",
+                    }])
 
     def test_a_missing_or_locked_login_skips_before_admission(self):
         for login, reason in (("absent", "no Antigravity ACP login"), ("locked", "unlock it interactively")):
