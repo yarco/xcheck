@@ -143,6 +143,13 @@ class Pane:
             if "id" in event:
                 return  # a request; the matching update or response carries the text
             params = event.get("params") if isinstance(event.get("params"), dict) else {}
+            if event.get("method") == "_session/retrying":
+                from .agy import scrub_error
+                self._flush_text()
+                category = _one_line(str(params.get("category") or "unknown"), 40)
+                detail = scrub_error(str(params.get("detail") or ""), 120)
+                self._say(f"· retrying {category}" + (f" ({detail})" if detail else ""))
+                return
             update = params.get("update") if isinstance(params.get("update"), dict) else {}
             kind = update.get("sessionUpdate")
             if kind in ("agent_thought_chunk", "agent_message_chunk"):

@@ -8,6 +8,8 @@ Each pool has one free meter that runs no inference:
   agy     `agy -p /usage --output-format json` (a client-side command: zero turns)
   opencode opt-in (no protocol meter)
   devin   no protocol meter
+  cline   opt-in (no protocol meter)
+  vibe    opt-in (no protocol meter)
 
 A lane spends only when every window it draws on has more than the reserve
 left: 10 %, or 5 + 5n % for the n occupied Agy permits observed at admission across runs

@@ -157,6 +157,24 @@ class FixtureTranscripts(unittest.TestCase):
         self.assertIn("…", lines)
         self.assertNotIn("line 19", lines)
 
+    def test_vibe_retrying_notification_renders_clipped_and_scrubbed(self):
+        pane = Pane(tty=False, width=120)
+        lines = pane.feed({
+            "jsonrpc": "2.0",
+            "method": "_session/retrying",
+            "params": {
+                "sessionId": "s",
+                "category": "rate_limited",
+                "detail": "HTTP 429 at https://api.example/v1?k=1 Bearer ya29.secretsecret " + "x" * 400,
+            },
+        })
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("retrying", lines[0])
+        self.assertIn("rate_limited", lines[0])
+        self.assertNotIn("https://", lines[0])
+        self.assertNotIn("ya29.secretsecret", lines[0])
+        self.assertLessEqual(len(lines[0]), 180)
+
 
 class ReaderUntouched(unittest.TestCase):
     def test_rendering_a_fixture_does_not_change_what_the_reader_keeps(self):

@@ -8,7 +8,7 @@ vendor-specific part is the command, its environment and its native policy. Ever
 Lanes print their answer as their final message; the one Reader below
 extracts it from the lane's stream (native for Codex, Claude and Cline, ACP for the
 rest) and decides native completion. Grok,
-OpenCode, Cline and Devin may write scratch files in their workspace while reviewing.
+OpenCode, Cline, Devin and Vibe may write scratch files in their workspace while reviewing.
 """
 
 from __future__ import annotations
