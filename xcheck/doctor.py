@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import adapters, agy, devin, freeroster, grok, install, models
+from . import adapters, agy, devin, freeroster, grok, install, models, vibe
 
 MODEL_LISTS = {"grok": ["grok", "models"]}
 
@@ -76,7 +76,7 @@ def check() -> int:
               f"{adapters.FREE_ROSTER} (eligible: " +
               (", ".join(f"{p} {n}" for p, n in sorted(counts.items())) or "none") + ")")
         bad += not counts
-    pins = (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)
+    pins = tuple(dict.fromkeys((*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)))  # a pin may also be a local default
     providers = {"opencode"} | {p.model.split("/", 1)[0] for p in pins if p.kind == "opencode"}
     if any(p.kind == "cline" for p in pins):
         providers.add("cline")
@@ -97,6 +97,12 @@ def check() -> int:
             problem = "unchecked: Agy startup is unavailable (above)" if blocked else agy.admission(peer)
             print(f"FAIL agy model {peer.model}: {problem}" if problem else
                   f"ok   agy model {peer.model} advertised by the ACP server" +
+                  (f" with thinking level {peer.effort}" if peer.effort else ""))
+            bad += bool(problem)
+        elif peer.kind == "vibe":
+            problem = adapters.unavailable(peer) or vibe.admission(peer)
+            print(f"FAIL vibe model {peer.model}: {problem}" if problem else
+                  f"ok   vibe model {peer.model} offered to the active Mistral account" +
                   (f" with thinking level {peer.effort}" if peer.effort else ""))
             bad += bool(problem)
         elif peer.kind == "cline":

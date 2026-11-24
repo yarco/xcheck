@@ -26,7 +26,7 @@ from pathlib import Path
 from .environment import lane_env
 from .types import Lane, Launch
 
-KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin", "cline")
+KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin", "cline", "vibe")
 NATIVE_FREE_PROVIDERS = ("kilo",)
 
 DEVIN_FREE_DEFAULT = Lane("devin", "swe-2-flash-medium")
@@ -46,8 +46,8 @@ DEFERRED = ()
 
 
 def parse_lane(spec: str) -> Lane:
-    """`kind:model[:effort]` → Lane. Devin takes no effort; Agy's effort is the
-    ACP thinking level, checked against the model's offer at admission.
+    """`kind:model[:effort]` → Lane. Devin takes no effort; Agy's and Vibe's effort
+    is the ACP thinking level, checked against the model's offer at admission.
     Opencode models may be `provider/model` (a slash is part of the model)."""
     parts = spec.split(":")
     # OpenRouter's :free is part of the model, never an effort. Preserve it
@@ -74,7 +74,7 @@ def parse_lane(spec: str) -> Lane:
         raise ValueError(f"devin selectors carry their own effort; drop ':{effort}'")
     if kind == "cline" and effort and effort not in ("none", "low", "medium", "high", "xhigh"):
         raise ValueError("Cline thinking must be none, low, medium, high or xhigh")
-    if kind not in ("agy", "opencode", "devin", "cline") and not effort:
+    if kind not in ("agy", "opencode", "devin", "cline", "vibe") and not effort:
         raise ValueError(f"{kind} lane needs an explicit effort: {spec!r}")
     return Lane(kind, model, effort)
 
@@ -110,7 +110,8 @@ def parse_free_lanes(selectors) -> tuple[Lane, ...]:
 # Pinned add-ons and the externally maintained free roster. Free lanes may
 # also be selected per default run. `xcheck models` marks a ready row
 # `pinned` when it is here, else `--add` until the next refresh adds it.
-PINNED_OPT_IN = (Lane("devin", "swe-2-max"), Lane("agy", "gemini-3.8-flash", "high"))
+PINNED_OPT_IN = (Lane("devin", "swe-2-max"), Lane("agy", "gemini-3.8-flash", "high"),
+                 Lane("vibe", "mistral-large-4-0", "high"), Lane("vibe", "zai-glm-5-3", "high"))
 OPT_IN = (*PINNED_OPT_IN, *free_lanes())
 
 
@@ -192,6 +193,8 @@ def launch(lane: Lane, work: Path, message: Path, log: Path, web: bool,
     if lane.kind == "cline":
         from .cline import launch as cline_launch
         return cline_launch(lane, work, message, log)
+    if lane.kind == "vibe":
+        return _vibe_launch(lane, work, message, log, web)
     raise ValueError(f"unknown kind {lane.kind}")
 
 
@@ -647,6 +650,31 @@ def _devin_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -
             "--prompt-retries", "0", "--format", "json", "exec", "--config-option", "mode=accept-edits", "--file", str(message)]
     return Launch(argv, None, env_set={**DEVIN_ENV, "DEVIN_MODEL": lane.model, "XCHECK_ROOT": str(ROOT)})
 
+# Vibe runs in its YOLO mode (`auto-approve`): every tool call is approved
+# in-agent, and --approve-all approves any request that still reaches acpx. Its
+# lane home disables account connectors, MCP servers and skills but keeps the
+# built-in web tools (xcheck/vibe.py). Like Grok's shell, its workspace limit
+# is an instruction.
+def _vibe_launch(lane: Lane, work: Path, message: Path, log: Path, web: bool) -> Launch:
+    from . import vibe
+    from .files import ROOT
+    exe = vibe.server()
+    if not exe:
+        raise Unavailable("startup-unavailable: vibe-acp is not on PATH")
+    try:
+        env = vibe.home(log.with_name("vibe-home"), web, vibe.account())
+    except vibe.AccountUnavailable as e:
+        raise Unavailable(f"startup-unavailable: {e}") from e
+    agent = [sys.executable, "-I", str(BIN), "hold", "--pool", lane.pool,
+             "--lease", str(log.parent), "--log", str(log), "--", exe]
+    argv = [shutil.which("acpx") or "acpx", "--agent", " ".join(_acpx_quote(a) for a in agent),
+            "--cwd", str(work), "--approve-all", "--auth-policy", "skip", "--no-terminal", "--no-fs",
+            "--prompt-retries", "0", "--format", "json", "exec",
+            "--config-option", f"mode={vibe.MODE}", "--config-option", f"model={lane.model}",
+            *(["--config-option", f"thinking={lane.effort}"] if lane.effort else []),
+            "--file", str(message)]
+    return Launch(argv, None, env_set={**env, "XCHECK_ROOT": str(ROOT)}, kind="vibe")
+
 # Claude reviews register only local readers and the two keyless retrieval
 # endpoints. --allowedTools pre-approves calls; it is not a tool allowlist.
 # --strict-mcp-config excludes other registrations, and --disallowedTools
@@ -943,6 +971,9 @@ def unavailable(lane: Lane) -> str | None:
         return f"startup-unavailable: {ACPX_CONFIG} sets {', '.join(set_keys)}; xcheck lanes need acpx defaults"
     if lane.kind in ("devin", "opencode"):
         return None if shutil.which(lane.kind) else f"startup-unavailable: {lane.kind} is not on PATH"
+    if lane.kind == "vibe":
+        from . import vibe
+        return vibe.problem()
     if lane.kind == "grok":
         if not shutil.which("grok"):
             return "startup-unavailable: grok is not on PATH"
@@ -1024,6 +1055,9 @@ def diagnostic_notes(diagnostics) -> list[str]:
             correlation = "; ".join(f"{key.replace('_', ' ')}: {d[key]}"
                                     for key in ("request_id", "message_id") if key in d)
             notes.append(f"Claude provider error{detail}" + (f"; {correlation}" if correlation else ""))
+        elif d["kind"] == "provider_retry":
+            notes.append(f"provider retries: {d['count']} × {d['category']}"
+                         + (f" ({d['detail']})" if d.get("detail") else ""))
         elif d["kind"] == "mcp_policy":
             outcome = d["outcome"]
             label = "POLICY VIOLATION" if outcome == "succeeded" else "MCP policy warning"
@@ -1197,6 +1231,18 @@ class Reader:
                                          status=params.get("reason") or params.get("status")))
             return None
         if self.session_id and isinstance(params.get("sessionId"), str) and params["sessionId"] != self.session_id:
+            return None
+        if self.kind == "vibe" and method == "_session/retrying":
+            # Vibe retries a refused model call itself (e.g. HTTP 429); count it so the operator sees why a lane is slow.
+            from .agy import scrub_error
+            category = _clip(str(params.get("category") or "unknown"), 40)
+            detail = scrub_error(str(params.get("detail") or ""), 200)
+            for d in self.diagnostics:
+                if d.get("kind") == "provider_retry" and d["category"] == category:
+                    d["count"] += 1
+                    d["detail"] = detail or d["detail"]
+                    return None
+            self.diagnostics.append(dict(kind="provider_retry", category=category, detail=detail, count=1))
             return None
         update = params.get("update")
         update = update if isinstance(update, dict) else {}

@@ -13,7 +13,7 @@ from pathlib import Path
 SCRUB_PREFIXES = ("HERDR_", "CLAUDE", "CODEX_COMPANION_", "CODEX_SANDBOX",
                   "CLINE_", "OPENCODE", "ACPX_", "CODEX_ACP_", "XCHECK_CODEX_",
                   "ANTHROPIC_", "AGENT_PROXY_", "CCR_")
-SCRUB_KIND = {"grok": ("GROK_",)}
+SCRUB_KIND = {"grok": ("GROK_",), "vibe": ("VIBE_",)}  # a lane restores only its own account binding
 NO_HERDR = "/nonexistent/xcheck-lanes-have-no-herdr.sock"
 SCRUB_NAMES = {
     "OLDPWD", "CREDENTIALS_DIRECTORY", "MAX_THINKING_TOKENS", "IS_SANDBOX",

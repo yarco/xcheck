@@ -150,10 +150,11 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
         return finish("skipped", blocked)
     # One permit per lane, across all runs. Waiting invokes no model.
     admission_deadline = time.monotonic() + run.cap if run.cap is not None else None
-    held = pools.acquire(ROOT, lane.pool, str(d), admission_deadline,
-                         on_wait=lambda reason: pane.show([
-                             f"xcheck lane {name}: waiting for pool {lane.pool} "
-                             f"({reason})"]))
+    def waiting(reason):
+        # Recorded where every placement can see it: the launch report treats a queued lane as admitted.
+        atomic_write(d / "phase.json", json.dumps(dict(phase="waiting_for_pool", pool=lane.pool)))
+        pane.show([f"xcheck lane {name}: waiting for pool {lane.pool} ({reason})"])
+    held = pools.acquire(ROOT, lane.pool, str(d), admission_deadline, on_wait=waiting)
     if held is None:
         return finish("skipped", f"pool {lane.pool} stayed busy for {run.cap}s")
     try:
@@ -170,6 +171,13 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
             atomic_write(d / "phase.json", json.dumps(dict(phase="checking_models")))
             problem = agy.admission(lane)
             if problem:
+                return finish("skipped", problem)
+        if lane.kind == "vibe":
+            # The account's own offer, read with no prompt: a model the account
+            # (or its trial) no longer offers skips before any spend.
+            from . import vibe
+            atomic_write(d / "phase.json", json.dumps(dict(phase="checking_models")))
+            if problem := vibe.admission(lane):
                 return finish("skipped", problem)
         started = time.time()  # when spending can start; exit.json records wall time
         outcome.started = started

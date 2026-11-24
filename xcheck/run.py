@@ -190,7 +190,7 @@ def settle_placement_failure(run, exc: herdr.HerdrError) -> None:
 
 
 def _message(web: bool, kind: str) -> str:
-    shell = kind in ("grok", "opencode", "devin", "cline")
+    shell = kind in ("grok", "opencode", "devin", "cline", "vibe")
     scope = SHELL_SCOPE if shell else (
         "use only tools that read (files, commands that change nothing"
         + (", web search" if web else "") + ").")
@@ -202,8 +202,7 @@ def _message(web: bool, kind: str) -> str:
 
 def _is_default_lane(run: Run, name: str) -> bool:
     default_names = {lane.name for lane in adapters.DEFAULT_ROSTER}
-    lane = run.lanes.get(name)
-    return name in default_names or (lane is not None and lane.kind in {"codex", "claude", "grok", "agy", "devin"})
+    return name in default_names
 
 
 def _report_default_problems(run: Run, seen: set[str] | None = None, *, persist: bool = True) -> list[str]:
@@ -266,7 +265,7 @@ def _default_lanes_admitted(run: Run) -> bool:
             pass
         try:
             phase = json.loads((d / "phase.json").read_text()).get("phase")
-            if phase in ("running", "waiting_for_login"):
+            if phase in ("running", "waiting_for_login", "waiting_for_pool"):
                 continue
         except (OSError, ValueError):
             pass

@@ -69,6 +69,13 @@ AGY_LEVELS = {"gemini-4-neon": ("low", "medium", "high", "xhigh"),
               "gemini-3.8-flash": ("low", "medium", "high")}
 
 
+def vibe_offer(model=None, timeout=60.0):
+    """A stand-in for vibe.inventory: every pinned Vibe model, auto-approve and high thinking."""
+    from xcheck import adapters
+    return {"model": [p.model for p in adapters.PINNED_OPT_IN if p.kind == "vibe"],
+            "mode": ["ask", "accept-edits", "auto-approve"], "thinking": ["low", "medium", "high"]}
+
+
 def agy_offer(models=None, levels=None):
     """A stand-in for agy.inventory (its side_effect); defaults read AGY_LEVELS when called."""
     from xcheck import agy
@@ -1373,6 +1380,7 @@ class Installation(unittest.TestCase):
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(agy, "registry_version", return_value=None), \
              patch.object(agy, "inventory", side_effect=agy_offer()), \
+             patch("xcheck.vibe.inventory", side_effect=vibe_offer), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(doctor.check(), 1)
         self.assertIn("FAIL installed copy stale != source", output.getvalue())
@@ -1387,6 +1395,7 @@ class Installation(unittest.TestCase):
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(agy, "registry_version", return_value=None), \
              patch.object(agy, "inventory", side_effect=agy_offer()), \
+             patch("xcheck.vibe.inventory", side_effect=vibe_offer), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(doctor.check(), 0)
 
@@ -1401,6 +1410,7 @@ class Installation(unittest.TestCase):
              patch.object(models, "discover", return_value={"providers": {}, "models": []}), \
              patch.object(agy, "registry_version", return_value=None), \
              patch.object(agy, "inventory", side_effect=agy_offer()), \
+             patch("xcheck.vibe.inventory", side_effect=vibe_offer), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(doctor.check(), 1)
         self.assertIn("grok: missing ['--sandbox']", output.getvalue())

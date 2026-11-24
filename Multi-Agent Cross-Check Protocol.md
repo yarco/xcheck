@@ -93,8 +93,12 @@ The default Devin selector is `devin:swe-2-flash-medium`. Admission queries
 the exact variant is listed as Free. `doctor` uses the same check. See the
 [Devin model contract](docs/reference.md#devin).
 
-SWE-2 Max (`--add devin:swe-2-max`) and Gemini 3.8 Flash
-(`--add agy:gemini-3.8-flash:high`) are pinned add-ons. Gemini Flash and Hydrogen
+SWE-2 Max (`--add devin:swe-2-max`), Gemini 3.8 Flash
+(`--add agy:gemini-3.8-flash:high`) and the two Mistral Vibe lanes
+(`--add vibe:mistral-large-4-0:high`, `--add vibe:zai-glm-5-3:high`) are pinned
+add-ons. Vibe lanes run in Vibe's YOLO (`auto-approve`) mode with web search on
+the active Vibe account and draw on that account's plan usage; see the
+[Vibe contract](docs/reference.md#vibe). Gemini Flash and Hydrogen
 draw from the same Gemini quota buckets. Set `free_lanes_per_provider` to draw up to
 that many OpenCode/Cline lanes per provider from the local roster's latest
 successful observations. The selector rotates choices per run and avoids

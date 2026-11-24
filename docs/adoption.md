@@ -26,6 +26,7 @@ The real installer publishes a read-only content-addressed snapshot under `~/.lo
 | Grok | Native ACP via acpx | Native CLI, stored login, currently admitted CLI version |
 | Agy | Antigravity ACP via acpx | Separately installed server, native Keychain login, `agy` quota meter, macOS Seatbelt |
 | Devin | Native ACP via acpx | Native CLI and existing login. Default SWE-2 Flash Medium requires a current Free listing |
+| Vibe | Native `vibe-acp` via acpx | Mistral Vibe (`uv tool install mistral-vibe`) signed in; opt-in; spends the active account's plan usage, no xcheck quota meter. Optional `vibe_account_command` follows an account switcher |
 | OpenCode | Native ACP via acpx | Native CLI and selected provider access; Kilo is keyless; opt-in, no xcheck quota meter. Optional `opencode_accounts` spreads Zen lanes across stores |
 
 Only ACP lanes need stock `acpx` (`npm install -g acpx`); Codex, Claude and Cline do not. Install each vendor CLI/server using its official distribution. xcheck does not install them, log you in, configure subscriptions or enable API billing. Model selectors and version admissions live in `xcheck/adapters.py`; the [technical reference](reference.md#harness-facts) explains why each control exists.

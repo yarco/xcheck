@@ -30,7 +30,7 @@ native sign-in must also stop when the runner dies.
 | `types.py` | Lane identity, pool identity, launch value | Availability, liveness, review validity |
 | `environment.py` | Scrub inherited control/routing; apply deliberate launch environment | Account recovery or process lifetime |
 | `adapters.py`, `cline.py` | Explicit native launch policy, roster, stream semantics | Supervisor lifecycle or review merit |
-| `grok.py`, `agy.py` | Vendor-specific, inference-free admission observations and pure native error parsers | Generic lane termination |
+| `grok.py`, `agy.py`, `devin.py`, `vibe.py` | Vendor-specific, inference-free admission observations, lane homes and pure native error parsers | Generic lane termination |
 | `models.py` | Provider-owned price/access observations and client metadata | Reviewer quality or stale-price authorization |
 | `capacity.py`, `claude_auth.py` | Quota admission and owned pre-inference authentication | Retrying a reviewer turn |
 | `lane.py` | Stage after pool admission, own child, read stream, enforce requested cancellation policy | Pane text as completion |
@@ -125,7 +125,7 @@ into failure unless the operator requested a cancellation limit.
 | Unrelated reviews must overlap without overwriting evidence | Bounded per-lane permits; run-scoped workspaces recorded in `run.json` | `test_pools.py`, same-model two-run overlap / third-run queue regression | Equivalent bounded concurrency and disjoint ownership |
 | Queued lanes must see the launched packet | Launch snapshot; run/lane-owned staging | `test_final_repairs.py` queued snapshot regression | Another immutable shared input contract |
 | Authentication recovery must survive caller death safely | Owned watchdog, pool/auth locks, EOF lease | `test_claude_auth.py` | Native ownership provides the same guarantee |
-| Unknown inventory/price is not absence or free access | Explicit provider observations and admission checks | `test_models.py`, `test_agy_acp.py`, `test_cline.py` | A provider-owned replacement with the same distinctions |
+| Unknown inventory/price is not absence or free access | Explicit provider observations and admission checks | `test_models.py`, `test_agy_acp.py`, `test_cline.py`, `test_vibe_acp.py` | A provider-owned replacement with the same distinctions |
 | An Agy effort must not silently fall back to another level | `agy.admission` (shared by admission and doctor): catalog read for bare selectors, strict effort read for named levels; server refusal before the prompt | `test_agy_acp.py` parser, admission, effort and launch tests; `test_runner_issues.py` doctor effort check | ACP `session/options` reports per-model levels without a session, in acpx and the server |
 | Codex re-probes MCP OAuth discovery on each read, so an unchanged keyless server can read `unknown` | The first read decides the selection; the proof read checks overrides, kept transports and credential statuses; a dropped `unknown` server is a lane diagnostic | `test_codex.py` probe-flip, unknown-first-read and proof-read refusal tests | Codex reports credential state separately from discovery reachability |
 | A hardcoded free lane outlives the refresh that dropped it | `freeroster.default_lanes` selects from one roster snapshot and refuses recognized free pins. `doctor` uses the same pin check. Lane admission rechecks zero pricing | `test_freeroster.py` eligibility, matching, rotation and doctor tests | The roster producer and runner share one admission service |

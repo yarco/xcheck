@@ -11,7 +11,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_xcheck as support  # noqa: E402
-from xcheck import adapters, agy, doctor, grok, install, lane, models, run
+from xcheck import adapters, agy, doctor, grok, install, lane, models, run, vibe
 
 class ExactListedModels(unittest.TestCase):
 
@@ -42,6 +42,7 @@ class ExactListedModels(unittest.TestCase):
                              return_value=support.grok_probe_ok(Path(probe_tmp))), \
                 patch.object(models, 'discover', return_value={"providers": {}, "models": []}), \
                 patch.object(agy, 'registry_version', return_value=None), \
+                patch.object(vibe, 'inventory', side_effect=support.vibe_offer), \
                 patch.object(agy, 'inventory', side_effect=support.agy_offer()), \
                 redirect_stdout(io.StringIO()) as output:
             code = doctor.check()

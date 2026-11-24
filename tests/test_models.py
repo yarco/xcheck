@@ -750,7 +750,8 @@ class FreeRoster(unittest.TestCase):
 
     def test_opt_in_is_the_hand_pins_plus_the_roster_file(self):
         self.assertEqual(adapters.PINNED_OPT_IN,
-                         (adapters.Lane("devin", "swe-2-max"), adapters.Lane("agy", "gemini-3.8-flash", "high")))
+                         (adapters.Lane("devin", "swe-2-max"), adapters.Lane("agy", "gemini-3.8-flash", "high"),
+                          adapters.Lane("vibe", "mistral-large-4-0", "high"), adapters.Lane("vibe", "zai-glm-5-3", "high")))
         n = len(adapters.PINNED_OPT_IN)
         self.assertEqual(adapters.OPT_IN[:n], adapters.PINNED_OPT_IN)
         self.assertEqual(adapters.OPT_IN[n:], adapters.free_lanes())
