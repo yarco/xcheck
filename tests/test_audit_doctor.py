@@ -47,32 +47,45 @@ class ExactListedModels(unittest.TestCase):
             code = doctor.check()
         return (code, output.getvalue())
 
-    def test_rejects_banner_and_other_model_prefix(self):
-        for grok, devin in [('Default model: grok-4.7\nAvailable models:\n - grok-4.7-preview\n', '  swe-2-max SWE-2 Max [Free]\n'), ('  * grok-4.7 (default)\n', 'Previous model: swe-2-max\n  swe-2-max-preview Preview [Free]\n')]:
-            with self.subTest(grok=grok, devin=devin):
-                code, text = self.doctor(grok, devin)
-                self.assertEqual(code, 1, text)
+    def test_rejects_grok_banner_and_other_model_prefix(self):
+        code, text = self.doctor('Default model: grok-4.7\n - grok-4.7-preview\n', support.devin_catalog())
+        self.assertEqual(code, 1, text)
+        self.assertIn('grok model grok-4.7 NOT in', text)
 
-    def test_accepts_native_bullet_and_table_rows(self):
-        code, text = self.doctor('Default model: grok-4.7\nAvailable models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n', 'Available models (53 families)\n  swe-2-max  SWE-2 Max  [262K context, Free]\n')
+    def test_accepts_exact_grok_row_and_free_devin_pin(self):
+        code, text = self.doctor('Default model: grok-4.7\n  * grok-4.7 (default)\n', support.devin_catalog())
         self.assertEqual(code, 0, text)
+        self.assertIn('devin model swe-2-flash-medium: listed as Free', text)
+
+    def test_rejects_missing_or_unconfirmed_free_devin_pin(self):
+        grok = '  * grok-4.7 (default)\n'
+        for row, reason in (
+            ({"model_uid": "swe-2-flash-medium-preview", "cost_tier": "Free"}, "model-unavailable"),
+            ({"model_uid": "swe-2-flash-medium"}, "free-price-unconfirmed"),
+            ({"model_uid": "swe-2-flash-medium", "cost_tier": "Free",
+              "cost_summary": "$0.50 / 1M Output"}, "free-price-unconfirmed"),
+        ):
+            with self.subTest(row=row):
+                code, text = self.doctor(grok, support.devin_catalog({"model_uid": "swe-2-max"}, row))
+                self.assertEqual(code, 1, text)
+                self.assertIn(f"FAIL devin model swe-2-flash-medium: {reason}", text)
 
     def test_failed_inventory_is_unknown_not_model_disappearance(self):
-        code, text = self.doctor('', '  swe-2-max SWE-2 Max [Free]\n', failed_listing=True)
+        code, text = self.doctor('', support.devin_catalog(), failed_listing=True)
         self.assertEqual(code, 1, text)
         self.assertIn('grok model grok-4.7 unchecked: model listing exited 1', text)
         self.assertNotIn('grok model grok-4.7 NOT in', text)
 
     def test_one_lane_local_roster_does_not_index_missing_defaults(self):
         with patch.object(adapters, "DEFAULT_ROSTER", (adapters.Lane("claude", "example", "high"),)):
-            code, text = self.doctor('', '  swe-2-max SWE-2 Max [Free]\n')
+            code, text = self.doctor('', support.devin_catalog())
         self.assertEqual(code, 0, text)
         self.assertIn('ok   codex: Codex CLI present', text)
         self.assertIn('ok   claude: native limit flags', text)
 
     def test_opencode_accounts_are_one_line_each(self):
         grok = 'Default model: grok-4.7\nAvailable models:\n  * grok-4.7 (default)\n'
-        devin = 'Available models (53 families)\n  swe-2-max  SWE-2 Max  [262K context, Free]\n'
+        devin = support.devin_catalog()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             good, empty, missing = root / 'good.db', root / 'empty.db', root / 'missing.db'

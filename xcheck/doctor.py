@@ -4,9 +4,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import adapters, agy, freeroster, grok, install, models
+from . import adapters, agy, devin, freeroster, grok, install, models
 
-MODEL_LISTS = {"grok": ["grok", "models"], "devin": ["devin", "models", "list"]}
+MODEL_LISTS = {"grok": ["grok", "models"]}
 
 
 def check() -> int:
@@ -90,6 +90,7 @@ def check() -> int:
     # Reuse provider-scoped client observations from discovery; native catalog
     # support remains separate from the provider's live pricing verdict.
     catalogs, listings = {}, {}
+    devin_models = devin.inventory() if any(peer.kind == "devin" for peer in pins) else {}
     for peer in pins:
         if peer.kind == "agy":
             # The same zero-turn check lane admission runs, per pinned selector.
@@ -114,6 +115,12 @@ def check() -> int:
                   (f"unchecked: {problem}" if problem else "listed by model API" if ok else
                    "NOT in opencode api model.list --standalone"))
             bad += not ok or verdict == "gone"
+        elif peer.kind == "devin":
+            require_free = peer == adapters.DEVIN_FREE_DEFAULT
+            problem = devin.model_problem(devin_models, peer.model, require_free=require_free)
+            status = ("listed as Free" if require_free else "listed") if problem is None else problem
+            print(f"{'FAIL' if problem else 'ok  '} devin model {peer.model}: {status}")
+            bad += bool(problem)
         elif peer.kind in MODEL_LISTS:
             cmd = MODEL_LISTS[peer.kind]
             if peer.kind not in listings:

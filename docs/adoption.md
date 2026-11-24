@@ -25,7 +25,7 @@ The real installer publishes a read-only content-addressed snapshot under `~/.lo
 | Cline | Native headless JSON | Native CLI and Cline OAuth login; opt-in, exact free-model admission, no non-inference quota meter |
 | Grok | Native ACP via acpx | Native CLI, stored login, currently admitted CLI version |
 | Agy | Antigravity ACP via acpx | Separately installed server, native Keychain login, `agy` quota meter, macOS Seatbelt |
-| Devin | Native ACP via acpx | Native CLI and existing login; opt-in, no xcheck quota meter |
+| Devin | Native ACP via acpx | Native CLI and existing login. Default SWE-2 Flash Medium requires a current Free listing |
 | OpenCode | Native ACP via acpx | Native CLI and selected provider access; Kilo is keyless; opt-in, no xcheck quota meter. Optional `opencode_accounts` spreads Zen lanes across stores |
 
 Only ACP lanes need stock `acpx` (`npm install -g acpx`); Codex, Claude and Cline do not. Install each vendor CLI/server using its official distribution. xcheck does not install them, log you in, configure subscriptions or enable API billing. Model selectors and version admissions live in `xcheck/adapters.py`; the [technical reference](reference.md#harness-facts) explains why each control exists.
@@ -89,7 +89,7 @@ After settlement, reread `STATUS.json` and all `RESULT-*.md`, including invalid 
 
 Report every non-done lane and all policy/MCP diagnostics, including diagnostics from done lanes. Exit 0 from `run` means settlement, not universal success. Exit 2 is pre-spend refusal; wait exit 3 means still pending; 130 means the supervisor was interrupted.
 
-Check each finding's premises against the actual source before evaluating the argument. Reject as wrong only with a contradictory observation; otherwise retain uncertainty. Judge repairs separately from diagnoses. Prefer a regression that fails while the defect is present. Do not count votes or treat unavailable lanes as disagreement.
+Check each finding's premises against the source. Reject a claim as wrong only when an observation contradicts it. Record missing evidence as uncertainty. Judge each proposed repair separately. For a simplification, verify the claimed maintenance cost and check the behavior the repair must preserve. Reuse relevant existing checks. Decide each finding on its evidence, regardless of how many lanes raise it. Report lanes with unusable answers as coverage gaps. See the protocol's [admission and verification rules](../Multi-Agent%20Cross-Check%20Protocol.md#merge).
 
 Write `CONSENSUS.md` with one decision line; confirmed/rejected/uncertain findings with lane provenance; selected repairs and their verification; rejected repairs and reasons; coverage gaps. [The example](../examples/CONSENSUS.example.md) is illustrative, not a recorded live review. Report uncertain rows to the operator. Another paid/subscription round is justified only by useful evidence still missing, not by a desire to ratify a deterministic repair.
 

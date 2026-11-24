@@ -71,6 +71,18 @@ def emit(obj):
     print(json.dumps(obj), flush=True)
 
 
+if kind == "devin" and argv == ["models", "list", "--format", "json"]:
+    offer = os.environ.get("FAKE_DEVIN_OFFER", "free")
+    if offer == "unknown":
+        sys.exit(1)
+    variants = [{"model_uid": "swe-2-max"}]
+    if offer != "absent":
+        variants.append({"model_uid": "swe-2-flash-medium", **(
+            {"cost_tier": "Free"} if offer == "free" else {"cost_summary": "$0.50 / 1M Output"})})
+    emit({"families": [{"variants": variants}]})
+    sys.exit(0)
+
+
 # The Keychain lookup for the Antigravity ACP login (FAKE_AGY_LOGIN=absent|locked|empty);
 # `-w` prints the stored token blob.
 if kind == "security":

@@ -80,6 +80,13 @@ def agy_offer(models=None, levels=None):
     return inventory
 
 
+def devin_catalog(*variants):
+    return json.dumps({"families": [{"variants": list(variants) or [
+        {"model_uid": "swe-2-flash-medium", "cost_tier": "Free"},
+        {"model_uid": "swe-2-max"},
+    ]}]})
+
+
 def grok_probe_ok(root: Path, log=None, session=None) -> tuple:
     """A canned _grok_probe_session return: a real spec's argv, the session/new
     result and a probe log. Defaults are the healthy contract."""
@@ -1352,6 +1359,8 @@ class Installation(unittest.TestCase):
             if cmd[:2] == ["opencode", "api"]:
                 data = [{"providerID": m.split("/", 1)[0], "id": m.split("/", 1)[1]} for m in listed.splitlines() if "/" in m]
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": data}), "")
+            if cmd == ["devin", "models", "list", "--format", "json"]:
+                return subprocess.CompletedProcess(cmd, 0, devin_catalog(), "")
             return subprocess.CompletedProcess(cmd, 0, helps.get(tuple(cmd), listed), "")
 
         with tempfile.TemporaryDirectory() as probe_tmp, \
@@ -1700,6 +1709,16 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual({r["status"] for r in rows}, {expected}, rows)
             if expected == "skipped":
                 self.assertTrue(all(r["reason"].startswith("reserve-low:") for r in rows), rows)
+                self.assertIn("DEFAULT-ROSTER PROBLEM — codex-gpt-6.2-sol-high skipped: reserve-low:", p.stdout)
+
+    def test_detach_immediately_reports_default_roster_problem(self):
+        base = self.second_base()
+        p = self.xcheck("run", "--base", str(base), "--orch", "other",
+                        "--lanes", "codex:gpt-6.2-sol:high,opencode:muse-spark-1.3-contributor-free",
+                        "--mode", "headless", "--detach", capacity="reserve-low", mode="slow")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("DEFAULT-ROSTER PROBLEM — codex-gpt-6.2-sol-high skipped: reserve-low:", p.stdout)
+        self.assertEqual(self.xcheck("wait", "--base", str(base), mode="slow").returncode, 0)
 
     def test_grok_orchestrator_is_refused_headless(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "grok", "--mode", "headless",

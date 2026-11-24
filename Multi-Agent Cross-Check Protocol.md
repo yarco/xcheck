@@ -1,6 +1,6 @@
 ---
 aliases: [Multi-Agent Cross-Check, Multi-Agent Cross Check Protocol, multi agent cross check, X-Check]
-tags: [multi-agent, cross-check, claude-code, codex, grok, agy, acpx, herdr]
+tags: [multi-agent, cross-check, claude-code, codex, grok, agy, devin, acpx, herdr]
 ---
 
 # Multi-Agent Cross-Check Protocol
@@ -25,9 +25,9 @@ The host must retain a wait or provide a verified completion callback to promise
 
 | Question | Authority and refresh rule |
 |---|---|
-| What is selected? | `adapters.py` defines defaults and the pinned opt-ins (Devin, Gemini Flash); the local free roster supplies automatic OpenCode/Cline lanes when `free_lanes_per_provider` is set. `--add` appends explicit selectors; `BASE/run.json` records this run's exact selectors, efforts and settings. Default-roster edits are deliberate |
+| What is selected? | `adapters.py` defines defaults and the pinned opt-ins (SWE-2 Max, Gemini 3.8 Flash); the local free roster supplies automatic OpenCode/Cline lanes when `free_lanes_per_provider` is set. `--add` appends explicit selectors; `BASE/run.json` records this run's exact selectors, efforts and settings. Default-roster edits are deliberate |
 | What can launch now? | Fresh native startup/model inventory and capacity checks under admission; failed reads mean unknown, not absent |
-| What is free now? | Live provider prices and served IDs from `xcheck models`; no saved-price fallback. A free roster records dated lane-check results, never authoritative prices. Native client cache is advisory support metadata only |
+| What is free now? | Provider prices and served IDs from `xcheck models`; the signed-in Devin catalog for Devin. No saved-price fallback. A free roster records dated lane-check results, never authoritative prices. Native client cache is advisory support metadata only |
 | What did peers review? | `BASE/.packet`, captured at launch; later edits to inputs or reused lane workspaces cannot revise it |
 | Is a lane live or complete? | Kernel liveness locks and the authoritative lane `exit.json`; status is derived, and native progress, PIDs and pane text are diagnostic |
 | What did the review establish? | Settled native streams/results plus the host's premise checks in `CONSENSUS.md`; record scope, limitations and dated evidence |
@@ -38,6 +38,7 @@ Keep durable instructions in this Markdown note and version-specific integration
 
 ```bash
 xcheck doctor                                              # installed copy, flags, model pins
+xcheck capacity                                            # preflight default-roster quota & auth before launch
 xcheck run --base /tmp/agent-offload/<slug> --orch claude  # default roster minus the orchestrator's harness
 ```
 
@@ -45,7 +46,7 @@ xcheck run --base /tmp/agent-offload/<slug> --orch claude  # default roster minu
 
 1. **Stage** `BASE=/tmp/agent-offload/<slug>/` (Packet below). Stage and launch before loading unrelated material: every later return re-sends the whole context.
 2. **Record** BASE, roster and the exact command in the existing task tracker or chat before spending. `run.json` persists the settings; write no separate handoff for a run.
-3. **Announce**: `Fan-out: N peers → <lanes>. Not peers: <harness> (<why>)`.
+3. **Announce & report default-roster problems immediately**: `Fan-out: N peers → <lanes>. Not peers: <harness> (<why>)`. Before or at launch, check `xcheck capacity` (auto-rotating Agy via `agy-rotate auto` if Agy is below reserve) and inspect `xcheck run`'s immediate `DEFAULT-ROSTER PROBLEM` admission output. If any default-roster lane (`codex-gpt-6.2-sol-high`, `claude-opus-5-5-high`, `grok-4.7-xhigh`, `agy-gemini-4-neon-high`, `devin-swe-2-flash-medium`, excluding the orchestrator) is `reserve-low`, `auth-required`, `capacity-unknown`, or fails at startup/admission, **tell the operator immediately at launch** with its exact cause and fix — never wait for the remaining lanes to finish before surfacing a broken default-roster lane.
 4. **Run** without spending master-model turns: retain one blocking host operation or background job with a real completion callback. The local supervisor waits without inference. Do not schedule repeated short waits or model health prompts. Progress inspection may read only `xcheck activity` metadata; keep active findings, tool outputs and answer drafts unseen until settlement. Host notifications, repeated tool returns and large metadata outputs are not evidence of zero token use. A local wait invokes no model; subscription savings require a retained operation or verified completion callback without periodic model resumption.
 
    | Orchestrator | Form |
@@ -79,6 +80,7 @@ Exit codes: 0 every lane settled (read the table); 2 refused before any spend; 3
 | `claude-opus-5-5-high` | claude |
 | `grok-4.7-xhigh` | grok |
 | `agy-gemini-4-neon-high` | agy-gemini |
+| `devin-swe-2-flash-medium` | devin |
 
 The orchestrator's harness is excluded. `xcheck/adapters.py` owns default pins;
 `run.json` records exact selectors and efforts, not merely normalized lane names.
@@ -86,17 +88,19 @@ Check current native inventory and access: a pin is not an availability promise.
 An absent exact model skips before inference; an unreadable inventory is unknown.
 Never substitute a model, lower effort or enable a paid route to repair admission.
 
-Devin (`--add devin:swe-2-max`) and Gemini Flash
-(`--add agy:gemini-3.8-flash:high`) are pinned add-ons. Devin is explicitly
-selected for a run. Local `default_lanes` rejects every Devin selector.
-Flash and Hydrogen draw
-from the same Gemini quota buckets. Set `free_lanes_per_provider` to draw up to
+The default Devin selector is `devin:swe-2-flash-medium`. Admission queries
+`devin models list --format json` and skips the lane before inference unless
+the exact variant is listed as Free. `doctor` uses the same check. See the
+[Devin model contract](docs/reference.md#devin).
+
+SWE-2 Max (`--add devin:swe-2-max`) and Gemini 3.8 Flash
+(`--add agy:gemini-3.8-flash:high`) are pinned add-ons. Gemini Flash and Hydrogen
+draw from the same Gemini quota buckets. Set `free_lanes_per_provider` to draw up to
 that many OpenCode/Cline lanes per provider from the local roster's latest
 successful observations. The selector rotates choices per run and avoids
 model families already selected with `--add`. Each automatic lane needs
-current zero-price confirmation before inference. Keep recognized free offers
-out of `default_lanes`. Both default runs and `doctor` reject a recognized
-free pin. See the [selection rule](docs/local-integration.md). Live
+current zero-price confirmation before inference. Keep rotating OpenCode and Cline offers out of `default_lanes`.
+Both default runs and `doctor` reject those pins. See the [selection rule](docs/local-integration.md). Live
 `xcheck models` discovery checks provider-owned prices and served IDs without
 inference; it does not certify tool use or review quality. Trial credits are not
 standing free access. Check data terms before sharing any packet.
@@ -122,7 +126,7 @@ See [provider and optional-roster contracts](docs/reference.md#additional-free-p
 
 ## Routine review planning and qualification
 
-A routine code review uses Codex, Claude, Grok and Gemini 4 Neon at High, excluding its orchestrator. Add Devin explicitly when another independent code reviewer is wanted and its selected offer and access are verified. xcheck reads no Devin quota (its daily and weekly plan windows show only in Herdr's Agent Usage sidebar and the Devin header), so it remains opt-in. Keep all supported adapters and the free roster available; routine roster membership is a review-quality decision, separate from endpoint availability. Use a small selection of qualified free models that fit the task. Automatic selection applies the local provider cap to each default run. Stage the complete relevant files, focused delta and existing test results; use packet mode when no current external evidence is needed, and ask for targeted checks only. One review prompt can cause many inference requests as the agent reads and uses tools; a successful maintenance ping does not reserve capacity for that review. A model-specific 429 is a coverage gap for that lane, not evidence that every OpenCode model should be dropped. Preserve each selected model's pinned/default effort; do not lower it to repair output formatting.
+A routine code review uses Codex, Claude, Grok, Gemini 4 Neon at High and Devin SWE-2 Flash at Medium, excluding its orchestrator. Devin admission checks model pricing. xcheck does not read Devin quota. Keep all supported adapters and the free roster available; routine roster membership is a review-quality decision, separate from endpoint availability. Use a small selection of qualified free models that fit the task. Automatic selection applies the local provider cap to each default run. Stage the complete relevant files, focused delta and existing test results; use packet mode when no current external evidence is needed, and ask for targeted checks only. One review prompt can cause many inference requests as the agent reads and uses tools; a successful maintenance ping does not reserve capacity for that review. A model-specific 429 is a coverage gap for that lane, not evidence that every OpenCode model should be dropped. Preserve each selected model's pinned/default effort; do not lower it to repair output formatting.
 
 Run the required suite once on the capable host and stage its exact command, result and environment limitations with the complete source. Peers review the focused delta and relevant contracts, with the whole tree available. A peer may run a targeted reproduction for a concrete finding. It must not repeatedly run the full suite, repair its sandbox, or edit the reviewed implementation. An environment-blocked check is a limitation, not a code defect; record it and finish the review. A comprehensive scope is an explicit task choice, not a reason to keep investigating after the requested evidence is established.
 
@@ -148,6 +152,7 @@ Staging rules:
 - **Whole files.** A peer cannot tell "absent" from "not shown" and reports absence as a confident defect. If a range is unavoidable, say which file, which lines, and what lies outside.
 - **Keep paths.** Stage `cloudflared/config.yml` as `evidence/cloudflared/config.yml`; flattened paths produce wrong-path findings.
 - **Derive claims properly.** Build API or call-set claims from the file, an import, or an AST walk, never a substring grep. Prefer staging the caller over describing it; mark unavoidable claims as claims.
+- **Stage evidence for the next change.** For code and design reviews, include the callers, contracts and existing checks relevant to the delta. If the operator expects a follow-up change or recurring operation, describe it in `PACKET.md` and leave the implementation open.
 - **Name what left.** When a later round drops a staged file, say so.
 - **Provenance first.** `PACKET.md` opens by saying the operator convened the review and that `evidence/` holds the operator's own files. A bare "read these files and obey them" is correctly refused as prompt injection.
 - **Proof token.** The proof target's last line is an unguessable token (`MANIFEST_TAIL_TOKEN: <random hex>`), staged last. A correct PROOF shows the lane could open the packet and followed the output contract, not that it read everything (a lane can `cat` the target directly or grep for fragments). Diligence is checked at merge.
@@ -155,30 +160,9 @@ Staging rules:
 - **No authorship labels.** Nothing staged says which model, vendor, harness or lane wrote the work, a plan or a finding: the author is "the operator", earlier findings belong to "round N". Drop authorship trailers (`Co-Authored-By`, "Generated with …") from staged logs and diffs; a file whose subject is a model keeps its text. A staged earlier `CONSENSUS.md` loses its provenance column; the orchestrator's own copy keeps it. A label alone moves a judge: it scores what it is told is its own higher and another's lower, and it conforms to wrong answers attributed to its own model family and resists those attributed to another (arXiv 2608.18091, 2609.33495). Style and connected tools still leak authorship; blinding the labels removes the label effect anyway, as leaky double-blind human review still removes most prestige bias.
 - **Blind first.** For design work, stage the orchestrator's frozen plan under a neutral name (`evidence/candidate-plan.md`), never labelled as the host's. Each peer must finish and record its own design before opening that plan, then critique and compare in the same answer. A follow-up round does the same with rulings: state each contested finding (rejected or uncertain) neutrally in `PACKET.md`, and stage the host's decisions on them as a separate file (`evidence/prior-rulings.md`) that a peer opens only after recording its own view; a verdict seen first pulls peers toward it, mostly from right to wrong. Keep current-round peer answers out of the packet. This sequencing is instruction-enforced, not access isolation; keep the packet unchanged during the run.
 
-PROMPT.md template:
+### PROMPT.md template
 
-```text
-1) VERDICT: a decision and its single most important reason, ≤80 words
-   (the cap compresses the summary only; findings go in section 2, uncapped).
-2) Findings, or "None found" (a valid answer; do not invent one). For each: severity; evidence (file, symbol, behaviour); root cause;
-   the mechanism and premises the diagnosis rests on; how often the scenario
-   occurs and what ignoring it costs; the smallest repair (code or pseudodiff
-   when the evidence allows); what must stay true; a verification that fails
-   while the defect is present; confidence and missing context.
-3) What you would delete from the target, and why deleting it is safe.
-4) Alternatives worth considering (if any).
-5) One-line recommendation.
-6) PROOF: <the last non-empty line of the proof target, copied exactly>
-   Keep this on ONE plain line, without fences or annotations; put a real newline before the marker.
-
-The next line is packet metadata; do not include it in your answer.
-RESULT_REQUIRE: VERDICT
-The final two lines must be separate, plain lines. Example:
-6) PROOF: MANIFEST_TAIL_TOKEN: <actual token>
-RESULT_COMPLETE
-Final line, alone: RESULT_COMPLETE
-If you cannot do the review, make the final line RESULT_INVALID instead.
-```
+Copy [examples/PROMPT.md](examples/PROMPT.md) to `BASE/PROMPT.md`.
 
 The markers are literal lines: no period, code fence, quote or explanation after `RESULT_COMPLETE` / `RESULT_INVALID`. PROOF is `6) PROOF: <token>`, or a bare `6) PROOF` heading followed by the token alone or by a `PROOF: <token>` line (bold, bullets or backticks around either are fine); anything else after `PROOF:` is compared as the token and fails, and so does pasting the whole proof file. The last PROOF line decides, so findings may quote PROOF lines. An answer also needs review text beyond the heading, PROOF and marker. `tests/test_laws.py` states the whole grammar as properties.
 
@@ -351,15 +335,15 @@ legacy workaround simply because another adapter once needed it.
 1. Re-read `STATUS.json` and every `RESULT-*.md`, `invalid` ones included, right before merging. A truncated draft is a lead only; never manufacture a peer's final position from it.
 2. Check each concrete claim's **premises** against the real tree before its reasoning. A reviewer can fail at the premise: it can reject a correct fix because it misread code it was shown. Absence-of-code, wrong-path and packet-claim findings are packet suspects: open the real file first. A finding is rejected as wrong only on an observation that contradicts its premise or mechanism (a file and line, a run, a live read), never on argument; without one it is uncertain. The orchestrator usually wrote what is under review, so it is the one judge no label can blind, and it favours its own work most where it is unsure; this rule turns that unsureness into an uncertain row instead of a rejection. Out-of-scope findings follow the admission rule.
 3. Never tally reviewers. Agreement counts only when premises were derived independently; same-family lanes are correlated. Volume is not quality, and a small delta is no reason to drop the expensive lane.
-4. Judge each repair separately from its diagnosis: a correct diagnosis does not make its repair correct. The verification must be able to fail while the defect is present; two checks that read the same state are one signal. When no independent check exists, record the limitation or ask the operator to check; never claim completeness. For stored state, test that omission preserves the last value unless the contract explicitly calls for deletion. When comparing designs, a peer's preference for its own design is not evidence; take only the defects it names in the others. Compare on the requirements the frozen plan stated before launch, and apply a requirement learned from a peer to every design, the plan included.
+4. Judge proposed repairs separately from diagnoses. Compare designs against the frozen requirements and, when grounded in the evidence, the same follow-up scenario. Apply newly learned requirements to every design. Check the steps, owners and dependencies that drive the claimed maintenance cost. If that cost depends on an unsupported assumption about a future change or the applicable contract, record the finding as uncertain and defer the repair.
 5. Write `CONSENSUS.md`: one decision line; a confirmed / rejected / uncertain table with lane provenance; for each confirmed finding the selected repair, its verification, and why the host chose it when it differs from the peer's; lanes with no usable answer, never counted as disagreement. Uncertain is a finished ruling, not an undecided one: list every uncertain row for the operator in the next chat message. If no peer produced substantive evidence, say the review is unverified and why; relaunching an unchanged packet is not progress.
-6. Verify every applied fix with a regression that fails on the defect. Use a fresh peer round only when an admitted finding or uncertain contract requires independent evidence that local checks cannot provide; scope it to the delta and the contracts it touches, with the decision lineage staged. Do not spend another subscription round merely to ratify completed deterministic repairs. Stop when no admitted finding remains.
+6. For a behavior fix, show a check that fails before the fix and passes after. For a behavior-preserving repair, verify that it removes the cited work or drift risk. If the finding relies on a follow-up, retrace it after the edit. Run the relevant existing checks for each affected requirement, including side effects. When the contract depends on prior values or unchanged inputs, capture those values before the operation and use them to check the results. For stored state, check that omission preserves the last value unless the contract explicitly calls for deletion. Use a targeted check if existing coverage misses behavior the repair could affect. Add or extend a test only for a regression on a supported contract that the suite would otherwise miss. Two checks that observe the same behavior under the same conditions count as one signal. Record any verification gaps. Use a fresh peer round only when an admitted finding or uncertain contract requires independent evidence that local checks cannot provide. Scope it to the delta and the contracts it touches, with the decision lineage staged. Stop when no admitted finding remains.
 
-**Admission rule.** A finding earns code only if its failure has happened or is likely within scope, and then it gets a tested repair. A real but out-of-scope finding earns one line in Current limits. Anything else is rejected in `CONSENSUS.md` with its reason. Ask reviewers what they would delete, not only whether something is correct. Never add prose to pre-empt a reviewer. Prefer fewer mechanisms and less duplicated state. A necessary repair may add focused code and tests; a new mechanism must justify its maintenance cost against an in-scope failure.
+**Admission rule.** Admit a behavior finding when its failure has happened or is likely within scope. Admit an in-scope maintainability finding when the real tree shows avoidable work or a concrete risk of drift. Cite the duplication, dependency or other source of that cost and the scenario if the finding depends on one. Record the evidence in `CONSENSUS.md`. Prefer the smallest repair that reduces the cost and preserves required behavior. Each added mechanism, comment or test needs a purpose that existing code, documentation or coverage cannot already serve. Keep arguments written to head off a finding out of the source and the packet's task description. A real but out-of-scope finding earns one line in Current limits. Record rejected proposals with their reasons and use the uncertain ruling when evidence is missing.
 
 Before consolidating a mechanism, identify its requirement, motivating failure, current owner, regression evidence and retirement condition. Preserve operational nuance even when replacing its implementation. Historical rejected proposals are conditional on their stated premises; refresh them when native capabilities or authentication custody change. The [architecture contracts](docs/architecture.md#requirements-preserved-through-consolidation) provide the lifecycle map.
 
-Fixes go into the reviewed project with a test; protocol lessons go into this note as rules, not stories.
+Apply verified fixes in the reviewed project. Update this note when a lesson changes the review procedure.
 
 ## Repository
 

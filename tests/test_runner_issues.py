@@ -193,6 +193,8 @@ class ReportStartup(unittest.TestCase):
                 pins = [model + '-preview' if suffix else model for model in pins]
                 data = [{"providerID": m.split("/", 1)[0], "id": m.split("/", 1)[1]} for m in pins if "/" in m]
                 return subprocess.CompletedProcess(cmd, 1 if listing_failure else 0, json.dumps({"data": data}), "")
+            if cmd == ["devin", "models", "list", "--format", "json"]:
+                return subprocess.CompletedProcess(cmd, 0, support.devin_catalog(), "")
             return subprocess.CompletedProcess(cmd, 1 if listing_failure else 0, '\n'.join(pins), '')
         discovery = ({"side_effect": report} if isinstance(report, BaseException)
                      else {"return_value": report or {"providers": {}, "models": []}})

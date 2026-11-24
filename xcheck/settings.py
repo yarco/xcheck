@@ -88,8 +88,8 @@ def apply() -> None:
             lanes = tuple(adapters.parse_lane(x) for x in data["default_lanes"])
         except ValueError as error:
             raise ValueError("default_lanes contains an invalid lane selector") from error
-        if any(lane.kind == "devin" for lane in lanes):
-            raise ValueError("Devin is opt-in; remove it from default_lanes and use --add or --lanes explicitly")
+        if any(lane.kind == "devin" and lane != adapters.DEVIN_FREE_DEFAULT for lane in lanes):
+            raise ValueError("Other Devin models require explicit selection with --add or --lanes")
         if len({lane.name for lane in lanes}) != len(lanes):
             raise ValueError("default_lanes contains duplicate lane names")
         adapters.DEFAULT_ROSTER = lanes

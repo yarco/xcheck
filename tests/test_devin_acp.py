@@ -45,6 +45,26 @@ class Lanes(unittest.TestCase):
     xcheck = support.EndToEnd.xcheck
     second_base = support.EndToEnd.second_base
 
+    def test_default_devin_lane_checks_exact_free_price_before_inference(self):
+        peer = adapters.DEVIN_FREE_DEFAULT
+        config = self.root / "config.json"
+        config.write_text(json.dumps({"default_lanes": ["devin:swe-2-flash-medium"]}))
+        for offer, reason in (("free", ""), ("paid", "free-price-unconfirmed"),
+                              ("unknown", "inventory-unknown"), ("absent", "model-unavailable")):
+            with self.subTest(offer=offer):
+                base = self.second_base()
+                result = self.xcheck("run", "--base", str(base), "--orch", "codex",
+                                     "--mode", "headless", "--skip-capacity",
+                                     env_extra={"XCHECK_CONFIG": str(config), "FAKE_DEVIN_OFFER": offer})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads((base / "run.json").read_text())["roster_free"], [peer.name])
+                lane = base / "lanes" / peer.name
+                row = json.loads((lane / "exit.json").read_text())
+                self.assertEqual(row["status"], "skipped" if reason else "done", row)
+                self.assertEqual((lane / "stream.jsonl").exists(), not reason)
+                if reason:
+                    self.assertIn(reason, row["reason"])
+
     def test_review_spender_holds_pool(self):
         p = self.xcheck("run", "--base", str(self.base), "--orch", "codex",
                         "--lanes", "devin:swe-2-max", "--mode", "headless", "--skip-capacity", mode="custody", env_extra={

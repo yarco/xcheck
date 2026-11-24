@@ -29,11 +29,14 @@ from .types import Lane, Launch
 KINDS = ("codex", "claude", "grok", "agy", "opencode", "devin", "cline")
 NATIVE_FREE_PROVIDERS = ("kilo",)
 
+DEVIN_FREE_DEFAULT = Lane("devin", "swe-2-flash-medium")
+
 DEFAULT_ROSTER = (
     Lane("codex", "gpt-6.2-sol", "high"),
     Lane("claude", "claude-opus-5-5", "high"),
     Lane("grok", "grok-4.7", "xhigh"),
     Lane("agy", "gemini-4-neon", "high"),
+    DEVIN_FREE_DEFAULT,
 )
 
 # Offers awaiting usable qualification, not excluded models. A deferral

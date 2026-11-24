@@ -25,15 +25,14 @@ Optional `~/.config/xcheck/config.json` is read at each command invocation. `XCH
 }
 ```
 
-All keys are optional. Path values must be absolute or start with `~/`; a helper is an executable path, not a shell command. Lane selectors use the ordinary parser; duplicate normalized names and empty lists are refused. Devin is opt-in. Remove Devin entries from `default_lanes` and use `--add` or an explicit `--lanes` selection when the model and account are available. An explicit `--lanes` replaces the configured default roster for that run; `--orch` exclusion still applies. `--add` appends normally. The selected lanes/efforts are frozen in `run.json`. Do not change local integration settings while a run is active.
+All keys are optional. Path values must be absolute or start with `~/`; a helper is an executable path, not a shell command. Lane selectors use the ordinary parser; duplicate normalized names and empty lists are refused. `devin:swe-2-flash-medium` is the Devin selector accepted in `default_lanes` and requires a current Free listing at admission. Select other Devin models explicitly with `--add` or `--lanes`. An explicit `--lanes` replaces the configured default roster for that run; `--orch` exclusion still applies. `--add` appends normally. The selected lanes/efforts are frozen in `run.json`. Do not change local integration settings while a run is active.
 
 `pool_concurrency` optionally maps pool names to positive integer lane limits,
 for example `{"grok": 3, "claude": 2}`. Omitted pools allow two simultaneous
 lanes, except `agy-gemini`, which allows four.
 These limits apply across runs, not separately to each run. They are operating
 policy, not a provider quota guarantee. Same-run siblings consume permits too.
-Capacity still fails closed on unknown or insufficient quota; opt-in meterless
-providers remain meterless. Do not use account changes or extra pools to evade
+Capacity still fails closed on unknown or insufficient quota; providers without a quota meter use their documented admission rules. Do not use account changes or extra pools to evade
 provider limits.
 
 Every permit retains the existing aggregate `gate`/`busy` maintenance contract.

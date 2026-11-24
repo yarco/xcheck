@@ -1,7 +1,6 @@
 """Free lanes for a default run, chosen at launch from the configured free roster.
 
-The roster file is the only source of free lanes; a default roster never names
-one. With `free_lanes_per_provider` set, `xcheck run` without `--lanes` adds up
+The roster file supplies rotating free OpenCode and Cline lanes. With `free_lanes_per_provider` set, `xcheck run` without `--lanes` adds up
 to that many lanes per provider. A lane is eligible only when the roster's
 latest refresh observed it working and this machine's client is ready. No two
 chosen lanes share a model family (one model served by several providers counts

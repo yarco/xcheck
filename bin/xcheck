@@ -106,14 +106,19 @@ def main() -> int:
         if a.cmd == "run":
             added = [adapters.parse_lane(s.strip()) for s in a.add]
             automatic = []
+            roster_free = []
             if a.lanes is not None:
                 lanes = [adapters.parse_lane(s.strip()) for s in a.lanes.split(",") if s.strip()] + added
             else:
                 from xcheck import freeroster
                 lanes, automatic = freeroster.default_lanes(
                     adapters.DEFAULT_ROSTER, a.orch, a.base, adapters.FREE_ROSTER, added)
+                roster_free = [lane.name for lane in automatic]
+                free_devin = adapters.DEVIN_FREE_DEFAULT
+                if free_devin in adapters.DEFAULT_ROSTER and free_devin.kind != a.orch:
+                    roster_free.append(free_devin.name)
             return run.start(a.base, lanes + automatic, a.mode, a.orch, a.web == "live", a.idle, a.cap,
-                             set(a.force_lane), a.skip_capacity, roster_free=[lane.name for lane in automatic])
+                             set(a.force_lane), a.skip_capacity, roster_free=roster_free)
         if a.cmd == "wait":
             return run.wait(a.base, a.timeout)
         if a.cmd == "status":

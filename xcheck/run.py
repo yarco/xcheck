@@ -200,6 +200,80 @@ def _message(web: bool, kind: str) -> str:
         " the URLs you relied on." if web else " Do not use web search or web fetch tools."))
 
 
+def _is_default_lane(run: Run, name: str) -> bool:
+    default_names = {lane.name for lane in adapters.DEFAULT_ROSTER}
+    lane = run.lanes.get(name)
+    return name in default_names or (lane is not None and lane.kind in {"codex", "claude", "grok", "agy", "devin"})
+
+
+def _report_default_problems(run: Run, seen: set[str] | None = None, *, persist: bool = True) -> list[str]:
+    """Immediately print any non-done exit on a default-roster lane once per run."""
+    reported_file = run.base / ".reported-defaults.json"
+    if seen is not None:
+        reported = seen
+    elif persist:
+        try:
+            reported = set(json.loads(reported_file.read_text()))
+        except (OSError, ValueError, TypeError):
+            reported = set()
+    else:
+        reported = set()
+    newly_reported: list[str] = []
+    for name in run.lanes:
+        if name in reported or not _is_default_lane(run, name):
+            continue
+        p = _exit_path(run, name)
+        if not p.exists():
+            continue
+        try:
+            e = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        status = e.get("status", "failed")
+        reported.add(name)
+        if status != "done":
+            reason = (e.get("reason") or "no reason recorded").replace("\n", " ")
+            msg = f"xcheck: DEFAULT-ROSTER PROBLEM — {name} {status}: {reason}"
+            print(msg, flush=True)
+            newly_reported.append(msg)
+        if persist:
+            try:
+                atomic_write(reported_file, json.dumps(sorted(reported)))
+            except OSError:
+                pass
+    return newly_reported
+
+
+def _default_lanes_admitted(run: Run) -> bool:
+    """True once every selected default-roster lane has passed pre-spend admission
+    (either started its harness/stream, queued on an occupied pool, or wrote exit.json)."""
+    for name in run.lanes:
+        if not _is_default_lane(run, name):
+            continue
+        d = run.lane_dir(name)
+        if (d / "exit.json").exists() or (d / "stream.jsonl").exists():
+            continue
+        try:
+            if "waiting for pool" in (d / "view.log").read_text(errors="replace"):
+                continue
+        except OSError:
+            pass
+        try:
+            pids = json.loads((d / "pids.json").read_text())
+            if pids.get("harness"):
+                continue
+        except (OSError, ValueError):
+            pass
+        try:
+            phase = json.loads((d / "phase.json").read_text()).get("phase")
+            if phase in ("running", "waiting_for_login"):
+                continue
+        except (OSError, ValueError):
+            pass
+        return False
+    return True
+
+
 def detach(argv: list[str], base: Path) -> int:
     """Start `run` as a detached supervisor; return once it has launched."""
     base = base.resolve()
@@ -222,6 +296,14 @@ def detach(argv: list[str], base: Path) -> int:
                 sys.stderr.write(f.read().decode(errors="replace"))
             return p.returncode or 2
         if not reused and (base / "run.json").exists():
+            try:
+                run = Run.load(base)
+                admit_deadline = min(deadline, time.time() + 5.0)
+                while time.time() < admit_deadline and not _default_lanes_admitted(run):
+                    time.sleep(POLL)
+                _report_default_problems(run)
+            except Exception:
+                pass
             print(f"xcheck: supervisor pid {p.pid} running.\n"
                   f"Retain one completion operation: xcheck wait --base {base}\n"
                   "If this host has no completion callback, disclose pending collection; do not schedule master polling.")
@@ -250,6 +332,7 @@ def wait(base: Path, timeout: int | None) -> int:
     run = launched(base)
     until = time.time() + timeout if timeout else None
     while True:
+        _report_default_problems(run)
         if (base / ".done").exists():
             print(render_status(run), flush=True)
             return 0
@@ -266,6 +349,7 @@ def wait(base: Path, timeout: int | None) -> int:
 
 
 def _still_running(run: Run) -> int:
+    _report_default_problems(run)
     print(render_status(run) + "xcheck: still running; collection is pending. Retain one completion operation or "
           "collect on an explicit request; do not schedule another master turn. "
           "Report any failed or skipped row above now; its reason and stderr_tail are in lanes/<lane>/exit.json.", flush=True)
@@ -282,6 +366,7 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
         signal.signal(sig, on_signal)
 
     pending = set(run.lanes)
+    reported_local: set[str] = set()
     epoch = getattr(run, "epoch", 0.0)
     warn_at = epoch + REVIEW_ALERT_AFTER if epoch > 0 else None
     warned = False
@@ -302,6 +387,7 @@ def _wait(run: Run, children: dict[str, subprocess.Popen], until: float | None =
                 if _exit_path(run, name).exists():
                     pending.discard(name)
             # Unknown startup remains pending; elapsed time cannot prove a failed launch.
+        _report_default_problems(run, reported_local, persist=False)
         if pending:
             if not warned and warn_at is not None and time.time() >= warn_at:
                 warned = True
