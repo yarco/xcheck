@@ -77,7 +77,7 @@ def check() -> int:
               (", ".join(f"{p} {n}" for p, n in sorted(counts.items())) or "none") + ")")
         bad += not counts
     pins = tuple(dict.fromkeys((*adapters.DEFAULT_ROSTER, *adapters.OPT_IN)))  # a pin may also be a local default
-    providers = {"opencode"} | {p.model.split("/", 1)[0] for p in pins if p.kind == "opencode"}
+    providers = ({"opencode"} | {p.model.split("/", 1)[0] for p in pins if p.kind == "opencode"}) & set(models.SOURCES)
     if any(p.kind == "cline" for p in pins):
         providers.add("cline")
     try:
@@ -113,7 +113,7 @@ def check() -> int:
         elif peer.kind == "opencode":
             provider = peer.model.split("/", 1)[0]
             if provider not in catalogs:
-                catalogs[provider] = client_catalog(provider, report)
+                catalogs[provider] = client_catalog(provider, report, model=peer.model)
             catalog, problem = catalogs[provider]
             ok = problem is None and peer.model in catalog
             verdict = verdicts.get(f"opencode:{peer.model}", "unknown")
@@ -123,8 +123,10 @@ def check() -> int:
             bad += not ok or verdict == "gone"
         elif peer.kind == "devin":
             require_free = peer == adapters.DEVIN_FREE_DEFAULT
-            problem = devin.model_problem(devin_models, peer.model, require_free=require_free)
-            status = ("listed as Free" if require_free else "listed") if problem is None else problem
+            problem = adapters.unavailable(peer) or devin.admission(
+                peer, require_free=require_free, models=devin_models)
+            status = ("listed as Free and offered by devin acp" if require_free
+                      else "offered by devin acp") if problem is None else problem
             print(f"{'FAIL' if problem else 'ok  '} devin model {peer.model}: {status}")
             bad += bool(problem)
         elif peer.kind in MODEL_LISTS:
@@ -160,13 +162,13 @@ def listing(cmd):
         return "", f"model listing failed: {type(error).__name__}"
 
 
-def client_catalog(provider, report):
+def client_catalog(provider, report, *, model=None):
     read = (report.get("providers") or {}).get(provider) or {}
     if "client_ids" in read:
         return set(read["client_ids"]), None
     if "client_error" in read:
         return set(), f"model API failed: {read['client_error']}"
     try:
-        return set(models.review_metadata(provider)), None
+        return set(models.review_metadata(provider, model=model)), None
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         return set(), f"model API failed: {type(error).__name__}"

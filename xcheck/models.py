@@ -336,7 +336,68 @@ def fetch(url: str, *, as_json: bool = True):
     return json.loads(body) if as_json else body
 
 
-def client_metadata(*, env: dict | None = None, cwd: Path | None = None) -> dict:
+def _acp_config_options(result: dict | None) -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    if not isinstance(result, dict):
+        return found
+    for option in result.get("configOptions") or []:
+        if not isinstance(option, dict) or not isinstance(option.get("id"), str):
+            continue
+        values = [o.get("value") for o in option.get("options") or [] if isinstance(o, dict)]
+        found[option["id"]] = [v for v in values if isinstance(v, str)]
+    return found
+
+
+def acp_metadata(*, env: dict | None = None, cwd: Path | None = None, model: str | None = None,
+                 timeout: float = 30.0) -> dict:
+    """Zero-turn OpenCode ACP fallback when `opencode api model.list --standalone`
+    returns an empty data array before async provider hydration completes."""
+    import shutil
+    from . import acp_probe
+
+    exe = shutil.which("opencode")
+    if not exe:
+        return {}
+    work = Path(cwd or Path.cwd()).resolve()
+    probe_env = dict(os.environ) if env is None else dict(env)
+    try:
+        with acp_probe.Probe([exe, "acp"], work, probe_env, timeout) as rpc:
+            if rpc.call(1, "initialize", {"protocolVersion": 1, "clientCapabilities": {
+                    "fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}}) is None:
+                return {}
+            session = rpc.call(2, "session/new", {"cwd": str(work), "mcpServers": []})
+            if not isinstance(session, dict):
+                return {}
+            opts = _acp_config_options(session)
+            models_list = opts.get("model") or []
+            if not models_list:
+                return {}
+            target_efforts: list[str] | None = None
+            if model and model in models_list:
+                chosen = rpc.call(3, "session/set_config_option", {
+                    "sessionId": session.get("sessionId"), "configId": "model", "value": model})
+                if not isinstance(chosen, dict):
+                    return {}
+                cur = next((o.get("currentValue") for o in chosen.get("configOptions") or []
+                            if isinstance(o, dict) and o.get("id") == "model"), None)
+                if cur != model:
+                    return {}
+                target_efforts = _acp_config_options(chosen).get("effort") or []
+            catalog = {}
+            for full_id in models_list:
+                if "/" not in full_id:
+                    continue
+                provider_id, model_id = full_id.split("/", 1)
+                entry: dict = {"providerID": provider_id, "id": model_id}
+                if model and full_id == model and target_efforts is not None:
+                    entry["variants"] = [{"id": v} for v in target_efforts if v != "default"]
+                catalog[full_id] = entry
+            return catalog
+    except OSError:
+        return {}
+
+
+def client_metadata(*, env: dict | None = None, cwd: Path | None = None, model: str | None = None) -> dict:
     # Serialize local snapshots, and use a private server so no shared service
     # escapes a lane's process group or workspace sandbox.
     # A cold `serve --stdio` can answer GET /api/model with 503 while plugins
@@ -362,16 +423,22 @@ def client_metadata(*, env: dict | None = None, cwd: Path | None = None) -> dict
                 raise ValueError(
                     f"`opencode api model.list --standalone` failed (exit {listing.returncode}: {detail})")
             time.sleep(1)
-    try:
-        data = json.loads(listing.stdout)["data"]
-        if not isinstance(data, list):
-            raise ValueError("expected a model array")
-        return {f"{item['providerID']}/{item['id']}": item for item in data}
-    except (KeyError, TypeError, json.JSONDecodeError) as error:
-        raise ValueError("OpenCode model API format changed") from error
+        try:
+            data = json.loads(listing.stdout)["data"]
+            if not isinstance(data, list):
+                raise ValueError("expected a model array")
+            catalog = {f"{item['providerID']}/{item['id']}": item for item in data}
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise ValueError("OpenCode model API format changed") from error
+        if not catalog and model:
+            # OpenCode 2.4.2's standalone HTTP model.list can return `data: []`
+            # before async provider/model hydration completes; fall back to a
+            # zero-turn `opencode acp` session probe in the same lane environment.
+            return acp_metadata(env=env, cwd=cwd, model=model)
+        return catalog
 
 
-def review_metadata(provider: str, config: dict | None = None) -> dict:
+def review_metadata(provider: str, config: dict | None = None, *, model: str | None = None) -> dict:
     """The catalog in a neutral directory under the selected lane's environment."""
     from .adapters import Launch, _opencode_env
     lane = parse_lane(f"opencode:{provider}/model")
@@ -383,7 +450,7 @@ def review_metadata(provider: str, config: dict | None = None) -> dict:
         else:
             env = _opencode_env(lane)
         spec = Launch([], None, env_set=env, kind="opencode")
-        return client_metadata(env=lane_env(spec, work), cwd=work)
+        return client_metadata(env=lane_env(spec, work), cwd=work, **({"model": model} if model else {}))
 
 
 def sources(path: Path | None = None) -> dict:

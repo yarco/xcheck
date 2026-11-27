@@ -25,7 +25,7 @@ The host must retain a wait or provide a verified completion callback to promise
 
 | Question | Authority and refresh rule |
 |---|---|
-| What is selected? | `adapters.py` defines defaults and the pinned opt-ins (SWE-2 Max, Gemini 3.8 Flash, Mistral Large 4, GLM 5.3 on Vibe); the local free roster supplies automatic OpenCode/Cline lanes when `free_lanes_per_provider` is set. `--add` appends explicit selectors; `BASE/run.json` records this run's exact selectors, efforts, `roster_default`, `roster_free` and settings. Default-roster edits are deliberate |
+| What is selected? | `adapters.py` defines defaults and the pinned opt-ins (Gemini 3.8 Flash, Mistral Large 4, GLM 5.3 on Vibe); the local free roster supplies automatic OpenCode/Cline lanes when `free_lanes_per_provider` is set. `--add` appends explicit selectors; `BASE/run.json` records this run's exact selectors, efforts, `roster_default`, `roster_free` and settings. Default-roster edits are deliberate |
 | What can launch now? | Fresh native startup/model inventory and capacity checks under admission; failed reads mean unknown, not absent |
 | What is free now? | Provider prices and served IDs from `xcheck models`; the signed-in Devin catalog for Devin. No saved-price fallback. A free roster records dated lane-check results, never authoritative prices. Native client cache is advisory support metadata only |
 | What did peers review? | `BASE/.packet`, captured at launch; later edits to inputs or reused lane workspaces cannot revise it |
@@ -89,15 +89,26 @@ Check current native inventory and access: a pin is not an availability promise.
 An absent exact model skips before inference; an unreadable inventory is unknown.
 Never substitute a model, lower effort or enable a paid route to repair admission.
 
-The default Devin selector is `devin:swe-2-flash-medium`. Admission queries
-`devin models list --format json` and skips the lane before inference unless
-the exact variant is listed as Free. `doctor` uses the same check. See the
-[Devin model contract](docs/reference.md#devin).
+The default Devin selector is `devin:swe-2-flash-medium`. Admission checks
+`devin models list --format json` (requiring Free pricing for the default lane)
+and runs a zero-turn `devin acp --model <pin>` probe so an unavailable model
+cannot silently fall back to another model. `doctor` uses the same check. See
+the [Devin model contract](docs/reference.md#devin).
 
-SWE-2 Max (`--add devin:swe-2-max`), Gemini 3.8 Flash
-(`--add agy:gemini-3.8-flash:high`) and the two Mistral Vibe lanes
-(`--add vibe:mistral-large-4-0:high`, `--add vibe:zai-glm-5-3:high`) are pinned
-add-ons. Vibe lanes run in Vibe's YOLO (`auto-approve`) mode with web search on
+Gemini 3.8 Flash (`--add agy:gemini-3.8-flash:high`) and the two Mistral Vibe
+lanes (`--add vibe:mistral-large-4-0:high`, `--add vibe:zai-glm-5-3:high`) are
+pinned add-ons; other Devin models (such as `--add devin:swe-2-max` on a paid
+plan) remain explicit selectors checked by the same zero-turn ACP admission
+probe. **Optional Caffeine auto-router (OpenCode):** start it on demand with
+`--add opencode:caffeine/router` (optional `:default`, `:low`, `:medium`, or
+`:high` effort; or standalone via `--lanes opencode:caffeine/router`). It stays
+optional (outside `default_lanes`), uses pool `opencode-caffeine` with no xcheck
+quota meter, authenticates via the operator's stored OpenCode `caffeine`
+credential or an exported `CAFFEINE_INFERENCE_API_KEY` (forwarded only to
+`opencode:caffeine/*` lanes), and falls back to a zero-turn `opencode acp`
+inventory probe when `opencode api model.list --standalone` returns an empty
+list (OpenCode 2.4.2; see [OpenCode adapter](docs/reference.md#opencode)). Vibe
+lanes run in Vibe's YOLO (`auto-approve`) mode with web search on
 the active Vibe account and draw on that account's plan usage; see the
 [Vibe contract](docs/reference.md#vibe). Gemini Flash and Hydrogen
 draw from the same Gemini quota buckets. Set `free_lanes_per_provider` to draw up to

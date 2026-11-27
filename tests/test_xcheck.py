@@ -88,10 +88,16 @@ def agy_offer(models=None, levels=None):
 
 
 def devin_catalog(*variants):
-    return json.dumps({"families": [{"variants": list(variants) or [
+    return json.dumps({"families": [{"family_uid": "swe-2-flash", "variants": list(variants) or [
         {"model_uid": "swe-2-flash-medium", "cost_tier": "Free"},
         {"model_uid": "swe-2-max"},
     ]}]})
+
+
+def devin_probe_ok(model, timeout=60.0):
+    """A stand-in for devin.probe_session: exact requested model offered with accept-edits."""
+    return ({"model": model, "offered_models": [model], "thought_level": None,
+             "speed": None, "modes": ["accept-edits", "ask"]}, False, None)
 
 
 def grok_probe_ok(root: Path, log=None, session=None) -> tuple:
@@ -504,6 +510,7 @@ class DevinLane(unittest.TestCase):
             log = work / "l"
             user = work / "user-config.json"
             user.write_text(json.dumps({
+                "agent": {"model": "swe-2-flash-medium"},
                 "devin": {"org_id": "org-test"},
                 "hooks": {"PermissionRequest": [{"hooks": [{"type": "command", "command": "hang"}]}]},
                 "shell": {"setup_complete": True},
@@ -527,6 +534,7 @@ class DevinLane(unittest.TestCase):
             self.assertFalse((work / ".xcheck-devin-config.json").exists())
             cfg = json.loads(overlay.read_text())
             self.assertEqual(cfg["hooks"], {})
+            self.assertNotIn("model", cfg.get("agent", {}))
             self.assertEqual(cfg["devin"], {"org_id": "org-test"})
             self.assertEqual(cfg["shell"], {"setup_complete": True})
 
@@ -1381,6 +1389,7 @@ class Installation(unittest.TestCase):
              patch.object(agy, "registry_version", return_value=None), \
              patch.object(agy, "inventory", side_effect=agy_offer()), \
              patch("xcheck.vibe.inventory", side_effect=vibe_offer), \
+             patch("xcheck.devin.probe_session", side_effect=devin_probe_ok), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(doctor.check(), 1)
         self.assertIn("FAIL installed copy stale != source", output.getvalue())
@@ -1396,6 +1405,7 @@ class Installation(unittest.TestCase):
              patch.object(agy, "registry_version", return_value=None), \
              patch.object(agy, "inventory", side_effect=agy_offer()), \
              patch("xcheck.vibe.inventory", side_effect=vibe_offer), \
+             patch("xcheck.devin.probe_session", side_effect=devin_probe_ok), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(doctor.check(), 0)
 
@@ -1411,6 +1421,7 @@ class Installation(unittest.TestCase):
              patch.object(agy, "registry_version", return_value=None), \
              patch.object(agy, "inventory", side_effect=agy_offer()), \
              patch("xcheck.vibe.inventory", side_effect=vibe_offer), \
+             patch("xcheck.devin.probe_session", side_effect=devin_probe_ok), \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(doctor.check(), 1)
         self.assertIn("grok: missing ['--sandbox']", output.getvalue())

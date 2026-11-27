@@ -194,6 +194,92 @@ class Lanes(unittest.TestCase):
         self.assertIn("opencode/not-listed-free is not in `opencode api model.list --standalone`", row["reason"])
         self.assertFalse((self.base / "lanes" / row["lane"] / "stream.jsonl").exists())
 
+    def test_caffeine_env_allowlist_and_acp_fallback_on_empty_model_list(self):
+        import subprocess
+        from xcheck import models
+        from xcheck.lane import lane_env
+        peer = adapters.parse_lane("opencode:caffeine/router")
+        self.assertEqual(peer.name, "opencode-caffeine-router")
+        self.assertEqual(peer.pool, "opencode-caffeine")
+        self.assertFalse(peer.zen)
+        self.assertEqual(adapters.missing_keys(peer), [])
+        other = adapters.parse_lane("opencode:openrouter/qwen/qwen3.8-27b:free")
+        with patch.dict(os.environ, {"CAFFEINE_INFERENCE_API_KEY": "caf-secret", "OTHER_API_KEY": "blocked"}, clear=False):
+            self.assertEqual(adapters._opencode_env(peer), {"CAFFEINE_INFERENCE_API_KEY": "caf-secret"})
+            self.assertNotIn("CAFFEINE_INFERENCE_API_KEY", adapters._opencode_env(other))
+        work = self.root / "caff-work"
+        work.mkdir()
+        msg = self.root / "caff-msg.txt"
+        msg.write_text("review")
+        empty_api = subprocess.CompletedProcess(["opencode"], 0, '{"data":[]}', "")
+        acp_catalog = {"caffeine/router": {"providerID": "caffeine", "id": "router",
+                                           "variants": [{"id": "low"}, {"id": "high"}]}}
+        with patch.object(models.subprocess, "run", return_value=empty_api), \
+                patch.object(models, "acp_metadata", return_value=acp_catalog) as acp, \
+                patch.dict(os.environ, {"CAFFEINE_INFERENCE_API_KEY": "caf-secret", "OTHER_API_KEY": "blocked"}, clear=False):
+            spec = adapters.launch(peer, work, msg, self.base / "lanes" / peer.name / "harness.log", True)
+            env = lane_env(spec, work)
+        acp.assert_called_once()
+        self.assertEqual(acp.call_args.kwargs["model"], "caffeine/router")
+        self.assertIn("--model", spec.argv)
+        self.assertEqual(spec.argv[spec.argv.index("--model") + 1], "caffeine/router")
+        self.assertIn("effort=default", spec.argv)
+        self.assertEqual(env.get("CAFFEINE_INFERENCE_API_KEY"), "caf-secret")
+        self.assertNotIn("OTHER_API_KEY", env)
+        with patch.object(models.subprocess, "run", return_value=empty_api), \
+                patch.object(models, "acp_metadata", return_value={}):
+            with self.assertRaisesRegex(adapters.Unavailable, "startup-unavailable"):
+                adapters.launch(peer, work, msg, self.base / "lanes" / peer.name / "harness.log", True)
+
+    def test_acp_metadata_probes_zero_turn_and_rejects_mismatched_model_switch(self):
+        from xcheck import acp_probe, models
+
+        class FakeProbe:
+            def __init__(self, responses):
+                self._responses = list(responses)
+                self.calls = []
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return None
+            def call(self, rid, method, params):
+                self.calls.append((rid, method, params))
+                return self._responses.pop(0)
+
+        ok_probe = FakeProbe([
+            {"protocolVersion": 1},
+            {"sessionId": "s1", "configOptions": [
+                {"id": "model", "options": [{"value": "caffeine/router"}, {"value": "opencode/big-pickle"}]}]},
+            {"configOptions": [
+                {"id": "model", "currentValue": "caffeine/router"},
+                {"id": "effort", "options": [{"value": "low"}, {"value": "high"}, {"value": "default"}]}]},
+        ])
+        with patch.object(acp_probe, "Probe", return_value=ok_probe), \
+                patch("shutil.which", return_value="/usr/local/bin/opencode"):
+            cat = models.acp_metadata(env={}, cwd=self.root, model="caffeine/router")
+        self.assertEqual(cat["caffeine/router"]["variants"], [{"id": "low"}, {"id": "high"}])
+        self.assertEqual([c[1] for c in ok_probe.calls], ["initialize", "session/new", "session/set_config_option"])
+
+        bad_switch = FakeProbe([
+            {"protocolVersion": 1},
+            {"sessionId": "s2", "configOptions": [
+                {"id": "model", "options": [{"value": "caffeine/router"}]}]},
+            {"configOptions": [{"id": "model", "currentValue": "opencode/fallback"}]},
+        ])
+        with patch.object(acp_probe, "Probe", return_value=bad_switch), \
+                patch("shutil.which", return_value="/usr/local/bin/opencode"):
+            self.assertEqual(models.acp_metadata(env={}, cwd=self.root, model="caffeine/router"), {})
+
+        failed_switch = FakeProbe([
+            {"protocolVersion": 1},
+            {"sessionId": "s3", "configOptions": [
+                {"id": "model", "options": [{"value": "caffeine/router"}]}]},
+            None,
+        ])
+        with patch.object(acp_probe, "Probe", return_value=failed_switch), \
+                patch("shutil.which", return_value="/usr/local/bin/opencode"):
+            self.assertEqual(models.acp_metadata(env={}, cwd=self.root, model="caffeine/router"), {})
+
     def test_spender_keeps_provider_pool_and_effort(self):
         result = self.xcheck("run", "--base", str(self.base), "--orch", "codex",
                              "--lanes", "opencode:openrouter/qwen/qwen3.8-27b:free:high",

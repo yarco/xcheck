@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test_xcheck as support
-from xcheck import adapters, activity, files, pools, run
+from xcheck import adapters, activity, devin, files, pools, run
 from test_agy_acp import PROMPT, chunk, rpc
 
 PEER = adapters.Lane("devin", "swe-2-max")
@@ -117,6 +117,81 @@ class Lanes(unittest.TestCase):
         meter.observe(rpc(method="session/update", params={"update": {
             "sessionUpdate": "tool_call_update", "status": "completed", "kind": "read"}}))
         self.assertEqual(meter.data["completed_tools"], 1)
+
+    def test_explicit_devin_lane_skips_when_acp_silently_falls_back(self):
+        cases = (
+            ("fallback-with-warn", "devin:swe-2-max", {
+                "FAKE_DEVIN_ACP_MODEL": "swe-2-flash-medium",
+                "FAKE_DEVIN_ACP_OFFERS": json.dumps(["swe-2-flash-medium", "swe-1-6-slow"]),
+                "FAKE_DEVIN_ACP_FALLBACK": "1",
+            }, "model-unavailable"),
+            ("fallback-without-warn", "devin:swe-2-max", {
+                "FAKE_DEVIN_ACP_MODEL": "swe-2-flash-medium",
+                "FAKE_DEVIN_ACP_OFFERS": json.dumps(["swe-2-flash-medium", "swe-1-6-slow"]),
+            }, "model-unavailable"),
+            ("same-family-lower-effort", "devin:swe-2-flash-high", {
+                "FAKE_DEVIN_ACP_MODEL": "swe-2-flash-medium",
+                "FAKE_DEVIN_ACP_OFFERS": json.dumps(["swe-2-flash-medium"]),
+            }, "model-unavailable"),
+            ("collapsed-speed-mismatch", "devin:swe-2-max-lightning", {
+                "FAKE_DEVIN_ACP_MODEL": "swe-2-high",
+                "FAKE_DEVIN_ACP_OFFERS": json.dumps(["swe-2-high"]),
+                "FAKE_DEVIN_ACP_THOUGHT": "max",
+            }, "model-unavailable"),
+            ("missing-accept-edits-mode", "devin:swe-2-max", {
+                "FAKE_DEVIN_ACP_MODES": json.dumps(["ask"]),
+            }, "startup-unavailable"),
+            ("no-config-options", "devin:swe-2-max", {
+                "FAKE_DEVIN_ACP_BROKEN": "no-options",
+            }, "inventory-unknown"),
+            ("probe-exit", "devin:swe-2-max", {
+                "FAKE_DEVIN_ACP_BROKEN": "exit",
+            }, "startup-unavailable"),
+        )
+        for label, selector, env_extra, expected in cases:
+            with self.subTest(case=label):
+                base = self.second_base()
+                lane_name = adapters.parse_lane(selector).name
+                result = self.xcheck("run", "--base", str(base), "--orch", "codex",
+                                     "--lanes", selector, "--mode", "headless", "--skip-capacity",
+                                     env_extra=env_extra)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                lane_dir = base / "lanes" / lane_name
+                row = json.loads((lane_dir / "exit.json").read_text())
+                self.assertEqual(row["status"], "skipped", row)
+                self.assertIn(expected, row["reason"])
+                self.assertFalse((lane_dir / "stream.jsonl").exists())
+
+    def test_collapsed_family_with_matching_thought_level_is_admitted(self):
+        base = self.second_base()
+        result = self.xcheck("run", "--base", str(base), "--orch", "codex",
+                             "--lanes", "devin:swe-2-max", "--mode", "headless", "--skip-capacity",
+                             env_extra={
+                                 "FAKE_DEVIN_ACP_MODEL": "swe-2-high",
+                                 "FAKE_DEVIN_ACP_OFFERS": json.dumps(["swe-2-high", "swe-2-flash-medium"]),
+                                 "FAKE_DEVIN_ACP_THOUGHT": "max",
+                             })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row = json.loads((base / "lanes" / PEER.name / "exit.json").read_text())
+        self.assertEqual(row["status"], "done", row)
+
+
+class OptionsParsing(unittest.TestCase):
+    def test_grouped_options_and_effort_mismatch_detection(self):
+        parsed = devin.acp_options({"configOptions": [
+            {"id": "mode", "category": "mode", "currentValue": "accept-edits",
+             "options": [{"value": "accept-edits"}, {"value": "ask"}]},
+            {"id": "model", "category": "model", "currentValue": "swe-2-flash-medium",
+             "options": [{"group": "Free", "options": [{"value": "swe-2-flash-medium"}]}]},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "high",
+             "options": [{"value": "medium"}, {"value": "high"}]},
+        ]})
+        self.assertEqual(parsed["offered_models"], ["swe-2-flash-medium"])
+        self.assertEqual(parsed["thought_level"], "high")
+        models = {"swe-2-flash-medium": {"model_uid": "swe-2-flash-medium", "family_uid": "swe-2-flash"}}
+        self.assertFalse(devin._matches_requested("swe-2-flash-medium", parsed, models))
+        parsed["thought_level"] = "medium"
+        self.assertTrue(devin._matches_requested("swe-2-flash-medium", parsed, models))
 
 
 if __name__ == "__main__":

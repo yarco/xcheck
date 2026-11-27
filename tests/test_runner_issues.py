@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import test_xcheck as support
 import test_runtime_e2e as runtime
-from xcheck import adapters, agy, capacity, doctor, grok, install, lane, models, run, vibe
+from xcheck import adapters, agy, capacity, devin, doctor, grok, install, lane, models, run, vibe
 
 # The fake OpenCode server's native upstream rate-limit error (tests/fake/harness).
 UPSTREAM_LIMIT = "[ModelRun] qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly."
@@ -212,6 +212,7 @@ class ReportStartup(unittest.TestCase):
                 discovery_or_fetch, \
                 patch.object(agy, 'registry_version', return_value=registry), \
                 patch.object(vibe, 'inventory', side_effect=support.vibe_offer), \
+                patch.object(devin, 'probe_session', side_effect=support.devin_probe_ok), \
                 patch.object(agy, 'inventory', side_effect=support.agy_offer(*(
                              () if acp_models is None else (acp_models,)))), \
                 redirect_stdout(io.StringIO()) as out:

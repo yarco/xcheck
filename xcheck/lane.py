@@ -158,10 +158,10 @@ def _run_lane(run: Run, name: str, outcome: settlement.Outcome) -> int:
     if held is None:
         return finish("skipped", f"pool {lane.pool} stayed busy for {run.cap}s")
     try:
-        if lane.kind == "devin" and name in run.roster_free:
+        if lane.kind == "devin":
             from . import devin
             atomic_write(d / "phase.json", json.dumps(dict(phase="checking_models")))
-            if problem := devin.free_model_problem(lane.model):
+            if problem := devin.admission(lane, require_free=name in run.roster_free):
                 return finish("skipped", problem)
         if lane.kind == "agy":
             # Keep the zero-turn server probe under the Gemini pool. Check

@@ -110,7 +110,7 @@ def parse_free_lanes(selectors) -> tuple[Lane, ...]:
 # Pinned add-ons and the externally maintained free roster. Free lanes may
 # also be selected per default run. `xcheck models` marks a ready row
 # `pinned` when it is here, else `--add` until the next refresh adds it.
-PINNED_OPT_IN = (Lane("devin", "swe-2-max"), Lane("agy", "gemini-3.8-flash", "high"),
+PINNED_OPT_IN = (Lane("agy", "gemini-3.8-flash", "high"),
                  Lane("vibe", "mistral-large-4-0", "high"), Lane("vibe", "zai-glm-5-3", "high"))
 OPT_IN = (*PINNED_OPT_IN, *free_lanes())
 
@@ -322,7 +322,7 @@ def _opencode_launch(lane: Lane, work: Path, message: Path, log: Path, store: Pa
         from .models import client_metadata
         model = _opencode_model(lane)[1]
         try:
-            metadata = client_metadata(env=lane_env(spec, work), cwd=work)
+            metadata = client_metadata(env=lane_env(spec, work), cwd=work, model=model)
         except (OSError, subprocess.SubprocessError, ValueError) as e:
             raise Unavailable(f"startup-unavailable: `opencode api model.list --standalone` failed ({_clip(str(e), 200)})") from e
         if model not in metadata:
@@ -364,6 +364,8 @@ def _opencode_env(lane: Lane) -> dict[str, str]:
         names.extend(["ZAI_API_KEY", "ZHIPU_API_KEY"])  # coding-plan talks Zhipu
     if provider == "openrouter":
         names.append("OPENROUTER_API_KEY")
+    if provider == "caffeine":
+        names.append("CAFFEINE_INFERENCE_API_KEY")
     for name in names:
         v = os.environ.get(name)
         if v:
@@ -628,6 +630,8 @@ def _devin_config(path: Path, web: bool) -> Path:
     except (OSError, ValueError):
         pass
     src["hooks"] = {}
+    if isinstance(src.get("agent"), dict):
+        src["agent"].pop("model", None)
     perms = src.setdefault("permissions", {})
     perms["allow"] = [*perms.get("allow", []), *DEVIN_ALLOW, *(DEVIN_FETCH if web else [])]
     if not web:

@@ -75,11 +75,18 @@ if kind == "devin" and argv == ["models", "list", "--format", "json"]:
     offer = os.environ.get("FAKE_DEVIN_OFFER", "free")
     if offer == "unknown":
         sys.exit(1)
-    variants = [{"model_uid": "swe-2-max"}]
+    flash_variants = [{"model_uid": "swe-2-flash-high"}]
     if offer != "absent":
-        variants.append({"model_uid": "swe-2-flash-medium", **(
+        flash_variants.insert(0, {"model_uid": "swe-2-flash-medium", **(
             {"cost_tier": "Free"} if offer == "free" else {"cost_summary": "$0.50 / 1M Output"})})
-    emit({"families": [{"variants": variants}]})
+    emit({"families": [
+        {"family_uid": "swe-2", "variants": [
+            {"model_uid": "swe-2-high"},
+            {"model_uid": "swe-2-max"},
+            {"model_uid": "swe-2-max-lightning", "cost_summary": "$1 / 1M Input"},
+        ]},
+        {"family_uid": "swe-2-flash", "variants": flash_variants},
+    ]})
     sys.exit(0)
 
 
@@ -168,8 +175,7 @@ if kind == "acpx":
 
     agent_argv = shlex.split(argv[argv.index("--agent") + 1])
     cwd = argv[argv.index("--cwd") + 1] if "--cwd" in argv else os.getcwd()
-    model = (argv[argv.index("--model") + 1] if "--model" in argv
-             else agent_argv[agent_argv.index("--model") + 1] if "--model" in agent_argv else None)
+    model = argv[argv.index("--model") + 1] if "--model" in argv else None
     prompt = Path(argv[argv.index("--file") + 1]).read_text() if "--file" in argv else argv[-1]
     settings = [("model", model)] if any(Path(a).name == "opencode" for a in agent_argv) else []
     settings += [tuple(argv[i + 1].split("=", 1)) for i, arg in enumerate(argv) if arg == "--config-option"]
@@ -430,6 +436,35 @@ if (kind == "agy_acp_server.par" or (kind in ("devin", "opencode") and "acp" in 
                 "currentModelId": selected if kind in ("devin", "grok") else "gemini-3.8-flash-high", "availableModels":
                     [{"modelId": selected}] if kind in ("devin", "grok") else [] if mode == "models-unavailable" else [
                     {"modelId": f"{m}-{level}"} for m, levels in agy_levels.items() for level in levels]}}
+            if kind == "devin":
+                if os.environ.get("FAKE_DEVIN_ACP_BROKEN") == "exit":
+                    sys.exit(2)
+                current = os.environ.get("FAKE_DEVIN_ACP_MODEL") or selected
+                offers = (json.loads(os.environ["FAKE_DEVIN_ACP_OFFERS"])
+                          if os.environ.get("FAKE_DEVIN_ACP_OFFERS") else [current])
+                modes = (json.loads(os.environ["FAKE_DEVIN_ACP_MODES"])
+                         if os.environ.get("FAKE_DEVIN_ACP_MODES") else ["accept-edits", "ask"])
+                if os.environ.get("FAKE_DEVIN_ACP_FALLBACK") == "1":
+                    print("WARN create_acp_agent: chisel_server::acp: `devin acp --model` value did not "
+                          "resolve to an available model; falling back to your configured `agent.model` "
+                          "or the default", file=sys.stderr, flush=True)
+                result["models"]["currentModelId"] = current
+                result["models"]["availableModels"] = [{"modelId": m} for m in offers]
+                if os.environ.get("FAKE_DEVIN_ACP_BROKEN") != "no-options":
+                    opts = [
+                        {"id": "mode", "category": "mode", "type": "select",
+                         "currentValue": modes[0] if modes else "ask",
+                         "options": [{"value": m} for m in modes]},
+                        {"id": "model", "category": "model", "type": "select", "currentValue": current,
+                         "options": [{"value": m} for m in offers]},
+                    ]
+                    if thought := os.environ.get("FAKE_DEVIN_ACP_THOUGHT"):
+                        opts.append({"id": "thought_level", "category": "thought_level", "type": "select",
+                                     "currentValue": thought, "options": [{"value": thought}]})
+                    if speed := os.environ.get("FAKE_DEVIN_ACP_SPEED"):
+                        opts.append({"id": "speed", "type": "select", "currentValue": speed,
+                                     "options": [{"value": speed}]})
+                    result["configOptions"] = opts
             if kind == "agy_acp_server.par":
                 result["configOptions"] = agy_options()
             if kind == "grok":

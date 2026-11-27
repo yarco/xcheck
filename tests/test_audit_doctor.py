@@ -11,11 +11,11 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_xcheck as support  # noqa: E402
-from xcheck import adapters, agy, doctor, grok, install, lane, models, run, vibe
+from xcheck import adapters, agy, devin, doctor, grok, install, lane, models, run, vibe
 
 class ExactListedModels(unittest.TestCase):
 
-    def doctor(self, grok_text, devin_text, failed_listing=False, auth=None):
+    def doctor(self, grok_text, devin_text, failed_listing=False, auth=None, devin_probe=None, discover=None):
         helps = {tuple(cmd): (REPO / 'tests/fixtures/cli-help' / f"{kind.replace(' ', '-')}.txt").read_text() for kind, (cmd, _) in adapters.HELP_COMMANDS.items()}
 
         def fake(cmd, **kw):
@@ -33,6 +33,9 @@ class ExactListedModels(unittest.TestCase):
                 data = [{"providerID": p.model.split("/", 1)[0], "id": p.model.split("/", 1)[1]} for p in adapters.OPT_IN if p.kind == "opencode"]
                 return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": data}), "")
             return subprocess.CompletedProcess(cmd, 0, '\n'.join((p.model for p in (*adapters.DEFAULT_ROSTER, *adapters.OPT_IN))), '')
+        discover_patch = (patch.object(models, 'discover', side_effect=discover)
+                          if discover is not None else
+                          patch.object(models, 'discover', return_value={"providers": {}, "models": []}))
         with tempfile.TemporaryDirectory() as probe_tmp, \
                 patch.object(install, 'source_root', return_value=REPO), \
                 patch.object(install, 'installed_digest', return_value=install.digest(REPO)), \
@@ -40,9 +43,10 @@ class ExactListedModels(unittest.TestCase):
                 patch.object(adapters, 'unavailable', return_value=None), \
                 patch.object(grok, 'probe_session',
                              return_value=support.grok_probe_ok(Path(probe_tmp))), \
-                patch.object(models, 'discover', return_value={"providers": {}, "models": []}), \
+                discover_patch, \
                 patch.object(agy, 'registry_version', return_value=None), \
                 patch.object(vibe, 'inventory', side_effect=support.vibe_offer), \
+                patch.object(devin, 'probe_session', side_effect=devin_probe or support.devin_probe_ok), \
                 patch.object(agy, 'inventory', side_effect=support.agy_offer()), \
                 redirect_stdout(io.StringIO()) as output:
             code = doctor.check()
@@ -56,7 +60,16 @@ class ExactListedModels(unittest.TestCase):
     def test_accepts_exact_grok_row_and_free_devin_pin(self):
         code, text = self.doctor('Default model: grok-4.7\n  * grok-4.7 (default)\n', support.devin_catalog())
         self.assertEqual(code, 0, text)
-        self.assertIn('devin model swe-2-flash-medium: listed as Free', text)
+        self.assertIn('devin model swe-2-flash-medium: listed as Free and offered by devin acp', text)
+
+    def test_rejects_devin_pin_when_acp_falls_back_to_another_model(self):
+        grok = '  * grok-4.7 (default)\n'
+        fallback = lambda model, timeout=60.0: (
+            {"model": "swe-1-6-slow", "offered_models": ["swe-1-6-slow"], "thought_level": None,
+             "speed": None, "modes": ["accept-edits", "ask"]}, True, None)
+        code, text = self.doctor(grok, support.devin_catalog(), devin_probe=fallback)
+        self.assertEqual(code, 1, text)
+        self.assertIn('FAIL devin model swe-2-flash-medium: model-unavailable', text)
 
     def test_rejects_missing_or_unconfirmed_free_devin_pin(self):
         grok = '  * grok-4.7 (default)\n'
@@ -83,6 +96,22 @@ class ExactListedModels(unittest.TestCase):
         self.assertEqual(code, 0, text)
         self.assertIn('ok   codex: Codex CLI present', text)
         self.assertIn('ok   claude: native limit flags', text)
+
+    def test_custom_opencode_provider_pin_does_not_pass_unknown_source_to_discover(self):
+        seen_providers = []
+
+        def fake_discover(providers):
+            seen_providers.append(set(providers))
+            return {"providers": {}, "models": []}
+
+        caffeine = adapters.Lane("opencode", "caffeine/router")
+        with patch.object(adapters, "DEFAULT_ROSTER", (caffeine,)), \
+                patch.object(adapters, "OPT_IN", ()), \
+                patch.object(models, "client_metadata", return_value={"caffeine/router": {"providerID": "caffeine", "id": "router"}}):
+            code, text = self.doctor('', support.devin_catalog(), discover=fake_discover)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(seen_providers, [{"opencode"}])
+        self.assertIn("opencode pin caffeine/router: listed by model API", text)
 
     def test_opencode_accounts_are_one_line_each(self):
         grok = 'Default model: grok-4.7\nAvailable models:\n  * grok-4.7 (default)\n'
